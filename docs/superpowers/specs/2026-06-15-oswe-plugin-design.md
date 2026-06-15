@@ -50,7 +50,8 @@ claude-oswe/
 │       ├── scripts/
 │       │   ├── validate-output.mjs             # CLI : parse une réponse + valide via validators.mjs
 │       │   ├── validators.mjs                  # AJV standalone PRÉCOMPILÉ (autonome, en-tête licence MIT ajv)
-│       │   └── build-validators.mjs            # (dev) régénère validators.mjs depuis schemas/
+│       │   ├── build-validators.mjs            # (dev) régénère validators.mjs depuis schemas/
+│       │   └── package.json                    # (dev) manifeste devDependencies (ajv, ajv-cli) pour régénérer
 │       └── references/
 │           ├── php.md   ├── node.md   ├── python.md   ├── java.md   └── dotnet.md
 ├── test-fixtures/
@@ -73,12 +74,15 @@ claude-oswe/
 - **`skills/audit/scripts/`** — **stratégie de dépendance décidée** : pas de `vendor/` opaque, mais un
   **bundle AJV standalone précompilé** : `build-validators.mjs` (dev only) compile les schémas en
   **`validators.mjs` autonome** (validateurs précompilés, **aucune dépendance runtime**), committé
-  **avec l'en-tête de licence MIT d'ajv**. `validate-output.mjs` parse une réponse d'agent/une chaîne
-  et appelle ces validateurs → `valid` / liste d'erreurs. **Si Node indisponible**, l'orchestrateur
-  fait une **validation structurelle de repli** et **signale la garantie réduite** dans la Couverture.
+  **avec l'en-tête de licence MIT d'ajv**. Un **`scripts/package.json` (dev)** déclare les
+  `devDependencies` (`ajv`, `ajv-cli`) nécessaires pour **régénérer** `validators.mjs` — la chaîne de
+  build est ainsi reproductible et non opaque. `validate-output.mjs` parse une réponse d'agent/une
+  chaîne et appelle ces validateurs → `valid` / liste d'erreurs. **Si Node indisponible**,
+  l'orchestrateur fait une **validation structurelle de repli** et **signale la garantie réduite**
+  dans la Couverture.
 - **`agents/oswe-analyzer.md`** — analyse **une partition**, renvoie l'**enveloppe §6.1** en
   **JSON brut uniquement (sans bloc Markdown ni texte hors JSON)**. `tools: Read, Grep, Glob`.
-- **`agents/oswe-verifier.md`** — vérificateur indépendant, renvoie l'**enveloppe §6.4** (« JSON brut »),
+- **`agents/oswe-verifier.md`** — vérificateur indépendant, renvoie l'**enveloppe §6.3** (« JSON brut »),
   read-only.
 
 ## 4. Flux d'exécution (ordre strict)
@@ -130,6 +134,10 @@ claude-oswe/
 
 `{ partition_id, status: "ok"|"partial"|"error", findings: Finding[], coverage: { analyzed: string[], skipped: [{ path, reason }] } }`
 
+> **Invariant analyseur** : dans cette enveloppe, chaque finding **doit** porter
+> `verification_status: "not-requested"` (valeur `const` au niveau de l'enveloppe analyseur) — la
+> vérification n'a pas encore eu lieu. Les autres valeurs n'apparaissent qu'après §4.6.
+
 **Finding** (`finding.schema.json`) — champs :
 - `finding_id` : **deux formats admis** — partition-scopé `^.+-F\d{3,}$` (sortie analyseur) **ou**
   canonique `^OSWE-\d+$` (après agrégation). Le schéma autorise explicitement les deux.
@@ -149,6 +157,10 @@ claude-oswe/
 ordre d'exploitation), `transitions[] { from, to, how, evidence[] }`,
 `final_impact` (`unauth-rce|auth-rce|account-takeover|data-exfiltration|...`),
 `severity`, `confidence`, **`verification_status` (`not-requested|accepted|downgraded|rejected`)**.
+
+> **Invariant Critique** (encodé en JSON Schema, `if/then`) : `severity: "Critique"` **implique**
+> `verification_status: "accepted"` **ET** `confidence: "preuve statique forte"` **ET**
+> `final_impact: "unauth-rce"`. Une chaîne ne peut être Critique sans satisfaire les trois.
 
 ### 6.3 Enveloppe vérificateur (`verifier-response.schema.json`)
 
