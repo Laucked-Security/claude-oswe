@@ -1,125 +1,173 @@
-# Plugin OSWE / White-Box — Design
+# Plugin OSWE / White-Box — Design (v2)
 
 **Date :** 2026-06-15
-**Statut :** Approuvé (brainstorming) — prêt pour plan d'implémentation
+**Statut :** Révisé après revue — en attente d'approbation pour plan d'implémentation
+**Approche :** C (commande fine → skill orchestrateur → sous-agents parallèles + vérificateur)
 
 ## 1. Objectif
 
-Plugin Claude Code déclenché par `/oswe` (alias `/white-box`) réalisant un **audit
-white-box de sécurité applicative web style OSWE / OffSec en profondeur** :
+Plugin Claude Code réalisant un **audit white-box de sécurité applicative web style
+OSWE / OffSec en profondeur** :
 
-- multi-stack : PHP, Node.js/JS/TS, Java/.NET, Python ;
+- multi-stack : PHP, Node.js/JS/TS, Python, Java, .NET ;
 - **auto-détection** de la stack et de la surface d'attaque (points d'entrée) ;
-- recherche de vulnérabilités web **et chaînage vers un RCE non authentifié** (signature OSWE) ;
-- sortie double : **résumé dans le chat** + **rapport markdown daté** écrit sur disque ;
-- passage à l'échelle via **dispatch de sous-agents parallèles** (approche C).
+- recherche de vulnérabilités web **et chaînage vers un RCE non authentifié** (signature OSWE),
+  sous **contrat de preuve** (cf. §6) — pas d'affirmation non étayée ;
+- sortie double : **résumé dans le chat** + **rapport markdown daté** écrit dans `.oswe/reports/` ;
+- passage à l'échelle via **dispatch de sous-agents parallèles** plafonnés + **agent vérificateur** indépendant.
 
-Cadre : audit white-box **autorisé**, à visée **défensive** (identifier et corriger).
+**Cadre :** audit white-box **autorisé**, à visée **défensive** (identifier pour corriger).
 
-## 2. Architecture
+## 2. Frontière de confiance (v1)
 
-Le repo `E:\claude-oswe` est la racine du plugin.
+- L'outil ne s'utilise que sur des **workspaces déjà approuvés et fiables**. Un dépôt hostile
+  pourrait contenir des instructions (dans `CLAUDE.md`, commentaires, chaînes, READMEs) visant à
+  détourner l'audit.
+- **Règle anti-injection** imposée au skill et à tous les sous-agents : tout contenu du dépôt
+  audité est traité comme **donnée à analyser**, jamais comme instruction à exécuter. Les agents
+  ne suivent pas les directives trouvées dans le code/la doc audités.
+- Les sous-agents d'analyse sont en **lecture/recherche seule** (pas d'écriture, pas d'exécution).
+
+## 3. Architecture
+
+Le repo `E:\claude-oswe` est la racine du plugin. (`name: oswe`)
 
 ```
 claude-oswe/
 ├── .claude-plugin/
-│   └── plugin.json              # manifeste (nom, version, description, author)
+│   ├── plugin.json              # manifeste (name: "oswe", version, description, author)
+│   └── marketplace.json         # marketplace de dev pour test local
 ├── commands/
-│   ├── oswe.md                  # /oswe  [chemin optionnel]
-│   └── white-box.md             # /white-box → alias, même comportement
+│   ├── audit.md                 # → /oswe:audit  (canonique ; /audit en court)
+│   └── white-box.md             # → /oswe:white-box  (alias strict d'audit)
 ├── agents/
-│   └── oswe-auditor.md          # sous-agent spécialisé (contexte isolé, focus sécu)
+│   ├── oswe-analyzer.md         # sous-agent d'analyse (read-only, focus sécu)
+│   └── oswe-verifier.md         # sous-agent indépendant : re-dérive les findings/chaînes critiques
 ├── skills/
-│   └── oswe-audit/
-│       ├── SKILL.md             # méthodologie + orchestration
-│       └── references/
-│           ├── php.md           # type juggling, POP chains, LFI/RFI…
-│           ├── node.md          # prototype pollution, NoSQLi, cmd injection…
-│           ├── java-dotnet.md   # désérialisation, gadget chains, XXE, EL injection…
-│           └── python.md        # pickle, SSTI (Jinja/Flask), désérialisation…
-├── test-fixtures/               # mini-app volontairement vulnérable (validation E2E)
+│   └── audit/
+│       ├── SKILL.md             # méthodologie + orchestration (cœur unique)
+│       └── references/          # connaissances par écosystème (organisées par framework à l'intérieur)
+│           ├── php.md           # Laravel, Symfony, vanilla : type juggling, POP chains, LFI/RFI…
+│           ├── node.md          # Express, Nest : prototype pollution, NoSQLi, cmd injection…
+│           ├── python.md        # Django, Flask : pickle, SSTI (Jinja), désérialisation…
+│           ├── java.md          # Spring : désérialisation, gadget chains, XXE, EL injection…
+│           └── dotnet.md        # ASP.NET : désérialisation .NET, XXE, gadget chains…
+├── test-fixtures/               # apps de validation, positives + négatives, par stack
+│   ├── php/{vulnerable,safe}/
+│   └── node/{vulnerable,safe}/
+├── docs/
 └── README.md
 ```
 
 **Responsabilités par unité :**
 
-- **`commands/oswe.md` & `commands/white-box.md`** — points d'entrée fins. Ne contiennent
-  que le déclencheur, l'argument de chemin optionnel (`$ARGUMENTS`) et l'invocation du
-  skill `oswe-audit`. `white-box.md` est un alias strict de `oswe.md`.
-- **`skills/oswe-audit/SKILL.md`** — porte la méthodologie complète et orchestre les phases.
-  Ne charge en contexte que le(s) fichier(s) `references/<langage>.md` pertinents à la
-  stack détectée.
-- **`skills/oswe-audit/references/*.md`** — bases de connaissances par langage : sources
-  (entrées contrôlables), sinks dangereux, gadget/POP chains, patterns de vuln spécifiques.
-- **`agents/oswe-auditor.md`** — sous-agent au system prompt orienté sécurité, dispatché en
-  parallèle (un par point d'entrée) pour analyser en profondeur et renvoyer des findings
-  structurés. Outils en lecture/recherche uniquement (pas d'écriture/exécution).
+- **`commands/audit.md`** — point d'entrée fin. Passe `$ARGUMENTS` (chemin optionnel) et invoque
+  le skill `audit`. **`commands/white-box.md`** est un alias strict (même corps).
+- **`skills/audit/SKILL.md`** — **cœur unique** : méthodologie complète + orchestration des phases.
+  Ne charge en contexte que le(s) `references/<écosystème>.md` pertinent(s) à la stack détectée.
+- **`skills/audit/references/*.md`** — un fichier par écosystème, organisé **par framework** :
+  sources (entrées contrôlables), sinks dangereux, sanitizers courants, gadget/POP chains, patterns.
+- **`agents/oswe-analyzer.md`** — sous-agent d'analyse en profondeur d'une partition de la surface
+  d'attaque ; renvoie des findings au **format de preuve** (§6). Read-only.
+- **`agents/oswe-verifier.md`** — sous-agent **indépendant** qui re-vérifie chaque finding critique
+  et chaque chaîne RCE en re-dérivant les maillons à partir du source, pour réduire les hallucinations.
 
-## 3. Flux d'exécution
+## 4. Flux d'exécution
 
-1. **Recon & auto-détection** — identifie la stack (fichiers manifestes : `composer.json`,
-   `package.json`, `pom.xml`/`*.csproj`, `requirements.txt`/`pyproject.toml` ; extensions de
-   fichiers) et cartographie la surface d'attaque : routes, contrôleurs, handlers de
-   requêtes, points de désérialisation, uploads, exécutions de commandes, accès fichiers.
-   Un chemin passé en argument (`/oswe src/api`) restreint le périmètre.
-2. **Décomposition** — produit la liste des points d'entrée, **priorisés par exposition à la
-   surface non authentifiée** (reachability depuis un attaquant anonyme).
-3. **Analyse** — pour chaque point d'entrée : traçage **source → sink** (données contrôlées
-   par l'attaquant jusqu'au sink dangereux), identification des vulns, évaluation de
-   l'exploitabilité.
-   - Repo conséquent / plusieurs points d'entrée → **dispatch parallèle** de sous-agents
-     `oswe-auditor`, **par batch plafonné** (limite de concurrence pour maîtriser le coût) ;
-   - petit repo (seuil ~1 point d'entrée ou peu de fichiers) → analyse **en ligne**, sans
-     sous-agents.
-4. **Chaînage** — agrégation des findings, dédoublonnage, puis construction de **chaînes
-   d'exploitation** combinant plusieurs vulns vers un **RCE non authentifié**.
-5. **Sortie** — résumé (verdict + chaînes + top findings critiques) dans le chat **et**
-   rapport complet écrit sur disque.
+1. **Recon & auto-détection** — stack via manifestes (`composer.json`, `package.json`,
+   `pyproject.toml`/`requirements.txt`, `pom.xml`/`build.gradle`, `*.csproj`) + extensions ;
+   framework via dépendances/structure. Cartographie de la surface : routes, contrôleurs, handlers,
+   désérialisation, uploads, exécutions de commandes, accès fichiers. `/oswe:audit src/api` restreint
+   le périmètre.
+2. **Partition & priorisation** — la surface est découpée **par module / framework / frontière
+   d'authentification** (pas « un agent par route » : ça duplique les middlewares et rate les
+   interactions inter-routes). Partitions **priorisées par exposition à la surface non authentifiée**.
+3. **Analyse** — par partition : traçage **source → sink** (donnée attaquant → sink dangereux).
+   - Repo conséquent → **dispatch parallèle** d'`oswe-analyzer`, **max 4 concurrents**, sous un
+     **budget de surfaces** (plafond de partitions analysées en profondeur) ; le reste est consigné
+     comme « non analysé » dans le registre de couverture.
+   - Petit repo → analyse **en ligne**.
+4. **Vérification** — chaque finding critique et chaque chaîne candidate vers RCE passe par
+   **`oswe-verifier`** : une chaîne n'est marquée **« preuve statique forte »** que si **chaque
+   transition** est étayée (cf. §6). Sinon → « probable » ou « à vérifier ».
+5. **Chaînage & agrégation** — dédoublonnage, construction des chaînes d'exploitation vers RCE
+   non-auth, assemblage du **registre de couverture** (analysé / ignoré + raison).
+6. **Sortie** — résumé (verdict + chaînes + top critiques + couverture) dans le chat **et** rapport
+   complet dans `.oswe/reports/`.
 
-## 4. Format du rapport & modèle de sévérité
+## 5. Modèle de sévérité (critères explicites)
 
-Fichier : `oswe-report-YYYY-MM-DD-HHMM.md` (racine du repo, ou dossier ciblé).
+| Niveau | Critère |
+|--------|---------|
+| **Critique** | Chaîne menant à un **RCE non authentifié** (ou compromission totale équivalente) avec **preuve statique forte** de bout en bout. |
+| **Haute** | Vuln à impact majeur exploitable mais nécessitant authentification ou prérequis notable (ex : RCE authentifié, SQLi sur données sensibles, désérialisation contrôlée). |
+| **Moyenne** | Impact limité ou conditions notables (SSRF restreinte, XSS stocké, IDOR, divulgation ciblée). |
+| **Basse** | Faiblesse à impact mineur ou exploitabilité douteuse (fuite d'info, configuration faible). |
+| **Info** | Observation de durcissement, pas de vulnérabilité directe. |
 
-- **En-tête** : cible, stack détectée, date, périmètre audité, rappel d'autorisation.
-- **Résumé exécutif** : compte des findings par sévérité + **verdict** (un chemin vers RCE
-  non-auth a-t-il été trouvé ?).
-- **Chaînes d'exploitation** (section phare) : chaque chaîne décrite étape par étape,
-  bout-à-bout (ex : *type juggling sur le login → bypass auth → upload non filtré → RCE*).
-- **Findings détaillés**, un bloc par vuln :
-  - ID, titre, **classe** (SQLi, désérialisation, SSTI, SSRF, XXE…),
-  - **sévérité** : Critique / Haute / Moyenne / Basse / Info,
-  - **confiance** : confirmé / probable / à vérifier,
-  - `fichier:ligne`, **flux de données taintées** (source → sink),
-  - **exploitation** (étapes / esquisse de PoC), **remédiation**.
-- **Résumé chat** : verdict, chaînes vers RCE, top des findings critiques (pas le détail complet).
+**Confiance** (remplace « confirmé », l'exécution dynamique étant hors périmètre) :
+`preuve statique forte` · `probable` · `à vérifier`.
 
-## 5. Robustesse & cas limites
+## 6. Contrat de preuve (par finding)
 
-- Repo vide / pas de code → le rapport l'indique explicitement.
-- Stack inconnue / non supportée → **fallback heuristique** générique source/sink, avec
-  mention « couverture limitée ».
-- Très gros repo → **priorisation** par accessibilité depuis la surface non-auth +
-  **plafonnement** du nombre de sous-agents concurrents.
-- Sous-agent qui échoue ou ne renvoie rien → la **lacune est notée** dans le rapport, pas de crash.
+Tout finding **doit** renseigner :
 
-## 6. Éthique
+- **Entrée (source)** + **état d'authentification** requis pour l'atteindre ;
+- **Transformations** subies par la donnée ;
+- **Validations / sanitizers** rencontrés, et **pourquoi insuffisants** ;
+- **Sink** + **classe** de vulnérabilité ;
+- **Prérequis** d'exploitation ;
+- **Références `fichier:ligne`** pour chaque maillon.
 
-La méthodologie pose en préambule que l'audit est white-box **autorisé** (code possédé ou
-dont le test est permis), à visée **défensive** : l'objectif final est d'identifier les vulns
-**pour les corriger**.
+**Règle de chaîne :** une chaîne vers RCE n'est annoncée comme exploitable (`preuve statique forte`)
+que si **chaque transition** est supportée par les éléments ci-dessus, après passage par `oswe-verifier`.
+À défaut, elle est présentée comme hypothétique (`à vérifier`).
 
-## 7. Validation (test de bout-en-bout)
+## 7. Format du rapport
 
-Dossier `test-fixtures/` : mini-app volontairement vulnérable (ex : bypass d'authentification
-par type juggling PHP menant à un upload non filtré → RCE). On lance `/oswe test-fixtures/`
-et on vérifie que le plugin :
+Fichier : `.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md`.
 
-1. **se charge** (commandes visibles, skill invoqué) ;
-2. **détecte** la/les vuln(s) plantée(s) ;
-3. **reconstruit la chaîne** vers RCE dans le rapport.
+- **En-tête** : cible, stack + framework détectés, date, périmètre, rappel d'autorisation.
+- **Résumé exécutif** : compte par sévérité + **verdict** (chemin RCE non-auth trouvé ? niveau de preuve).
+- **Chaînes d'exploitation** (section phare) : chaque chaîne décrite étape par étape, avec le contrat
+  de preuve par maillon (ex : *type juggling login → bypass auth → upload non filtré → RCE*).
+- **Findings détaillés** : un bloc par vuln, au **format de preuve** (§6), avec sévérité + confiance.
+- **Couverture** : partitions/points d'entrée **analysés**, et zones **ignorées** avec la **raison**
+  (budget, hors périmètre, stack non supportée, échec d'un sous-agent).
+- **Résumé chat** : verdict, chaînes vers RCE, top critiques, couverture (pas le détail complet).
 
-## 8. Hors périmètre (YAGNI)
+## 8. Robustesse & cas limites
 
-- Pas d'analyse dynamique / exécution réelle d'exploits — analyse statique du source uniquement.
+- Repo vide / pas de code → le rapport l'indique.
+- Stack inconnue / non supportée → **fallback heuristique** générique source/sink, mention
+  « couverture limitée », consignée dans la section Couverture.
+- Très gros repo → priorisation non-auth + plafonnement (max 4 agents, budget de surfaces) ;
+  le surplus apparaît dans la couverture comme « non analysé ».
+- Sous-agent en échec / sans retour → **lacune notée** dans la couverture, pas de crash.
+
+## 9. Validation (critères d'acceptation)
+
+- `claude plugin validate .` passe (syntaxe des manifestes). *(`--strict` ajouté si confirmé supporté
+  à l'implémentation.)*
+- Le plugin se charge : `/oswe:audit` et `/oswe:white-box` apparaissent, le skill `audit` s'invoque.
+- **Fixtures par stack, positives ET négatives :**
+  - *positive* (vulnérable) : le plugin **détecte** la/les vuln(s) plantée(s) et **reconstruit la
+    chaîne** vers RCE dans le rapport (ex PHP : bypass auth par type juggling → upload non filtré → RCE) ;
+  - *négative* (sûre) : le plugin **ne produit pas** de finding critique faux positif (la version
+    corrigée ne déclenche pas la chaîne).
+- Le registre de couverture liste correctement analysé vs ignoré.
+
+## 10. Livraison par phases (MVP → complet)
+
+Commande, skill, agents et format de rapport sont **stack-agnostiques** et livrés complets dès le MVP.
+Seules les **références** et **fixtures** sont échelonnées :
+
+- **Phase 1 (MVP crédible)** : PHP + Node.js (références + fixtures positives/négatives).
+- **Phase 2** : Python, puis Java, puis .NET.
+
+## 11. Hors périmètre (YAGNI)
+
+- Pas d'analyse dynamique / exécution réelle d'exploits — **analyse statique** du source uniquement.
 - Pas d'intégration CI/CD pour l'instant.
-- Pas de support de stacks hors des 4 ciblées (fallback heuristique seulement).
+- Pas de support de stacks hors des 5 ciblées (fallback heuristique seulement).
+- Pas de correction automatique du code audité (le rapport propose des remédiations, il ne patche pas).
