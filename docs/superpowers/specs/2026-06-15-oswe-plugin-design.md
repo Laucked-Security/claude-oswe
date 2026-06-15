@@ -77,16 +77,17 @@ claude-oswe/
 - **`skills/audit/SKILL.md`** — cœur : déclencheur, méthodologie, orchestration (§4), agrégation,
   **appel du validateur** sur chaque réponse d'agent et sur les chaînes construites (§6.5).
 - **`skills/audit/schemas/*.json`** — JSON Schema **faisant foi** (exemples de §6 illustratifs).
-- **`skills/audit/scripts/`** — **stratégie de dépendance décidée** : pas de `vendor/` opaque, mais un
-  **bundle AJV standalone précompilé** : `build-validators.mjs` (dev only) compile les schémas en
-  **`validators.mjs` autonome** (validateurs précompilés, **aucune dépendance runtime**), committé
-  **avec l'en-tête de licence MIT d'ajv**. Un **`scripts/package.json` (dev)** déclare les
-  `devDependencies` (`ajv`, `esbuild`) nécessaires pour **régénérer** `validators.mjs` (compilation
-  standalone AJV puis bundle esbuild) — la chaîne de build est ainsi reproductible et non opaque. `validate-output.mjs` parse une réponse d'agent/une
-  chaîne et appelle ces validateurs → `valid` / liste d'erreurs. **Node.js (≥ 20) est un prérequis
-  dur** : la confinement, la validation et l'application des verdicts reposent toutes sur des helpers
-  Node sans repli cohérent. L'orchestrateur **vérifie `node --version` au démarrage** et **abandonne**
-  si Node est absent ou trop ancien (pas d'audit dégradé en mode texte).
+- **`skills/audit/scripts/`** — **validateur autonome, zéro dépendance runtime** : `build-validators.mjs`
+  (dev only) génère le code **standalone AJV** des schémas puis **inline le seul helper runtime
+  référencé** (`ucs2length`) → `validators.mjs` est un fichier ESM sans aucun `import`/`require`, qui
+  tourne **sans `node_modules`** (vérifié : la suite de tests passe avec `node_modules` retiré). Committé
+  **avec l'en-tête de licence MIT d'ajv**. Pas de bundler (pas d'esbuild). Le **`scripts/package.json`
+  (dev)** déclare une seule `devDependency` (`ajv`), nécessaire **uniquement pour régénérer**
+  `validators.mjs` — pas à l'exécution. `validate-output.mjs` parse une réponse d'agent/une chaîne et
+  appelle ces validateurs → `valid` / liste d'erreurs. **Node.js (≥ 20) est un prérequis dur** : le
+  confinement, la validation et l'application des verdicts reposent tous sur des helpers Node sans repli
+  cohérent. L'orchestrateur **vérifie `node --version` au démarrage** et **abandonne** si Node est
+  absent ou trop ancien (pas d'audit dégradé en mode texte).
 - **`agents/oswe-analyzer.md`** — analyse **une partition**, renvoie l'**enveloppe §6.1** en
   **JSON brut uniquement (sans bloc Markdown ni texte hors JSON)**. `tools: Read, Grep, Glob`.
 - **`agents/oswe-verifier.md`** — vérificateur indépendant, renvoie l'**enveloppe §6.3** (« JSON brut »),

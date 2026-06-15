@@ -9,7 +9,6 @@
     "test": "node --test"
   },
   "devDependencies": {
-    "ajv": "^8.17.1",
-    "esbuild": "^0.24.0"
+    "ajv": "^8.17.1"
   }
 }
