@@ -1,0 +1,5 @@
+{
+  "name": "oswe-fixtures/php-vulnerable",
+  "description": "Intentionally vulnerable PHP app for OSWE auditor validation. DO NOT DEPLOY.",
+  "require": { "php": ">=7.0" }
+}
