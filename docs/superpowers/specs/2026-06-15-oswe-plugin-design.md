@@ -1,9 +1,9 @@
-# Plugin OSWE / White-Box — Design (v7)
+# Plugin OSWE / White-Box — Design (v7.1)
 
 **Date :** 2026-06-15
-**Statut :** Révisé (6e tour) — en attente d'approbation pour plan d'implémentation
+**Statut :** Approuvé — plan d'implémentation détaillé dans `docs/superpowers/plans/`
 **Approche :** C (skill orchestrateur → sous-agents analyseurs parallèles + vérificateur)
-**Cible Claude Code :** 2.1.177+
+**Cible Claude Code :** 2.1.177+ · **Node.js ≥ 20** (prérequis dur)
 
 ## 1. Objectif
 
@@ -75,8 +75,8 @@ claude-oswe/
   **bundle AJV standalone précompilé** : `build-validators.mjs` (dev only) compile les schémas en
   **`validators.mjs` autonome** (validateurs précompilés, **aucune dépendance runtime**), committé
   **avec l'en-tête de licence MIT d'ajv**. Un **`scripts/package.json` (dev)** déclare les
-  `devDependencies` (`ajv`, `ajv-cli`) nécessaires pour **régénérer** `validators.mjs` — la chaîne de
-  build est ainsi reproductible et non opaque. `validate-output.mjs` parse une réponse d'agent/une
+  `devDependencies` (`ajv`, `esbuild`) nécessaires pour **régénérer** `validators.mjs` (compilation
+  standalone AJV puis bundle esbuild) — la chaîne de build est ainsi reproductible et non opaque. `validate-output.mjs` parse une réponse d'agent/une
   chaîne et appelle ces validateurs → `valid` / liste d'erreurs. **Node.js (≥ 20) est un prérequis
   dur** : la confinement, la validation et l'application des verdicts reposent toutes sur des helpers
   Node sans repli cohérent. L'orchestrateur **vérifie `node --version` au démarrage** et **abandonne**

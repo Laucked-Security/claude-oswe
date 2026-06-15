@@ -1422,6 +1422,13 @@ test("validateBoundBatch: missing response.verdicts → orchestrator-input (defe
   assert.equal(r.error_kind, "orchestrator-input");
 });
 
+test("validateBoundBatch: missing/empty batch_id → orchestrator-input", () => {
+  const b = { expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }] } };
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /non-empty batch_id/);
+});
+
 test("validateBoundBatch: unknown status → verifier-output (not treated as partial)", () => {
   const b = fbatch("done", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
   const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
@@ -1497,6 +1504,16 @@ test("validate-batch.mjs CLI exits 0/1/2 (spawnSync)", () => {
   }));
   assert.equal(spawnSync(process.execPath, [VB, "--file", badIn]).status, 1); // unexpected target
 
+  // Same id preflight as applyVerdicts: a duplicate canonical finding_id is rejected, not merged.
+  const dupIn = join(dir, "dup.json");
+  writeFileSync(dupIn, JSON.stringify({
+    findings: [finding("OSWE-1"), finding("OSWE-1")], chains: [],
+    batch: { batch_id: "B1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }] } }
+  }));
+  const dup = spawnSync(process.execPath, [VB, "--file", dupIn], { encoding: "utf8" });
+  assert.equal(dup.status, 1);
+  assert.match(dup.stdout, /duplicate canonical finding_id/);
+
   assert.equal(spawnSync(process.execPath, [VB]).status, 2); // missing --file
 });
 ```
@@ -1558,6 +1575,17 @@ function topologyValid(c) {
 
 const _tkey = (tt, tid) => `${tt}:${tid}`;
 
+// Shared id preflight: canonical finding_id / chain_id must be unique (a Map would silently
+// overwrite a duplicate, making source_finding_ids / verdict targeting ambiguous). Used by BOTH
+// applyVerdicts and the validate-batch CLI so they enforce an identical contract.
+export function checkCanonicalIds(findings, chains) {
+  const fset = new Set();
+  for (const f of findings) { if (fset.has(f.finding_id)) return { ok: false, error: "duplicate canonical finding_id in input", error_kind: "orchestrator-input" }; fset.add(f.finding_id); }
+  const cset = new Set();
+  for (const c of chains) { if (cset.has(c.chain_id)) return { ok: false, error: "duplicate chain_id in input", error_kind: "orchestrator-input" }; cset.add(c.chain_id); }
+  return { ok: true };
+}
+
 // The verifier's transition_verdicts must be the EXACT set of the chain's transitions (no missing,
 // extra, or duplicated {from,to}) — required for EVERY chain verdict, including 'rejected'.
 function exactTransitionMatch(c, tv) {
@@ -1572,13 +1600,15 @@ function exactTransitionMatch(c, tv) {
 // by applyVerdicts (phase 6b backstop). Pure; `findingById`/`chainById` are Maps of the FULL objects
 // so it can also catch transition mismatches/contradictions and finding downgrade-raises pre-retry.
 // Returns { ok:true } or { ok:false, error, error_kind }. NOTE: the chain downgrade ceiling depends on
-// member verdicts from OTHER batches, so it stays in applyVerdicts (6b). Cross-batch checks (duplicate
-// batch_id, overlapping expected_targets) and completeness are the caller's job (they need all batches).
+// member verdicts from OTHER batches, so it is checked by the full applyVerdicts (run as §6's GLOBAL
+// preflight, which names error_batch_id and is retried there). Cross-batch checks (duplicate batch_id,
+// overlapping expected_targets) and completeness are also the caller's job (they need all batches).
 export function validateBoundBatch(batch, { findingById, chainById }) {
   const bad = (error, error_kind) => ({ ok: false, error, error_kind });
   // Defensive shape validation (the wrapper is orchestrator-built; a malformed one is our bug).
   if (!batch || typeof batch !== "object") return bad("batch is not an object", "orchestrator-input");
   const bid = batch.batch_id;
+  if (typeof bid !== "string" || bid.length === 0) return bad("batch is missing a non-empty batch_id", "orchestrator-input");
   if (!Array.isArray(batch.expected_targets) || batch.expected_targets.length === 0) return bad(`batch ${bid} has no expected_targets`, "orchestrator-input");
   if (!batch.response || typeof batch.response !== "object" || !Array.isArray(batch.response.verdicts)) return bad(`batch ${bid} has no response.verdicts array`, "orchestrator-input");
   if (!["ok", "partial", "error"].includes(batch.response.status)) return bad(`batch ${bid} has invalid status ${batch.response.status}`, "verifier-output");
@@ -1627,11 +1657,10 @@ export function applyVerdicts({ findings, chains, batches }) {
   const fail = (error, error_kind, error_batch_id = null) =>
     ({ ok: false, error, error_kind, error_batch_id, findings, chains, gaps: [] });
 
+  const idCheck = checkCanonicalIds(findings, chains);
+  if (!idCheck.ok) return fail(idCheck.error, idCheck.error_kind);
   const findingById = new Map(findings.map((f) => [f.finding_id, f]));
   const chainById = new Map(chains.map((c) => [c.chain_id, c]));
-  // Duplicate canonical ids are an orchestrator bug (Map would silently overwrite).
-  if (findingById.size !== findings.length) return fail("duplicate canonical finding_id in input", "orchestrator-input");
-  if (chainById.size !== chains.length) return fail("duplicate chain_id in input", "orchestrator-input");
 
   const tkey = (tt, tid) => `${tt}:${tid}`;
 
@@ -1860,7 +1889,7 @@ Create `skills/audit/scripts/validate-batch.mjs`:
 //   exit 0 valid / 1 invalid (prints {ok:false,error,error_kind}) / 2 usage|IO.
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
-import { validateBoundBatch } from "./apply-verdicts.mjs";
+import { validateBoundBatch, checkCanonicalIds } from "./apply-verdicts.mjs";
 
 export function runCli(argv) {
   const fi = argv.indexOf("--file");
@@ -1868,8 +1897,12 @@ export function runCli(argv) {
   let input;
   try { input = JSON.parse(readFileSync(argv[fi + 1], "utf8")); }
   catch (e) { process.stderr.write("cannot read --file: " + e.message + "\n"); return 2; }
-  const findingById = new Map((input.findings || []).map((f) => [f.finding_id, f]));
-  const chainById = new Map((input.chains || []).map((c) => [c.chain_id, c]));
+  const findings = input.findings || [], chains = input.chains || [];
+  // Same id preflight applyVerdicts runs, so duplicate canonical ids aren't silently merged here.
+  const idCheck = checkCanonicalIds(findings, chains);
+  if (!idCheck.ok) { console.log(JSON.stringify(idCheck)); return 1; }
+  const findingById = new Map(findings.map((f) => [f.finding_id, f]));
+  const chainById = new Map(chains.map((c) => [c.chain_id, c]));
   const r = validateBoundBatch(input.batch, { findingById, chainById });
   console.log(JSON.stringify(r));
   return r.ok ? 0 : 1;
@@ -2466,18 +2499,30 @@ findings. **Validate each built chain** against `chain.schema.json`.
   `expected_targets`, (c) no duplicate verdict, (d) coverage matches `status`, **plus** transition
   mismatches/contradictions and finding downgrade-raises. A schema-valid response with any of these is
   **just as retryable** as a malformed one — do not defer it to 6b.
-- **This is the ONLY place retries happen** (do not also retry in 6b). Any response failing (a)–(d)
+- **Per-response retry** (do not also retry in 6b). Any response failing the per-batch check
   → **re-dispatch that batch once**. If it still fails, **keep the wrapper but replace its response
   with `{ "status": "error", "verdicts": [] }`** (preserving `batch_id` and `expected_targets`).
   **Do not delete the wrapper** — deleting it would also delete its `expected_targets`, and those
   targets would vanish without a coverage gap. With the neutralized response, every expected target
-  surfaces as a **gap**. (6b's `applyVerdicts` re-checks (a)–(d) as a backstop; reaching a
-  `verifier-output` error there means §6 missed a violation — neutralize per `error_batch_id`.)
+  surfaces as a **gap**.
+- **GLOBAL preflight + retry loop (this is where ALL remaining retries happen).** Some
+  `verifier-output` errors are only detectable across all batches — chiefly the **chain downgrade
+  ceiling** (it depends on member verdicts in other batches). So after the per-response checks, run
+  the **full `apply-verdicts.mjs` preflight** (the exact §6b invocation below) and inspect the result:
+  - `ok:false`, `error_kind: "verifier-output"` → `error_batch_id` names the offending batch:
+    **re-dispatch it once**; if it still fails, **neutralize it in place** (`{status:"error",verdicts:[]}`,
+    keep `batch_id`+`expected_targets`); **re-run the preflight**. Repeat until it no longer reports a
+    verifier-output error. This is what gives the chain-downgrade-ceiling violation its one retry.
+  - `ok:false`, `error_kind: "orchestrator-input"` → our own bug (§4/§5/§6 construction) — **stop and
+    fix it**, do not ship.
+  - `ok:true` → carry that settled result into §6b (no re-run needed).
 
 ### 6b. Apply verdicts → final severity (deterministic CLI)
-**Do not apply verdicts or decide Critique by hand.** Write a single JSON input
-`{ "findings": [...], "chains": [...], "batches": [...] }` (the bound wrappers from §6) to a literal
-temp path, then run the tested CLI (it cannot be imported as a tool — it is invoked as a process):
+**Do not apply verdicts or decide Critique by hand.** This is the **same `apply-verdicts.mjs`
+invocation** §6's preflight loop already settled — once that loop reached `ok:true`, reuse its `--out`
+result directly (no need to re-run). The invocation, for reference and for the preflight: write a
+single JSON input `{ "findings": [...], "chains": [...], "batches": [...] }` (the bound wrappers from
+§6) to a literal temp path and run the tested CLI (a process, not an importable tool):
 
 ```bash
 ( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"' EXIT
@@ -2501,14 +2546,11 @@ The CLI encodes the entire decision and returns `{ ok, error, error_kind, error_
   caps it below Critique), `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
 - a chain with **no verdict** stays **`not-requested`** (not rejected) and is added to `gaps`.
 
-Handle the result by **`error_kind`** (retries already happened in §6 — 6b does not re-dispatch):
-- **`ok === false` with `error_kind: "verifier-output"`** (a verifier protocol violation that slipped
-  through §6: coverage mismatch vs `status`, a verdict for an **unexpected** target, a duplicate
-  verdict, `status=error` carrying verdicts, or a downgrade that raises severity) → **`error_batch_id`
-  names the offending batch.** **Neutralize that batch in place** — set its response to
-  `{ "status": "error", "verdicts": [] }` (keep `batch_id` + `expected_targets`) — and re-run the CLI.
-  Its expected targets then surface as **`gaps`** (→ `not-requested`) in Coverage. Never delete the
-  wrapper (that would lose the gap) and never apply a contradictory batch.
+By the time you consume the result here, §6's preflight loop has already driven `applyVerdicts` to
+**`ok:true`** (every `verifier-output` error retried once then neutralized, every target surfacing as
+a gap). So in 6b you should only ever see `ok:true`. If you somehow see `ok:false`:
+- **`error_kind: "verifier-output"`** → §6's loop was skipped or exited early; go back and run the
+  preflight loop (retry the `error_batch_id` batch once, then neutralize) — do **not** silently apply.
 - **`ok === false` with `error_kind: "orchestrator-input"`** (duplicate canonical id, a chain
   referencing an unknown finding, **invalid chain topology**, a batch expecting an unknown target, or
   overlapping `expected_targets`) → this is **our own bug** (`error_batch_id` is null or points at the
