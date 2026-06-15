@@ -390,7 +390,7 @@ Create `skills/audit/scripts/package.json`:
   "description": "Dev-only toolchain to regenerate the self-contained validators.mjs from schemas/",
   "scripts": {
     "build": "node build-validators.mjs",
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "devDependencies": {
     "ajv": "^8.17.1",
@@ -561,7 +561,10 @@ const validCriticalChain = {
   chain_id: "CHAIN-1",
   entry_point: { file: "login.php", line: 1, route: "POST /login", auth: "unauthenticated" },
   finding_ids: ["OSWE-1", "OSWE-2"],
-  transitions: [{ from: "entry", to: "OSWE-1", how: "loose compare bypass", evidence: [{ file: "login.php", line: 15 }] }],
+  transitions: [
+    { from: "entry", to: "OSWE-1", how: "loose compare bypass", evidence: [{ file: "login.php", line: 15 }] },
+    { from: "OSWE-1", to: "OSWE-2", how: "upload web shell", evidence: [{ file: "upload.php", line: 8 }] }
+  ],
   final_impact: "unauth-rce",
   severity: "Critique",
   confidence: "preuve statique forte",
@@ -653,7 +656,7 @@ test("final-finding: not-requested still requires final fields", () => {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `( cd skills/audit/scripts && node --test test/ )`
+Run: `( cd skills/audit/scripts && node --test )`
 Expected: FAIL — the run errors because `../validate-output.mjs` does not exist yet (cannot find module). This is the point: the tests are written before the implementation.
 
 - [ ] **Step 3: Write the runtime validator to make the tests pass**
@@ -735,7 +738,7 @@ if (isMain()) {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `( cd skills/audit/scripts && node --test test/ )`
+Run: `( cd skills/audit/scripts && node --test )`
 Expected: all tests pass (`# pass <n>`, `# fail 0`). If any fail, fix the schema (Task 2) or the validator, rebuild (`npm run build`), and re-run — the schemas are the source of truth.
 
 - [ ] **Step 5: Commit**
@@ -852,11 +855,28 @@ export function confinePath(projectDir, arg) {
   return real;
 }
 
-// CLI: node confine-path.mjs <projectDir> [arg]  -> prints confined path (exit 0) or error (exit 1)
+// CLI: node confine-path.mjs --file <input.json>   input: { "projectDir": "...", "arg": "..."|null }
+//   Reads the path from a JSON file (not argv) so values containing quotes, $(), or backticks cannot
+//   be interpolated by the shell. Prints the confined real path (exit 0); error -> exit 1 (escape /
+//   nonexistent) or exit 2 (usage / IO).
 import { fileURLToPath } from "node:url";
+import { readFileSync as _readFileSync } from "node:fs";
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const args = process.argv.slice(2);
+  const fileIdx = args.indexOf("--file");
+  if (fileIdx === -1) {
+    process.stderr.write("usage: confine-path.mjs --file <input.json>\n");
+    process.exit(2);
+  }
+  let input;
   try {
-    process.stdout.write(confinePath(process.argv[2], process.argv[3]) + "\n");
+    input = JSON.parse(_readFileSync(args[fileIdx + 1], "utf8"));
+  } catch (e) {
+    process.stderr.write("cannot read --file: " + e.message + "\n");
+    process.exit(2);
+  }
+  try {
+    process.stdout.write(confinePath(input.projectDir, input.arg) + "\n");
   } catch (e) {
     process.stderr.write(String(e.message) + "\n");
     process.exit(1);
@@ -895,8 +915,14 @@ Create `skills/audit/scripts/test/apply-verdicts.test.mjs`:
 ```js
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { applyVerdicts } from "../apply-verdicts.mjs";
 
+const CLI = fileURLToPath(new URL("../apply-verdicts.mjs", import.meta.url));
 const loc = (file, line, symbol, kind) => ({ file, line, symbol, kind });
 
 // Findings/chains reaching applyVerdicts are POST-aggregation → canonical OSWE-* ids.
@@ -1072,6 +1098,63 @@ test("finding downgraded gets new final severity/confidence", () => {
   assert.equal(f.final_severity, "Moyenne");
   assert.equal(f.final_confidence, "probable");
 });
+
+test("a downgraded FINDING that raises severity is an error", () => {
+  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Haute", new_confidence: "preuve statique forte", justification: "x" }];
+  // provisional is Moyenne; "downgrading" to Haute is an increase -> reject the batch
+  const r = applyVerdicts({ findings: [finding("OSWE-1", "Moyenne")], chains: [], verifierResponses: vresp(v) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /raises severity/);
+});
+
+test("a chain with broken topology is rejected (OSWE-2 unconnected)", () => {
+  // transitions do NOT form entry->OSWE-1->OSWE-2 (second hop is entry->OSWE-2)
+  const c = chain({
+    transitions: [
+      { from: "entry", to: "OSWE-1", how: "x", evidence: [{ file: "a.php", line: 2 }] },
+      { from: "entry", to: "OSWE-2", how: "x", evidence: [{ file: "u.php", line: 4 }] }
+    ]
+  });
+  const v = {
+    target_type: "chain", target_id: "CHAIN-1", verdict: "accepted",
+    transition_verdicts: [
+      { from: "entry", to: "OSWE-1", verdict: "accepted", justification: "x" },
+      { from: "entry", to: "OSWE-2", verdict: "accepted", justification: "x" }
+    ],
+    justification: "x"
+  };
+  const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp([...acceptBoth, v]) });
+  assert.equal(r.chains[0].verification_status, "rejected");
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("a downgraded CHAIN that raises severity is an error", () => {
+  // authenticated entry + members Moyenne -> natural severity is Moyenne; downgrading to Haute increases.
+  const findingsM = [finding("OSWE-1", "Moyenne"), finding("OSWE-2", "Moyenne")];
+  const c = chain({ entry_point: { file: "a.php", line: 1, route: "POST /x", auth: "authenticated" } });
+  const dnChain = { ...acceptChain, verdict: "downgraded", new_severity: "Haute", new_confidence: "probable" };
+  const r = applyVerdicts({ findings: findingsM, chains: [c], verifierResponses: vresp([...acceptBoth, dnChain]) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /raises severity/);
+});
+
+test("CLI exits 0/1/2 (spawnSync)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oswe-cli-"));
+  const inOk = join(dir, "ok.json");
+  const out = join(dir, "out.json");
+  writeFileSync(inOk, JSON.stringify({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp([{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }]) }));
+  const ok = spawnSync(process.execPath, [CLI, "--file", inOk, "--out", out]);
+  assert.equal(ok.status, 0);
+  assert.equal(JSON.parse(readFileSync(out, "utf8")).ok, true);
+
+  const inBad = join(dir, "bad.json");
+  writeFileSync(inBad, JSON.stringify({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp([{ target_type: "finding", target_id: "OSWE-9", verdict: "accepted", justification: "x" }]) }));
+  const bad = spawnSync(process.execPath, [CLI, "--file", inBad, "--out", out]);
+  assert.equal(bad.status, 1); // result.ok === false
+
+  const usage = spawnSync(process.execPath, [CLI, "--file", inOk]); // missing --out
+  assert.equal(usage.status, 2);
+});
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1093,7 +1176,12 @@ Create `skills/audit/scripts/apply-verdicts.mjs`:
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const SEV_ORDER = ["Info", "Basse", "Moyenne", "Haute"]; // Critique is chain-only, handled apart.
+// Deterministic ordering so a "downgrade" can never RAISE severity or confidence.
+const SEV_INDEX = { Info: 0, Basse: 1, Moyenne: 2, Haute: 3, Critique: 4 };
+const SEV_BY_INDEX = ["Info", "Basse", "Moyenne", "Haute", "Critique"];
+const CONF_INDEX = { "à vérifier": 0, "probable": 1, "preuve statique forte": 2 };
+const notIncrease = (origSev, origConf, newSev, newConf) =>
+  SEV_INDEX[newSev] <= SEV_INDEX[origSev] && CONF_INDEX[newConf] <= CONF_INDEX[origConf];
 
 function collectVerdicts(verifierResponses) {
   const verdicts = [];
@@ -1110,31 +1198,52 @@ function collectVerdicts(verifierResponses) {
   return { verdicts };
 }
 
+// A chain's transitions must form the exact linear path entry -> f0 -> f1 -> ... -> fN,
+// with exactly finding_ids.length transitions. Anything else is a malformed chain.
+function topologyValid(c) {
+  const ids = c.finding_ids;
+  if (c.transitions.length !== ids.length) return false;
+  for (let i = 0; i < ids.length; i++) {
+    const expectedFrom = i === 0 ? "entry" : ids[i - 1];
+    const t = c.transitions[i];
+    if (t.from !== expectedFrom || t.to !== ids[i]) return false;
+  }
+  return true;
+}
+
 export function applyVerdicts({ findings, chains, verifierResponses }) {
   const fail = (error) => ({ ok: false, error, findings, chains, gaps: [] });
 
   const collected = collectVerdicts(verifierResponses);
   if (collected.error) return fail(collected.error);
 
-  const findingIds = new Set(findings.map((f) => f.finding_id));
+  const findingById = new Map(findings.map((f) => [f.finding_id, f]));
   const chainIds = new Set(chains.map((c) => c.chain_id));
 
   const findingVerdict = new Map();
   const chainVerdict = new Map();
   for (const v of collected.verdicts) {
     if (v.target_type === "finding") {
-      if (!findingIds.has(v.target_id)) return fail(`verdict targets unknown finding ${v.target_id}`);
+      if (!findingById.has(v.target_id)) return fail(`verdict targets unknown finding ${v.target_id}`);
       findingVerdict.set(v.target_id, v);
     } else {
       if (!chainIds.has(v.target_id)) return fail(`verdict targets unknown chain ${v.target_id}`);
       chainVerdict.set(v.target_id, v);
     }
   }
-
-  // Every chain must reference findings that actually exist.
   for (const c of chains) {
     for (const id of c.finding_ids) {
-      if (!findingIds.has(id)) return fail(`chain ${c.chain_id} references unknown finding ${id}`);
+      if (!findingById.has(id)) return fail(`chain ${c.chain_id} references unknown finding ${id}`);
+    }
+  }
+
+  // Reject contradictory FINDING downgrades that raise severity/confidence.
+  for (const [id, v] of findingVerdict) {
+    if (v.verdict === "downgraded") {
+      const f = findingById.get(id);
+      if (!notIncrease(f.provisional_severity, f.confidence, v.new_severity, v.new_confidence)) {
+        return fail(`downgraded finding ${id} raises severity/confidence`);
+      }
     }
   }
 
@@ -1170,65 +1279,73 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
 
   const statusById = new Map(outFindings.map((f) => [f.finding_id, f.verification_status]));
   const sevById = new Map(outFindings.map((f) => [f.finding_id, f.final_severity]));
-
   const reject = (nc) => { nc.verification_status = "rejected"; nc.severity = "Moyenne"; nc.confidence = "à vérifier"; return nc; };
 
-  const outChains = chains.map((c) => {
+  const outChains = [];
+  for (const c of chains) {
     const nc = { ...c };
     const v = chainVerdict.get(c.chain_id);
 
-    // No chain verdict at all → NOT verified. Stay not-requested + coverage gap (do not pollute the
-    // rejected annex). Leave the candidate severity/confidence unchanged (built non-Critique).
+    // No verdict → not verified: stay not-requested + coverage gap (do NOT pollute the rejected annex).
     if (!v) {
       gaps.push({ target_type: "chain", target_id: c.chain_id, reason: "no verdict (partial verification)" });
       nc.verification_status = "not-requested";
-      return nc;
+      outChains.push(nc);
+      continue;
     }
+    if (v.verdict === "rejected") { outChains.push(reject(nc)); continue; }
 
-    // Honour the verifier's GLOBAL chain verdict first.
-    if (v.verdict === "rejected") return reject(nc);
-    if (v.verdict === "downgraded") {
-      nc.verification_status = "downgraded";
-      nc.severity = v.new_severity;     // verdict schema requires these for downgraded; never Critique
-      nc.confidence = v.new_confidence;
-      return nc;
-    }
-
-    // v.verdict === "accepted": it must be backed by exact transition coverage + member statuses.
-    const chainKeys = c.transitions.map((t) => `${t.from}->${t.to}`);
+    // Structural integrity — REQUIRED for both accepted and downgraded (a downgrade cannot bypass it).
     const vList = v.transition_verdicts || [];
     const vKeys = vList.map((t) => `${t.from}->${t.to}`);
-    const chainSet = new Set(chainKeys);
+    const chainKeys = c.transitions.map((t) => `${t.from}->${t.to}`);
     const vSet = new Set(vKeys);
+    const chainSet = new Set(chainKeys);
     const exactMatch =
       vList.length === c.transitions.length &&
-      vKeys.length === vSet.size &&             // no duplicates in verdict
-      chainKeys.length === chainSet.size &&     // no duplicates in chain
-      [...chainSet].every((k) => vSet.has(k)) &&
-      [...vSet].every((k) => chainSet.has(k));
+      vKeys.length === vSet.size && chainKeys.length === chainSet.size &&
+      [...chainSet].every((k) => vSet.has(k)) && [...vSet].every((k) => chainSet.has(k));
     const allTransitionsAccepted = vList.length > 0 && vList.every((t) => t.verdict === "accepted");
-
     const members = c.finding_ids.map((id) => statusById.get(id));
-    // Every member must be verified positively: accepted or downgraded. A missing/not-requested or
-    // rejected member blocks acceptance.
     const allMembersOk = members.every((s) => s === "accepted" || s === "downgraded");
     const allMembersAccepted = members.every((s) => s === "accepted");
     const anyDowngraded = members.some((s) => s === "downgraded");
 
-    if (!(exactMatch && allTransitionsAccepted && allMembersOk)) return reject(nc);
+    const structurallySound =
+      topologyValid(c) && exactMatch && allTransitionsAccepted && allMembersOk;
+    if (!structurallySound) { outChains.push(reject(nc)); continue; }
 
-    if (allMembersAccepted && c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce") {
+    // Natural severity the chain would get if accepted (the ceiling a downgrade may not exceed).
+    const canBeCritique =
+      allMembersAccepted && c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
+    const naturalSev = canBeCritique
+      ? "Critique"
+      : SEV_BY_INDEX[Math.max(0, ...c.finding_ids.map((id) => SEV_INDEX[sevById.get(id) ?? "Info"]))];
+    const naturalConf = "preuve statique forte";
+
+    if (v.verdict === "downgraded") {
+      if (!notIncrease(naturalSev, naturalConf, v.new_severity, v.new_confidence)) {
+        return fail(`downgraded chain ${c.chain_id} raises severity/confidence`);
+      }
+      nc.verification_status = "downgraded";
+      nc.severity = v.new_severity;
+      nc.confidence = v.new_confidence;
+      outChains.push(nc);
+      continue;
+    }
+
+    // v.verdict === "accepted"
+    if (canBeCritique) {
       nc.verification_status = "accepted";
       nc.severity = "Critique";
       nc.confidence = "preuve statique forte";
     } else {
       nc.verification_status = "accepted";
-      const idx = Math.max(0, ...c.finding_ids.map((id) => SEV_ORDER.indexOf(sevById.get(id) ?? "Info")));
-      nc.severity = SEV_ORDER[idx];
+      nc.severity = naturalSev;
       nc.confidence = anyDowngraded ? "probable" : "preuve statique forte";
     }
-    return nc;
-  });
+    outChains.push(nc);
+  }
 
   return { ok: true, error: null, findings: outFindings, chains: outChains, gaps };
 }
@@ -1492,11 +1609,13 @@ Do not audit hostile repositories. The analyzer/verifier subagents are read-only
 ## Pipeline (strict order)
 
 ### 1. Entry & recon
-- Normalize `$ARGUMENTS` with the **tested confinement helper** (do not hand-roll the comparison):
-  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/confine-path.mjs" "${CLAUDE_PROJECT_DIR}" "<arg>"`
-  — or import `confinePath`. It resolves the real canonical path and **throws** on a nonexistent
-  path or one that escapes `${CLAUDE_PROJECT_DIR}` (`../`, symlink/junction, sibling-prefix like
-  `project-old`). On a throw, **abort the audit** with that message. No argument → scope = project root.
+- Normalize `$ARGUMENTS` with the **tested confinement helper** (do not hand-roll the comparison, and
+  do not put the path on the shell command line). Write `{ "projectDir": "<CLAUDE_PROJECT_DIR>",
+  "arg": "<the raw argument or null>" }` to a literal temp file with the file tool, then:
+  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/confine-path.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/confine-<token>.json"`
+  It prints the confined real path (exit 0), or exits non-zero on a nonexistent path or one that
+  escapes `${CLAUDE_PROJECT_DIR}` (`../`, symlink/junction, sibling-prefix like `project-old`). On a
+  non-zero exit, **abort the audit** with the printed message. `arg: null` → scope = project root.
 - Detect **stack** via manifests (`composer.json`, `package.json`, `pyproject.toml`/
   `requirements.txt`, `pom.xml`/`build.gradle`, `*.csproj`) and file extensions; detect **framework**
   via dependencies/structure.
@@ -1548,8 +1667,10 @@ the tested CLI (it cannot be imported as a tool — it is invoked as a process):
   node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/apply-verdicts.mjs" \
     --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" \
     --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"
-  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json" )
-# exit 0 → result.ok (read the --out JSON); exit 1 → result.ok=false (see error, retry); exit 2 → IO/usage error.
+  rc=$?                                                           # capture BEFORE cat
+  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"
+  exit "$rc" )                                                    # preserve the CLI's exit code
+# exit 0 → result.ok (read the printed --out JSON); exit 1 → result.ok=false (see error, retry); exit 2 → IO/usage error.
 ```
 
 The CLI encodes the entire decision and returns `{ ok, error, findings, chains, gaps }`:
@@ -2117,7 +2238,7 @@ Regenerate the validators after changing any schema:
 
 - [ ] **Step 2: Run the validator unit tests (regression gate)**
 
-Run: `( cd skills/audit/scripts && node --test test/ )`
+Run: `( cd skills/audit/scripts && node --test )`
 Expected: `# fail 0`.
 
 - [ ] **Step 3: Validate the whole plugin strictly**
@@ -2166,8 +2287,9 @@ git commit -m "docs(oswe): add README and finalize MVP acceptance"
 
 - [ ] `claude plugin validate . --strict` passes.
 - [ ] `claude --plugin-dir .` exposes `/oswe:audit`; it does not auto-run (`disable-model-invocation: true`).
-- [ ] All `node --test test/` suites pass: `validate-output` (schema invariants incl. `final-finding`),
-  `confine-path` (scope confinement), and `apply-verdicts` (exact transition match + Critique promotion).
+- [ ] All `node --test` suites pass: `validate-output` (schema invariants incl. `final-finding`),
+  `confine-path` (scope confinement), and `apply-verdicts` (topology, exact transition match,
+  downgrade-no-increase, Critique promotion, CLI exit codes).
 - [ ] PHP positive fixture → detection + reconstructed RCE chain; PHP negative → no Critique false-positive.
 - [ ] Node positive fixture → detection + reconstructed RCE chain; Node negative → no Critique false-positive.
 - [ ] Every reported finding/chain carries a `verification_status`; the report includes a Coverage section.
