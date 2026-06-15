@@ -754,6 +754,10 @@ if (isMain()) {
 
   if (fileIdx !== -1) {
     const path = args[fileIdx + 1];
+    if (!path) {
+      console.error(JSON.stringify({ valid: false, errors: [{ message: "--file requires a path argument" }] }));
+      process.exit(2);
+    }
     let raw;
     try {
       raw = readFileSync(path, "utf8");
