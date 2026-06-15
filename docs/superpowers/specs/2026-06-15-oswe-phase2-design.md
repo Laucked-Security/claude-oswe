@@ -7,40 +7,51 @@
 ## 1. Objectif
 
 Étendre la couverture d'audit du plugin `oswe` à **Python, Java et .NET**, en suivant le pattern
-établi par le MVP. **Purement additif** : aucune modification du SKILL, des schémas, des helpers Node
-ni des contrats — ils sont déjà stack-agnostiques.
+établi par le MVP. **Quasi-additif** : pas de changement des **schémas, helpers Node ni contrats**
+(déjà stack-agnostiques) ; **une clarification minimale du SKILL** (multi-stack, §2.1) ; et la **mise à
+jour des docs/manifest user-facing** qui annoncent encore PHP/Node comme seul périmètre.
 
 **Vérifié dans le MVP mergé :**
-- `skills/audit/SKILL.md` §1 charge les références **génériquement** : « Load only the relevant
-  `references/<ecosystem>.md` for the detected stack » (aucun `php`/`node` en dur).
+- `skills/audit/SKILL.md` §1 charge les références **génériquement** : « Load … `references/<ecosystem>.md`
+  for the detected stack » (aucun `php`/`node` en dur).
 - La détection de stack liste déjà `pyproject.toml`/`requirements.txt`, `pom.xml`/`build.gradle`,
-  `*.csproj`. Python/Java/.NET sont donc **déjà détectés** ; il manque seulement les références et les
-  fixtures.
-
-Donc Phase 2 = ajouter des **fichiers**, rien d'autre. Le plugin charge la nouvelle référence dès qu'il
-détecte le stack.
+  `*.csproj`. Python/Java/.NET sont donc **déjà détectés** ; il manque les références, les fixtures, la
+  règle multi-stack, et les mises à jour de docs.
 
 ## 2. Périmètre
 
-Ajouts uniquement :
+**Ajouts :**
 
 ```
-skills/audit/references/
-├── python.md            # NOUVEAU
-├── java.md              # NOUVEAU
-└── dotnet.md            # NOUVEAU
-
-test-fixtures/
-├── python/{vulnerable,safe}/   # NOUVEAU (Flask)
-├── java/{vulnerable,safe}/     # NOUVEAU (Spring)
-└── dotnet/{vulnerable,safe}/   # NOUVEAU (ASP.NET)
+skills/audit/references/{python,java,dotnet}.md        # NOUVEAU (3 références)
+test-fixtures/{python,java,dotnet}/{vulnerable,safe}/  # NOUVEAU (6 fixtures + 3 EXPECTED.md)
 ```
 
-Chaque dossier `vulnerable/` contient un `EXPECTED.md` décrivant la chaîne Critique attendue.
+**Modifications (nécessaires pour que le plugin soit cohérent après Phase 2) :**
+- `skills/audit/SKILL.md` — **une** clarification : règle multi-stack (§2.1 ci-dessous).
+- `.claude-plugin/plugin.json` — la `description` dit encore « (PHP, Node.js in MVP) » → ajouter
+  Python/Java/.NET.
+- `README.md` — la section *Scope* dit « Python, Java, .NET are planned (Phase 2) » → les passer en
+  **supportés**.
+- `docs/superpowers/plans/2026-06-15-oswe-plugin-mvp.md` / spec MVP — la mention « Phase 2 (separate
+  plan) » est résolue par ce travail ; mettre une note de renvoi vers ce spec (cosmétique, non bloquant).
 
-**Hors périmètre :** aucune modif de `SKILL.md`, `schemas/`, `scripts/` ; pas de fixture de
-désérialisation à vraie gadget-chain (dépendrait de libs dans des dossiers exclus du scan) — la
-référence documente ce savoir, la fixture utilise une variante auto-suffisante.
+**Hors périmètre :** aucune modif de `schemas/`, `scripts/` ; pas de fixture de désérialisation à vraie
+gadget-chain (libs dans des dossiers exclus du scan) — la référence documente ce savoir, la fixture
+utilise une variante auto-suffisante.
+
+### 2.1 Règle multi-stack (clarification SKILL)
+
+Aujourd'hui `SKILL.md` §1 dit « Load only the relevant `references/<ecosystem>.md` » (singulier). Un
+vrai dépôt peut être **polyglotte** (ex. backend Java + frontend Node). La règle devient :
+
+> Detect **all** stacks present (a repo may be polyglot). **Load every relevant
+> `references/<ecosystem>.md`** for the detected stacks. The partition phase (§2) already separates the
+> surface by module / framework — **partition by stack too**, so each partition is analyzed against its
+> own stack's reference.
+
+C'est la **seule** modification de comportement du SKILL ; elle est cohérente avec le découpage par
+module/framework déjà en place.
 
 ## 3. Références (docs de connaissances)
 
@@ -82,6 +93,11 @@ Couverture signature **complète** par stack (même si la fixture n'utilise qu'u
 Chaque app est **auto-suffisante, mono-fichier** (pas de lib gadget externe), et expose une chaîne
 **non authentifiée → bypass → RCE**, comme PHP (magic-hash → upload) et Node (NoSQLi → cmd-injection).
 
+> **Toutes les fixtures sont *static-only*** : le plugin ne les exécute ni ne les compile (analyse
+> statique du source uniquement). Elles n'ont **pas** besoin d'être runnables/compile-ready ; elles
+> doivent être du **source fidèle et lisible** où source→sink est visible. La vuln est dans le *pattern*
+> de code, indépendamment de l'OS ou d'une config de build complète.
+
 - **`python/vulnerable/`** (Flask, `app.py` + `requirements.txt`) :
   - **Étape 1 — bypass (broken access control / mass assignment)** : `POST /login` lit le JSON du
     corps et fait confiance à un champ client `is_admin` qu'il copie dans la session
@@ -103,23 +119,31 @@ Chaque app est **auto-suffisante, mono-fichier** (pas de lib gadget externe), et
   - **Étape 1 — bypass (cookie forgeable)** : l'autorisation ne vérifie que
     `Request.Cookies["admin"] == "1"` (valeur contrôlée par le client, non signée). L'attaquant pose
     le cookie `admin=1`.
-  - **Étape 2 — RCE (command injection)** : route admin fait
-    `Process.Start("cmd.exe", "/c ping " + Request.Query["host"])`. Payload `host=127.0.0.1 & whoami`
-    → RCE. Chaîne : unauth → cookie forgé → command injection → **RCE**.
+  - **Étape 2 — RCE (command injection)** : route admin construit une commande shell par concaténation
+    et l'exécute via `Process.Start` avec `UseShellExecute`/un shell (`"/bin/sh","-c", "ping " + host"`
+    — formulation **cross-platform**, pas `cmd.exe`/Windows-only) ; l'entrée `Request.Query["host"]`
+    n'est ni échappée ni validée. Payload `host=127.0.0.1; whoami` → RCE. Chaîne : unauth → cookie forgé
+    → command injection → **RCE**. (La vuln est la concaténation non assainie dans une invocation shell,
+    indépendante de l'OS ; la fixture est static-only.)
 
 ## 5. Fixtures safe (contrepartie durcie)
 
 Pour chaque stack, la version qui **mitige correctement les deux maillons** (l'auditeur ne doit produire
-**aucun Critique faux-positif**) :
+**aucun Critique faux-positif**). Les contre-mesures sont des **vérifications explicites en code**,
+**non ambiguës à la lecture statique** — on n'emploie **pas** d'annotations (`@PreAuthorize`,
+`[Authorize]`) dont l'effet dépend d'une config de sécurité externe absente d'une fixture mono-fichier
+(ce serait trompeur). Toutes static-only.
 
-- **Python safe** : autorisation côté serveur (le rôle n'est jamais pris du corps client ; auth par
-  identifiants validés) ; `/render` rendu via un **template fixe** avec autoescape (jamais
-  `render_template_string` sur l'entrée).
-- **Java safe** : autorisation via `@PreAuthorize`/contexte de sécurité réel (pas l'en-tête client) ;
-  pas de SpEL construit depuis l'entrée (valeur traitée comme donnée littérale, ou allow-list stricte).
-- **.NET safe** : autorisation via `[Authorize]` / cookie d'auth **signé** (pas une valeur client
-  brute) ; exécution via `Process.Start` avec **liste d'arguments** (sans shell) + allow-list sur
-  `host` (`^[a-z0-9.-]+$`).
+- **Python safe** : le rôle n'est **jamais** pris du corps client — l'app vérifie des identifiants
+  serveur (`username/password` comparés à une valeur fixe) avant de poser la session ; `/render` rend un
+  **template fixe** (l'entrée n'est qu'une *donnée* passée au contexte, jamais le template) — pas de
+  `render_template_string` sur l'entrée.
+- **Java safe** : l'autorisation **ne lit pas** `X-User-Role` ; un **check explicite en code** valide une
+  session/token serveur avant la route admin. Le sink SpEL **n'existe pas** : la valeur est traitée
+  comme une **donnée littérale** (string), jamais `parseExpression(input)`.
+- **.NET safe** : l'autorisation **ne lit pas** un cookie brut ; **check explicite en code** sur un état
+  d'auth serveur. L'exécution passe par `Process.Start` avec une **liste d'arguments** (`ProcessStartInfo`,
+  `UseShellExecute=false`, **sans shell**) + **allow-list** sur `host` (`^[a-z0-9.-]+$`).
 
 ## 6. EXPECTED.md (par fixture vulnérable)
 
@@ -137,8 +161,8 @@ DEPLOY »** (traité comme donnée, pas instruction) :
 ## 8. Validation & acceptance
 
 Mêmes gates que le MVP :
-1. **`claude plugin validate . --strict`** reste vert (on n'ajoute que du markdown/source ; pas de
-   frontmatter de skill/agent modifié).
+1. **`claude plugin validate . --strict`** reste vert : la seule édition du SKILL est dans le **corps**
+   (règle multi-stack §2.1), **pas le frontmatter** ; le reste n'ajoute que du markdown/source.
 2. **Conformité de contenu** des références : marqueurs de classes de vulns présents (grep par stack —
    ex. python : `SSTI`, `pickle`, `subprocess` ; java : `readObject`, `SpelExpressionParser`, `XXE` ;
    dotnet : `BinaryFormatter`/`TypeNameHandling`, `Process.Start`, `XmlResolver`).
@@ -147,12 +171,18 @@ Mêmes gates que le MVP :
 4. **Syntaxe** : Python `python -m py_compile` si Python dispo ; sinon, et pour Java/.NET (pas de
    JDK/.NET SDK dans le sandbox), vérification **par inspection** + marqueurs — exactement comme les
    fixtures PHP du MVP (non lintées, faute de PHP).
-5. **Acceptance E2E** (lancée par l'utilisateur dans sa session) : `/oswe:audit` sur chaque
-   `vulnerable/` → chaîne **Critique** conforme à `EXPECTED.md` ; sur chaque `safe/` → **aucun
-   Critique**. Comparatif des rapports comme pour PHP/Node.
+5. **Acceptance E2E — gate de merge OBLIGATOIRE (pas optionnel).** Phase 2 **n'est pas mergeable** tant
+   que les **6 rapports** n'ont pas été produits et comparés : `/oswe:audit` sur chacune des 3
+   `vulnerable/` → chaîne **Critique** conforme à son `EXPECTED.md` ; sur chacune des 3 `safe/` →
+   **aucun Critique** (zéro faux-positif). L'exécution se fait dans la session interactive de
+   l'utilisateur (les `claude -p` imbriqués que l'agent lance sont facturés sur le solde API séparé,
+   épuisé — cf. expérience MVP) ; **l'agent fait le comparatif rapport↔EXPECTED pour chacun**. Les 6
+   comparatifs verts sont la condition de merge, au même titre que les gates 1–4.
 
 ## 9. Hors périmètre (rappel)
 
-- Aucune modif de `SKILL.md`, `schemas/`, `scripts/` (vérifié inutile — déjà stack-agnostiques).
+- Aucune modif de `schemas/` ni `scripts/` (déjà stack-agnostiques). La **seule** édition de `SKILL.md`
+  est la règle multi-stack (§2.1) — pas de changement des contrats ni de la mécanique de vérification.
 - Pas de fixture reposant sur une vraie gadget-chain de désérialisation (libs externes exclues du scan).
+- Pas d'exécution/compilation des fixtures par le plugin (analyse statique uniquement ; fixtures static-only).
 - Pas d'exécution/compilation des fixtures par le plugin (analyse statique uniquement).
