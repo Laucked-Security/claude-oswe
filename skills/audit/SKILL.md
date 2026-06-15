@@ -25,16 +25,34 @@ If Node is absent or **older than v20** (the validators/tests target Node ≥ 20
 standalone ESM), **abort** with: "OSWE audit requires Node.js ≥ 20 (run `node --version`)." Do not
 attempt a degraded text-only audit.
 
+## Temp-file hygiene (handle sensitive intermediate data)
+The pipeline writes intermediate JSON to `${CLAUDE_PROJECT_DIR}/.oswe/tmp/` (helper inputs/outputs:
+confine, analyzer-responses, aggregation, batch inputs, apply-verdicts I/O). **These hold full,
+NOT-yet-redacted finding data — including any secret values the analyzers quoted verbatim.** They must
+never outlive the audit. Rules:
+- **At audit start** (first thing in §1): `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp" && mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` — start from a clean dir (purges any leftovers from a prior/interrupted run).
+- **Per use:** every helper invocation deletes its own temp file(s) immediately after — wrap the
+  `node …` call in `( trap 'rm -f <the literal temp files>' EXIT … )` so the file is gone even if the
+  command errors. This applies to confine-path, aggregate-findings, validate-batch, validate-output,
+  and apply-verdicts alike.
+- **At audit end** (after the report is written) **and on ANY abort** (Node missing, confinement
+  failure, orchestrator-input bug, etc.): `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"`. Do not leave the
+  directory behind. `.oswe/reports/` is kept (the report is already `[REDACTED]`-safe); `.oswe/tmp/` is not.
+- Redaction (`[REDACTED]`, see Report security) applies to the **report**; the temp files are raw, so
+  the only safe handling is to delete them — never copy them elsewhere.
+
 ## Pipeline (strict order)
 
 ### 1. Entry & recon
+- **First, purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp" && mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (see Temp-file hygiene).
 - Normalize `$ARGUMENTS` with the **tested confinement helper** (do not hand-roll the comparison, and
   do not put the path on the shell command line). Write `{ "projectDir": "<CLAUDE_PROJECT_DIR>",
-  "arg": "<the raw argument or null>" }` to a literal temp file with the file tool, then:
-  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/confine-path.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/confine-<token>.json"`
+  "arg": "<the raw argument or null>" }` to a literal temp file with the file tool, then run it inside
+  a `trap` that removes that file on exit:
+  `( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/confine-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/confine-path.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/confine-<token>.json" )`
   It prints the confined real path (exit 0), or exits non-zero on a nonexistent path or one that
   escapes `${CLAUDE_PROJECT_DIR}` (`../`, symlink/junction, sibling-prefix like `project-old`). On a
-  non-zero exit, **abort the audit** with the printed message. `arg: null` → scope = project root.
+  non-zero exit, **purge `.oswe/tmp/` and abort the audit** with the printed message. `arg: null` → scope = project root.
 - Detect **stack** via manifests (`composer.json`, `package.json`, `pyproject.toml`/
   `requirements.txt`, `pom.xml`/`build.gradle`, `*.csproj`) and file extensions; detect **framework**
   via dependencies/structure.
@@ -58,20 +76,28 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
   partitions** total; anything beyond the budget → recorded as "non analysé" in Coverage.
 - Every `analyzer-response` (inline or subagent) is **validated** (see Validation below) before aggregating.
 - **Bind each response to its assigned partition** (the schema cannot — it doesn't know what you
-  dispatched). For an analyzer dispatched for partition `P`, **reject the response unless**
-  `response.partition_id === P` **and** every `finding.partition_id === P` **and** every
-  `finding.finding_id` matches **exactly `^<P>-F[0-9]{3,}$`** (with `P` regex-escaped — `startsWith("P-F")`
-  is too loose: it would accept `P-Foo-F001`) **and** the `finding_id`s are **unique within the response**
-  (collect them in a Set; a repeat like two `P-F001` makes `source_finding_ids` ambiguous). A mismatch
-  is treated like an analyzer `error` (re-run the partition once, then coverage gap) — never aggregate
-  cross-partition, mislabeled, or duplicate-id findings. (The aggregator in §4 also rejects a globally
-  duplicate `finding_id` as a backstop.)
-- **`status` semantics** (the field is in the envelope; act on it):
-  - `ok` → aggregate its `findings`; merge its `coverage` into the global Coverage.
-  - `partial` → aggregate the `findings` present **and** copy `coverage.skipped` into the global
-    Coverage so the un-analyzed parts are reported (never silently dropped).
-  - `error` → **do not aggregate** its findings (they may be unsound). **Re-run that partition once**;
-    if it is still `error`, mark the **whole partition as a coverage gap** ("analyzer error") and move on.
+  dispatched). For partition `P`, **reject the response unless** `response.partition_id === P` **and**
+  every `finding.partition_id === P` **and** every `finding.finding_id` matches **exactly
+  `^<P>-F[0-9]{3,}$`** (with `P` regex-escaped — `startsWith("P-F")` is too loose: it would accept
+  `P-Foo-F001`) **and** the `finding_id`s are **unique within the response** (collect them in a Set; a
+  repeat like two `P-F001` makes `source_finding_ids` ambiguous). Never aggregate cross-partition,
+  mislabeled, or duplicate-id findings. (The aggregator in §4 also rejects a globally duplicate
+  `finding_id` as a backstop.)
+- **`status` semantics** (the field is in the envelope): `ok` → aggregate `findings`, merge `coverage`;
+  `partial` → aggregate the `findings` present **and** copy `coverage.skipped` into Coverage (never
+  silently dropped); `error` → **do not aggregate** (the findings may be unsound).
+- **Failure handling depends on WHO produced the response — and there is ONE retry budget per partition.**
+  Keep a set **`retriedPartitionIds`** (analogous to `retriedBatchIds` in §6). Any of {schema-invalid,
+  partition-binding mismatch, `status:"error"`} is a *partition failure*. **A partition is re-run AT
+  MOST ONCE total**, regardless of which failure mode triggered it:
+  - **Subagent mode** (>2 partitions): on a partition failure, if its id is **not yet** in
+    `retriedPartitionIds`, **re-dispatch the analyzer once** (add the id to the set first); if it is
+    **already** in the set, **do not re-dispatch** — mark the whole partition a **coverage gap**
+    ("analyzer error" / "binding mismatch" / "schema-invalid", with the cause).
+  - **Inline mode** (≤2 partitions): the `analyzer-response` was built by YOU, not an agent. A
+    schema-invalid or binding-mismatched inline response is an **orchestrator bug** → **stop and fix
+    your own construction**; do NOT "retry" (there is no agent). `status:"error"` from your own inline
+    analysis means you genuinely could not analyze the partition → record a coverage gap directly.
 
 ### 4. Aggregate & dedupe (deterministic — via the tested helper)
 **Do not aggregate by hand.** Collect every aggregated analyzer finding into
@@ -205,6 +231,9 @@ a gap). So in 6b you should only ever see `ok:true`. If you somehow see `ok:fals
 Write `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (always relative to the
 project root) and print a chat summary. Findings are reported by **`final_severity`** (falling back
 to `provisional_severity` only for `not-requested` items). See Report format below.
+**Then purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (the report is `[REDACTED]`-safe; the
+raw intermediate files are not — see Temp-file hygiene). This runs on the success path; on any abort
+earlier in the pipeline, purge before exiting too.
 
 ## Validation
 Validate every analyzer/verifier response, every built chain, and every finding mutated in phase 6b
@@ -229,16 +258,16 @@ The file tool cannot see a shell variable, so use a **literal path you choose**:
 ```
 
 where `<kind>` is `analyzer-response`, `verifier-response`, `chain`, `finding`, or `final-finding`.
-**Branch on the exit code AND the `<kind>` — they mean different things:**
+**Branch on the exit code AND on who produced the JSON — they mean different things:**
 - **exit 0** → valid; proceed.
-- **exit 1 on an AGENT output** (`<kind>` = `analyzer-response` or `verifier-response`) → the agent
-  misbehaved: retry the agent **once**; if it still fails, record the finding/partition as a
-  **coverage gap** — never invent data.
-- **exit 1 on an ORCHESTRATOR-built object** (`<kind>` = `chain`, `finding`, or `final-finding`) →
-  **our own bug** (we built/mutated it wrong in §4/§5/§6b): **stop and fix the construction** — there
-  is no agent to retry.
-- **exit 2** → an **orchestration error** (you wrote an unreadable/missing temp file, or passed an
-  unknown `<kind>`): **stop and fix the call** — do NOT retry the agent or record a gap.
+- **exit 1 on a SUBAGENT output** (`analyzer-response` from a dispatched analyzer, or
+  `verifier-response`) → the agent misbehaved: retry the agent **once** (subject to the partition/batch
+  retry budget); if it still fails, record a **coverage gap** — never invent data.
+- **exit 1 on an ORCHESTRATOR-built object** — `chain`, `finding`, `final-finding`, **or an
+  `analyzer-response` you built INLINE** (≤2-partition path) → **our own bug** (we built/mutated it
+  wrong in §3 inline / §4 / §5 / §6b): **stop and fix the construction** — there is no agent to retry.
+- **exit 2** → an **orchestration error** (unreadable/missing temp file, or unknown `<kind>`): **stop
+  and fix the call** — do NOT retry the agent or record a gap.
 
 (Node is a verified prerequisite — see the top of the pipeline — so there is no degraded text-only
 path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitignored (via `.oswe/`).
