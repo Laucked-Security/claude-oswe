@@ -1,0 +1,3 @@
+# Vendored ajv (sandbox-only runtime dep for validators.mjs). Keep byte-for-byte: no EOL
+# conversion, treat as non-diffable generated content.
+skills/audit/scripts/node_modules/** -text linguist-vendored
