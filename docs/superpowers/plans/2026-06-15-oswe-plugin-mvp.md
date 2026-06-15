@@ -249,7 +249,7 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
         "route": { "type": "string" }, "auth": { "enum": ["unauthenticated", "authenticated", "admin"] }
       }
     },
-    "finding_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "finding_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^OSWE-[0-9]+$" } },
     "transitions": {
       "type": "array", "minItems": 1,
       "items": {
@@ -899,9 +899,10 @@ import { applyVerdicts } from "../apply-verdicts.mjs";
 
 const loc = (file, line, symbol, kind) => ({ file, line, symbol, kind });
 
+// Findings/chains reaching applyVerdicts are POST-aggregation → canonical OSWE-* ids.
 const finding = (id, sev = "Haute") => ({
   finding_id: id,
-  partition_id: id.split("-")[0],
+  partition_id: "auth",
   title: id,
   vuln_class: "auth-bypass",
   source: loc("a.php", 1, "$_POST", "http-param"),
@@ -915,10 +916,10 @@ const finding = (id, sev = "Haute") => ({
 const chain = (overrides = {}) => ({
   chain_id: "CHAIN-1",
   entry_point: { file: "a.php", line: 1, route: "POST /login", auth: "unauthenticated" },
-  finding_ids: ["auth-F001", "up-F001"],
+  finding_ids: ["OSWE-1", "OSWE-2"],
   transitions: [
-    { from: "entry", to: "auth-F001", how: "bypass", evidence: [{ file: "a.php", line: 2 }] },
-    { from: "auth-F001", to: "up-F001", how: "upload", evidence: [{ file: "u.php", line: 4 }] }
+    { from: "entry", to: "OSWE-1", how: "bypass", evidence: [{ file: "a.php", line: 2 }] },
+    { from: "OSWE-1", to: "OSWE-2", how: "upload", evidence: [{ file: "u.php", line: 4 }] }
   ],
   final_impact: "unauth-rce",
   severity: "Haute",
@@ -927,23 +928,24 @@ const chain = (overrides = {}) => ({
   ...overrides
 });
 
+const bothFindings = () => [finding("OSWE-1"), finding("OSWE-2")];
 const vresp = (verdicts, status = "ok") => [{ status, verdicts }];
 
 const acceptBoth = [
-  { target_type: "finding", target_id: "auth-F001", verdict: "accepted", justification: "a.php:2" },
-  { target_type: "finding", target_id: "up-F001", verdict: "accepted", justification: "u.php:4" }
+  { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "a.php:2" },
+  { target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "u.php:4" }
 ];
 const acceptChain = {
   target_type: "chain", target_id: "CHAIN-1", verdict: "accepted",
   transition_verdicts: [
-    { from: "entry", to: "auth-F001", verdict: "accepted", justification: "a.php:2" },
-    { from: "auth-F001", to: "up-F001", verdict: "accepted", justification: "u.php:4" }
+    { from: "entry", to: "OSWE-1", verdict: "accepted", justification: "a.php:2" },
+    { from: "OSWE-1", to: "OSWE-2", verdict: "accepted", justification: "u.php:4" }
   ],
   justification: "all hold"
 };
 
 test("fully accepted unauth-rce chain is promoted to Critique", () => {
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, acceptChain]) });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([...acceptBoth, acceptChain]) });
   assert.equal(r.ok, true);
   assert.equal(r.chains[0].severity, "Critique");
   assert.equal(r.chains[0].verification_status, "accepted");
@@ -952,82 +954,119 @@ test("fully accepted unauth-rce chain is promoted to Critique", () => {
 
 test("accepted chain with a downgraded member is NOT Critique", () => {
   const verdicts = [
-    { target_type: "finding", target_id: "auth-F001", verdict: "accepted", justification: "x" },
-    { target_type: "finding", target_id: "up-F001", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" },
     acceptChain
   ];
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp(verdicts) });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp(verdicts) });
   assert.notEqual(r.chains[0].severity, "Critique");
   assert.equal(r.chains[0].verification_status, "accepted");
 });
 
-test("chain referencing a rejected member is rejected", () => {
+test("chain whose member is rejected is itself rejected", () => {
   const verdicts = [
-    { target_type: "finding", target_id: "auth-F001", verdict: "rejected", justification: "x" },
-    { target_type: "finding", target_id: "up-F001", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "x" },
     acceptChain
   ];
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp(verdicts) });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp(verdicts) });
   assert.equal(r.chains[0].verification_status, "rejected");
   assert.notEqual(r.chains[0].severity, "Critique");
-  // rejected finding loses final fields
-  const rejected = r.findings.find((f) => f.finding_id === "auth-F001");
+  const rejected = r.findings.find((f) => f.finding_id === "OSWE-1");
   assert.equal("final_severity" in rejected, false);
 });
 
+test("chain with a not-requested member (no finding verdict) is not accepted", () => {
+  // OSWE-2 has no finding verdict -> not-requested -> blocks chain acceptance.
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([acceptBoth[0], acceptChain]) });
+  assert.equal(r.chains[0].verification_status, "rejected");
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("explicit chain verdict=rejected is honoured despite accepted transitions", () => {
+  const rejectChain = { ...acceptChain, verdict: "rejected" };
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([...acceptBoth, rejectChain]) });
+  assert.equal(r.chains[0].verification_status, "rejected");
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("explicit chain verdict=downgraded applies new severity/confidence", () => {
+  const dnChain = { ...acceptChain, verdict: "downgraded", new_severity: "Haute", new_confidence: "probable" };
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([...acceptBoth, dnChain]) });
+  assert.equal(r.chains[0].verification_status, "downgraded");
+  assert.equal(r.chains[0].severity, "Haute");
+  assert.equal(r.chains[0].confidence, "probable");
+});
+
 test("empty transition_verdicts does not yield Critique", () => {
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [] }]) });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [] }]) });
   assert.notEqual(r.chains[0].severity, "Critique");
 });
 
 test("missing transition is not an exact match (no Critique)", () => {
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [acceptChain.transition_verdicts[0]] }]) });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [acceptChain.transition_verdicts[0]] }]) });
   assert.notEqual(r.chains[0].severity, "Critique");
 });
 
 test("extra transition is not an exact match (no Critique)", () => {
-  const extra = { from: "up-F001", to: "ghost", verdict: "accepted", justification: "x" };
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [...acceptChain.transition_verdicts, extra] }]) });
+  const extra = { from: "OSWE-2", to: "ghost", verdict: "accepted", justification: "x" };
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [...acceptChain.transition_verdicts, extra] }]) });
   assert.notEqual(r.chains[0].severity, "Critique");
 });
 
 test("duplicated transition is not an exact match (no Critique)", () => {
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [acceptChain.transition_verdicts[0], acceptChain.transition_verdicts[0]] }]) });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [acceptChain.transition_verdicts[0], acceptChain.transition_verdicts[0]] }]) });
   assert.notEqual(r.chains[0].severity, "Critique");
 });
 
 test("authenticated entry is not promoted to Critique", () => {
   const c = chain({ entry_point: { file: "a.php", line: 1, route: "POST /x", auth: "authenticated" } });
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [c], verifierResponses: vresp([...acceptBoth, acceptChain]) });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp([...acceptBoth, acceptChain]) });
   assert.notEqual(r.chains[0].severity, "Critique");
+  assert.equal(r.chains[0].verification_status, "accepted"); // accepted but capped below Critique
 });
 
 test("verifier status=error rejects the batch for retry", () => {
-  const r = applyVerdicts({ findings: [finding("auth-F001")], chains: [], verifierResponses: vresp(acceptBoth, "error") });
+  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp(acceptBoth, "error") });
   assert.equal(r.ok, false);
   assert.match(r.error, /error/);
 });
 
 test("duplicate target_id is an error", () => {
   const dup = [
-    { target_type: "finding", target_id: "auth-F001", verdict: "accepted", justification: "x" },
-    { target_type: "finding", target_id: "auth-F001", verdict: "rejected", justification: "x" }
+    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" }
   ];
-  const r = applyVerdicts({ findings: [finding("auth-F001")], chains: [], verifierResponses: vresp(dup) });
+  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp(dup) });
   assert.equal(r.ok, false);
   assert.match(r.error, /duplicate/);
 });
 
-test("partial verification records a coverage gap for missing chain verdict", () => {
-  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp(acceptBoth, "partial") });
+test("verdict targeting an unknown finding is an error", () => {
+  const v = [{ target_type: "finding", target_id: "OSWE-9", verdict: "accepted", justification: "x" }];
+  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp(v) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /unknown finding/);
+});
+
+test("chain referencing an unknown finding is an error", () => {
+  const c = chain({ finding_ids: ["OSWE-1", "OSWE-9"] });
+  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [c], verifierResponses: vresp([]) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /unknown finding/);
+});
+
+test("partial verification leaves the chain not-requested with a coverage gap", () => {
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp(acceptBoth, "partial") });
   assert.equal(r.ok, true);
-  assert.equal(r.chains[0].verification_status, "rejected");
+  assert.equal(r.chains[0].verification_status, "not-requested"); // NOT rejected
+  assert.notEqual(r.chains[0].severity, "Critique");
   assert.ok(r.gaps.some((g) => g.target_type === "chain" && g.target_id === "CHAIN-1"));
 });
 
 test("finding downgraded gets new final severity/confidence", () => {
-  const v = [{ target_type: "finding", target_id: "auth-F001", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" }];
-  const r = applyVerdicts({ findings: [finding("auth-F001")], chains: [], verifierResponses: vresp(v) });
+  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" }];
+  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp(v) });
   const f = r.findings[0];
   assert.equal(f.verification_status, "downgraded");
   assert.equal(f.final_severity, "Moyenne");
@@ -1045,13 +1084,14 @@ Expected: FAIL — `../apply-verdicts.mjs` does not exist yet.
 Create `skills/audit/scripts/apply-verdicts.mjs`:
 
 ```js
-// Deterministic application of verifier verdicts to findings and chains. Pure function (no IO).
-// The orchestrator validates inputs (schemas) before calling and re-validates outputs after.
-//
+// Deterministic application of verifier verdicts to findings and chains. Pure logic + a thin CLI.
 // applyVerdicts({ findings, chains, verifierResponses }) -> { ok, error, findings, chains, gaps }
-//   error: set when the batch must be rejected & retried (verifier status=error, or duplicate
-//          target_id). When set, ok=false and findings/chains are returned unchanged.
-//   gaps:  [{ target_type, target_id, reason }] for expected-but-unverified targets (partial).
+//   ok:false (error set, inputs returned unchanged) when the batch must be rejected & retried:
+//     verifier status=error, duplicate target_id, a verdict targeting an unknown finding/chain,
+//     or a chain referencing an unknown finding.
+//   gaps: [{ target_type, target_id, reason }] for expected-but-unverified targets (partial).
+import { fileURLToPath } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const SEV_ORDER = ["Info", "Basse", "Moyenne", "Haute"]; // Critique is chain-only, handled apart.
 
@@ -1071,13 +1111,31 @@ function collectVerdicts(verifierResponses) {
 }
 
 export function applyVerdicts({ findings, chains, verifierResponses }) {
+  const fail = (error) => ({ ok: false, error, findings, chains, gaps: [] });
+
   const collected = collectVerdicts(verifierResponses);
-  if (collected.error) return { ok: false, error: collected.error, findings, chains, gaps: [] };
+  if (collected.error) return fail(collected.error);
+
+  const findingIds = new Set(findings.map((f) => f.finding_id));
+  const chainIds = new Set(chains.map((c) => c.chain_id));
 
   const findingVerdict = new Map();
   const chainVerdict = new Map();
   for (const v of collected.verdicts) {
-    (v.target_type === "finding" ? findingVerdict : chainVerdict).set(v.target_id, v);
+    if (v.target_type === "finding") {
+      if (!findingIds.has(v.target_id)) return fail(`verdict targets unknown finding ${v.target_id}`);
+      findingVerdict.set(v.target_id, v);
+    } else {
+      if (!chainIds.has(v.target_id)) return fail(`verdict targets unknown chain ${v.target_id}`);
+      chainVerdict.set(v.target_id, v);
+    }
+  }
+
+  // Every chain must reference findings that actually exist.
+  for (const c of chains) {
+    for (const id of c.finding_ids) {
+      if (!findingIds.has(id)) return fail(`chain ${c.chain_id} references unknown finding ${id}`);
+    }
   }
 
   const gaps = [];
@@ -1113,16 +1171,30 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
   const statusById = new Map(outFindings.map((f) => [f.finding_id, f.verification_status]));
   const sevById = new Map(outFindings.map((f) => [f.finding_id, f.final_severity]));
 
+  const reject = (nc) => { nc.verification_status = "rejected"; nc.severity = "Moyenne"; nc.confidence = "à vérifier"; return nc; };
+
   const outChains = chains.map((c) => {
     const nc = { ...c };
     const v = chainVerdict.get(c.chain_id);
+
+    // No chain verdict at all → NOT verified. Stay not-requested + coverage gap (do not pollute the
+    // rejected annex). Leave the candidate severity/confidence unchanged (built non-Critique).
     if (!v) {
       gaps.push({ target_type: "chain", target_id: c.chain_id, reason: "no verdict (partial verification)" });
-      nc.verification_status = "rejected";
-      nc.severity = "Moyenne";
-      nc.confidence = "à vérifier";
+      nc.verification_status = "not-requested";
       return nc;
     }
+
+    // Honour the verifier's GLOBAL chain verdict first.
+    if (v.verdict === "rejected") return reject(nc);
+    if (v.verdict === "downgraded") {
+      nc.verification_status = "downgraded";
+      nc.severity = v.new_severity;     // verdict schema requires these for downgraded; never Critique
+      nc.confidence = v.new_confidence;
+      return nc;
+    }
+
+    // v.verdict === "accepted": it must be backed by exact transition coverage + member statuses.
     const chainKeys = c.transitions.map((t) => `${t.from}->${t.to}`);
     const vList = v.transition_verdicts || [];
     const vKeys = vList.map((t) => `${t.from}->${t.to}`);
@@ -1137,33 +1209,56 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
     const allTransitionsAccepted = vList.length > 0 && vList.every((t) => t.verdict === "accepted");
 
     const members = c.finding_ids.map((id) => statusById.get(id));
-    const anyRejected = members.some((s) => s === "rejected");
-    const anyDowngraded = members.some((s) => s === "downgraded");
+    // Every member must be verified positively: accepted or downgraded. A missing/not-requested or
+    // rejected member blocks acceptance.
+    const allMembersOk = members.every((s) => s === "accepted" || s === "downgraded");
     const allMembersAccepted = members.every((s) => s === "accepted");
+    const anyDowngraded = members.some((s) => s === "downgraded");
 
-    const chainAccepted = exactMatch && allTransitionsAccepted && !anyRejected;
-    const canBeCritique =
-      chainAccepted && allMembersAccepted &&
-      c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
+    if (!(exactMatch && allTransitionsAccepted && allMembersOk)) return reject(nc);
 
-    if (canBeCritique) {
+    if (allMembersAccepted && c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce") {
       nc.verification_status = "accepted";
       nc.severity = "Critique";
       nc.confidence = "preuve statique forte";
-    } else if (chainAccepted) {
+    } else {
       nc.verification_status = "accepted";
       const idx = Math.max(0, ...c.finding_ids.map((id) => SEV_ORDER.indexOf(sevById.get(id) ?? "Info")));
       nc.severity = SEV_ORDER[idx];
       nc.confidence = anyDowngraded ? "probable" : "preuve statique forte";
-    } else {
-      nc.verification_status = "rejected";
-      nc.severity = "Moyenne";
-      nc.confidence = "à vérifier";
     }
     return nc;
   });
 
   return { ok: true, error: null, findings: outFindings, chains: outChains, gaps };
+}
+
+// CLI: node apply-verdicts.mjs --file <input.json> --out <result.json>
+//   input.json: { "findings": [...], "chains": [...], "verifierResponses": [...] }
+//   exit 0 when result.ok, 1 when !ok (retry the batch), 2 on usage/IO error.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const args = process.argv.slice(2);
+  const fileIdx = args.indexOf("--file");
+  const outIdx = args.indexOf("--out");
+  if (fileIdx === -1 || outIdx === -1) {
+    process.stderr.write("usage: apply-verdicts.mjs --file <input.json> --out <result.json>\n");
+    process.exit(2);
+  }
+  let input;
+  try {
+    input = JSON.parse(readFileSync(args[fileIdx + 1], "utf8"));
+  } catch (e) {
+    process.stderr.write("cannot read --file: " + e.message + "\n");
+    process.exit(2);
+  }
+  const result = applyVerdicts(input);
+  try {
+    writeFileSync(args[outIdx + 1], JSON.stringify(result, null, 2));
+  } catch (e) {
+    process.stderr.write("cannot write --out: " + e.message + "\n");
+    process.exit(2);
+  }
+  process.exit(result.ok ? 0 : 1);
 }
 ```
 
@@ -1443,25 +1538,36 @@ and the full chain(s). **Batch: ≤ 5 findings OR 1 full chain per invocation, m
 concurrent.** Validate each `verifier-response` (kind `verifier-response`). A response with
 `status: "error"` → **retry that batch once**; persistent error → record the targets as coverage gaps.
 
-### 6b. Apply verdicts → final severity (deterministic helper)
-**Do not apply verdicts or decide Critique by hand.** Call the tested pure function
-`applyVerdicts({ findings, chains, verifierResponses })` from
-`${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/apply-verdicts.mjs`. It encodes the entire decision:
+### 6b. Apply verdicts → final severity (deterministic CLI)
+**Do not apply verdicts or decide Critique by hand.** Write a single JSON input
+`{ "findings": [...], "chains": [...], "verifierResponses": [...] }` to a literal temp path, then run
+the tested CLI (it cannot be imported as a tool — it is invoked as a process):
 
-- sets each finding's `verification_status` and computes `final_severity` / `final_confidence`
-  (`accepted` → provisional; `downgraded` → verdict's `new_*`; `rejected` → final fields removed;
-  unverified → provisional, kept `not-requested`);
-- enforces **exact transition match** (no missing / extra / duplicated `{from,to}`; empty array never
-  matches) and **all-accepted** transitions for chain acceptance;
-- promotes a chain to **`Critique` only if** it is accepted, **every member finding is accepted**
-  (a `rejected` member rejects the chain; a `downgraded` member caps it below Critique),
-  `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
-- returns `{ ok, error, findings, chains, gaps }`.
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/apply-verdicts.mjs" \
+    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" \
+    --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"
+  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json" )
+# exit 0 → result.ok (read the --out JSON); exit 1 → result.ok=false (see error, retry); exit 2 → IO/usage error.
+```
+
+The CLI encodes the entire decision and returns `{ ok, error, findings, chains, gaps }`:
+- finding: `verification_status` + `final_severity`/`final_confidence` (`accepted` → provisional;
+  `downgraded` → verdict `new_*`; `rejected` → final fields removed; unverified → provisional, `not-requested`);
+- the **global chain verdict is honoured first** (`rejected` → chain rejected; `downgraded` → chain
+  `new_*`); an `accepted` chain additionally requires **exact transition match** (no missing/extra/
+  duplicate; empty never matches), **all transitions accepted**, and **every member finding accepted
+  or downgraded**;
+- `Critique` **only if** the chain is accepted, **every** member is `accepted` (a `downgraded` member
+  caps it below Critique), `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
+- a chain with **no verdict** stays **`not-requested`** (not rejected) and is added to `gaps`.
 
 Handle the result:
-- **`ok === false`** (verifier `status:"error"`, or a **duplicate `target_id`**) → **retry the batch
-  once**; if it still fails, treat those targets as coverage gaps. Never apply a contradictory batch.
-- **`gaps`** (partial verification — expected targets with no verdict) → record each in **Coverage**.
+- **`ok === false`** (verifier `status:"error"`, a **duplicate `target_id`**, or a verdict/chain
+  referencing an **unknown** finding/chain) → **retry the batch once**; if it still fails, treat those
+  targets as coverage gaps. Never apply a contradictory batch.
+- **`gaps`** (partial verification) → record each in **Coverage**.
 - Then **re-validate** every returned finding against kind **`final-finding`** and every returned
   chain against kind `chain`. A re-validation failure is a bug — fix it, do not ship the report.
 
