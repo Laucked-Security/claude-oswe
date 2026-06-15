@@ -1,0 +1,7 @@
+{
+  "name": "oswe-fixtures-node-safe",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hardened Express app (negative fixture).",
+  "dependencies": { "express": "^4.19.2" }
+}
