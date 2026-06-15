@@ -94,9 +94,10 @@ Chaque app est **auto-suffisante, mono-fichier** (pas de lib gadget externe), et
 **non authentifiée → bypass → RCE**, comme PHP (magic-hash → upload) et Node (NoSQLi → cmd-injection).
 
 > **Toutes les fixtures sont *static-only*** : le plugin ne les exécute ni ne les compile (analyse
-> statique du source uniquement). Elles n'ont **pas** besoin d'être runnables/compile-ready ; elles
-> doivent être du **source fidèle et lisible** où source→sink est visible. La vuln est dans le *pattern*
-> de code, indépendamment de l'OS ou d'une config de build complète.
+> statique du source uniquement). Elles n'ont **pas** besoin d'être **exécutables ni déployables** (ni
+> serveur qui démarre, ni config de build complète) ; mais le source doit être **syntaxiquement valide**
+> — vérifié quand l'outil local existe (ex. `python -m py_compile` si Python est dispo ; Java/.NET par
+> inspection, faute de toolchain ici). La vuln est dans le *pattern* de code, indépendante de l'OS.
 
 - **`python/vulnerable/`** (Flask, `app.py` + `requirements.txt`) :
   - **Étape 1 — bypass (broken access control / mass assignment)** : `POST /login` lit le JSON du
@@ -161,6 +162,9 @@ DEPLOY »** (traité comme donnée, pas instruction) :
 ## 8. Validation & acceptance
 
 Mêmes gates que le MVP :
+0. **Régression MVP** : `( cd skills/audit/scripts && npm test )` (= `node --test`) reste **88/88**.
+   Phase 2 ne touche pas `scripts/`, mais on relance la suite avant merge pour ne pas intégrer un MVP
+   cassé par accident.
 1. **`claude plugin validate . --strict`** reste vert : la seule édition du SKILL est dans le **corps**
    (règle multi-stack §2.1), **pas le frontmatter** ; le reste n'ajoute que du markdown/source.
 2. **Conformité de contenu** des références : marqueurs de classes de vulns présents (grep par stack —
@@ -185,4 +189,3 @@ Mêmes gates que le MVP :
   est la règle multi-stack (§2.1) — pas de changement des contrats ni de la mécanique de vérification.
 - Pas de fixture reposant sur une vraie gadget-chain de désérialisation (libs externes exclues du scan).
 - Pas d'exécution/compilation des fixtures par le plugin (analyse statique uniquement ; fixtures static-only).
-- Pas d'exécution/compilation des fixtures par le plugin (analyse statique uniquement).
