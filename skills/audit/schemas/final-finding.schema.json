@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "final-finding.schema.json",
+  "title": "OSWE Final Finding (post-orchestration)",
+  "allOf": [
+    { "$ref": "finding.schema.json" },
+    {
+      "required": ["finding_id", "partitions", "source_finding_ids"],
+      "properties": {
+        "finding_id": { "pattern": "^OSWE-[0-9]+$" },
+        "partitions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "source_finding_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    {
+      "if": { "properties": { "verification_status": { "const": "rejected" } }, "required": ["verification_status"] },
+      "then": { "not": { "anyOf": [ { "required": ["final_severity"] }, { "required": ["final_confidence"] } ] } },
+      "else": { "required": ["final_severity", "final_confidence"] }
+    }
+  ]
+}

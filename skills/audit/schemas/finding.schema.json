@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "finding.schema.json",
+  "title": "OSWE Finding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["finding_id", "partition_id", "title", "vuln_class", "source", "sink", "auth", "provisional_severity", "confidence", "verification_status"],
+  "properties": {
+    "finding_id": { "type": "string", "pattern": "^(.+-F[0-9]{3,}|OSWE-[0-9]+)$" },
+    "partition_id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "vuln_class": { "type": "string", "minLength": 1 },
+    "source": { "$ref": "#/$defs/loc" },
+    "sink": { "$ref": "#/$defs/loc" },
+    "auth": { "enum": ["unauthenticated", "authenticated", "admin"] },
+    "transformations": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+    "sanitizers": { "type": "array", "items": { "$ref": "#/$defs/sanitizer" } },
+    "prerequisites": { "type": "array", "items": { "type": "string" } },
+    "evidence": { "type": "array", "items": { "$ref": "#/$defs/fileline" } },
+    "provisional_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
+    "confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
+    "verification_status": { "enum": ["not-requested", "accepted", "downgraded", "rejected"] },
+    "partitions": { "type": "array", "items": { "type": "string" } },
+    "source_finding_ids": { "type": "array", "items": { "type": "string" } },
+    "final_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
+    "final_confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] }
+  },
+  "$defs": {
+    "fileline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "line"],
+      "properties": { "file": { "type": "string" }, "line": { "type": "integer", "minimum": 0 } }
+    },
+    "loc": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "line", "symbol", "kind"],
+      "properties": {
+        "file": { "type": "string" }, "line": { "type": "integer", "minimum": 0 },
+        "symbol": { "type": "string" }, "kind": { "type": "string" }
+      }
+    },
+    "step": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "line", "desc"],
+      "properties": { "file": { "type": "string" }, "line": { "type": "integer", "minimum": 0 }, "desc": { "type": "string" } }
+    },
+    "sanitizer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "line", "what", "why_insufficient"],
+      "properties": {
+        "file": { "type": "string" }, "line": { "type": "integer", "minimum": 0 },
+        "what": { "type": "string" }, "why_insufficient": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "oswe-audit-validators",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only toolchain to regenerate the self-contained validators.mjs from schemas/",
+  "scripts": {
+    "build": "node build-validators.mjs",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1"
+  }
+}
