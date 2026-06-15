@@ -53,7 +53,7 @@ never outlive the audit. Rules:
   It prints the confined real path (exit 0), or exits non-zero on a nonexistent path or one that
   escapes `${CLAUDE_PROJECT_DIR}` (`../`, symlink/junction, sibling-prefix like `project-old`). On a
   non-zero exit, **purge `.oswe/tmp/` and abort the audit** with the printed message. `arg: null` → scope = project root.
-- Detect **stack** via manifests (`composer.json`, `package.json`, `pyproject.toml`/
+- Detect **all stacks present** (a repo may be polyglot) via manifests (`composer.json`, `package.json`, `pyproject.toml`/
   `requirements.txt`, `pom.xml`/`build.gradle`, `*.csproj`) and file extensions; detect **framework**
   via dependencies/structure.
 - **Exclude from bulk scanning**: `vendor/`, `node_modules/`, `dist/`, `build/`, `out/`, `target/`,
@@ -61,7 +61,10 @@ never outlive the audit. Rules:
   **Parse lockfiles** (`composer.lock`, `package-lock.json`, …) to identify dependency versions.
 - Map the attack surface: routes, controllers, handlers, deserialization points, uploads, command
   execution, file access.
-- Load only the relevant `references/<ecosystem>.md` for the detected stack.
+- Load **every** relevant `references/<ecosystem>.md` for the detected stack(s) — a polyglot repo loads
+  several (e.g. a Java backend + a Node frontend load both `java.md` and `node.md`). The partition phase
+  (§2) separates the surface by module / framework; **partition by stack too**, so each partition is
+  analyzed against its own stack's reference.
 
 ### 2. Partition & prioritize
 Partition the surface **by module / framework / authentication boundary** (never one agent per
