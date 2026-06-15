@@ -256,8 +256,9 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
         "type": "object", "additionalProperties": false,
         "required": ["from", "to", "how", "evidence"],
         "properties": {
-          "from": { "type": "string" }, "to": { "type": "string" }, "how": { "type": "string" },
-          "evidence": { "type": "array", "items": { "$ref": "finding.schema.json#/$defs/fileline" } }
+          "from": { "type": "string", "minLength": 1 }, "to": { "type": "string", "minLength": 1 },
+          "how": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "finding.schema.json#/$defs/fileline" } }
         }
       }
     },
@@ -301,8 +302,8 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
         "type": "object", "additionalProperties": false,
         "required": ["from", "to", "verdict", "justification"],
         "properties": {
-          "from": { "type": "string" }, "to": { "type": "string" },
-          "verdict": { "enum": ["accepted", "rejected"] }, "justification": { "type": "string" }
+          "from": { "type": "string", "minLength": 1 }, "to": { "type": "string", "minLength": 1 },
+          "verdict": { "enum": ["accepted", "rejected"] }, "justification": { "type": "string", "minLength": 1 }
         }
       }
     },
@@ -989,11 +990,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyVerdicts } from "../apply-verdicts.mjs";
+import { validate } from "../validate-output.mjs";
 
 const CLI = fileURLToPath(new URL("../apply-verdicts.mjs", import.meta.url));
 const loc = (file, line, symbol, kind) => ({ file, line, symbol, kind });
 
-// Findings/chains reaching applyVerdicts are POST-aggregation → canonical OSWE-* ids.
+// Findings/chains reaching applyVerdicts are POST-aggregation → canonical OSWE-* ids WITH provenance.
 const finding = (id, sev = "Haute") => ({
   finding_id: id,
   partition_id: "auth",
@@ -1004,8 +1006,22 @@ const finding = (id, sev = "Haute") => ({
   auth: "unauthenticated",
   provisional_severity: sev,
   confidence: "preuve statique forte",
-  verification_status: "not-requested"
+  verification_status: "not-requested",
+  partitions: ["auth"],
+  source_finding_ids: ["src-" + id]
 });
+
+// A successful run must yield findings/chains that satisfy the FINAL schemas.
+function assertResultSchemaValid(r) {
+  for (const f of r.findings) {
+    const v = validate("final-finding", f);
+    assert.equal(v.valid, true, "final-finding invalid: " + JSON.stringify(v.errors) + " for " + JSON.stringify(f));
+  }
+  for (const c of r.chains) {
+    const v = validate("chain", c);
+    assert.equal(v.valid, true, "chain invalid: " + JSON.stringify(v.errors) + " for " + JSON.stringify(c));
+  }
+}
 
 const chain = (overrides = {}) => ({
   chain_id: "CHAIN-1",
@@ -1044,6 +1060,7 @@ test("fully accepted unauth-rce chain is promoted to Critique", () => {
   assert.equal(r.chains[0].severity, "Critique");
   assert.equal(r.chains[0].verification_status, "accepted");
   assert.equal(r.chains[0].confidence, "preuve statique forte");
+  assertResultSchemaValid(r); // results must satisfy the final schemas
 });
 
 test("accepted chain with a downgraded member is NOT Critique", () => {
@@ -1068,6 +1085,7 @@ test("chain whose member is rejected is itself rejected", () => {
   assert.notEqual(r.chains[0].severity, "Critique");
   const rejected = r.findings.find((f) => f.finding_id === "OSWE-1");
   assert.equal("final_severity" in rejected, false);
+  assertResultSchemaValid(r); // a rejected finding (no final fields) must still pass final-finding
 });
 
 test("chain with a not-requested member (no finding verdict) is not accepted", () => {
@@ -1120,13 +1138,14 @@ test("authenticated entry is not promoted to Critique", () => {
   assert.equal(r.chains[0].verification_status, "accepted"); // accepted but capped below Critique
 });
 
-test("verifier status=error rejects the batch for retry", () => {
+test("verifier status=error is a retryable verifier-output error", () => {
   const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp(acceptBoth, "error") });
   assert.equal(r.ok, false);
   assert.match(r.error, /error/);
+  assert.equal(r.error_kind, "verifier-output");
 });
 
-test("duplicate target_id is an error", () => {
+test("duplicate verdict target_id is a verifier-output error", () => {
   const dup = [
     { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
     { target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" }
@@ -1134,20 +1153,30 @@ test("duplicate target_id is an error", () => {
   const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp(dup) });
   assert.equal(r.ok, false);
   assert.match(r.error, /duplicate/);
+  assert.equal(r.error_kind, "verifier-output");
 });
 
-test("verdict targeting an unknown finding is an error", () => {
+test("verdict targeting an unknown finding is a verifier-output error", () => {
   const v = [{ target_type: "finding", target_id: "OSWE-9", verdict: "accepted", justification: "x" }];
   const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], verifierResponses: vresp(v) });
   assert.equal(r.ok, false);
   assert.match(r.error, /unknown finding/);
+  assert.equal(r.error_kind, "verifier-output");
 });
 
-test("chain referencing an unknown finding is an error", () => {
+test("chain referencing an unknown finding is an orchestrator-input error", () => {
   const c = chain({ finding_ids: ["OSWE-1", "OSWE-9"] });
-  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [c], verifierResponses: vresp([]) });
+  const r = applyVerdicts({ findings: [finding("OSWE-1"), finding("OSWE-2")], chains: [c], verifierResponses: vresp([]) });
   assert.equal(r.ok, false);
   assert.match(r.error, /unknown finding/);
+  assert.equal(r.error_kind, "orchestrator-input");
+});
+
+test("duplicate canonical finding_id in input is an orchestrator-input error", () => {
+  const r = applyVerdicts({ findings: [finding("OSWE-1"), finding("OSWE-1")], chains: [], verifierResponses: vresp([]) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /duplicate canonical finding_id/);
+  assert.equal(r.error_kind, "orchestrator-input");
 });
 
 test("partial verification leaves the chain not-requested with a coverage gap", () => {
@@ -1156,6 +1185,7 @@ test("partial verification leaves the chain not-requested with a coverage gap", 
   assert.equal(r.chains[0].verification_status, "not-requested"); // NOT rejected
   assert.notEqual(r.chains[0].severity, "Critique");
   assert.ok(r.gaps.some((g) => g.target_type === "chain" && g.target_id === "CHAIN-1"));
+  assertResultSchemaValid(r); // not-requested finding keeps final fields; chain stays schema-valid
 });
 
 test("finding downgraded gets new final severity/confidence", () => {
@@ -1194,6 +1224,7 @@ test("a chain with broken topology is an orchestrator error (ok:false)", () => {
   const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp([...acceptBoth, v]) });
   assert.equal(r.ok, false);
   assert.match(r.error, /invalid topology/);
+  assert.equal(r.error_kind, "orchestrator-input");
 });
 
 test("a malformed-topology chain with NO verdict is still an error (ok:false)", () => {
@@ -1207,6 +1238,7 @@ test("a malformed-topology chain with NO verdict is still an error (ok:false)", 
   const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp(acceptBoth) });
   assert.equal(r.ok, false);
   assert.match(r.error, /invalid topology/);
+  assert.equal(r.error_kind, "orchestrator-input");
 });
 
 test("a chain downgrade above the CANDIDATE severity is an error", () => {
@@ -1216,6 +1248,7 @@ test("a chain downgrade above the CANDIDATE severity is an error", () => {
   const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp([...acceptBoth, dn]) });
   assert.equal(r.ok, false);
   assert.match(r.error, /raises severity/);
+  assert.equal(r.error_kind, "verifier-output");
 });
 
 test("a probable member caps the accepted chain confidence (no Critique, not forte)", () => {
@@ -1271,10 +1304,13 @@ Create `skills/audit/scripts/apply-verdicts.mjs`:
 
 ```js
 // Deterministic application of verifier verdicts to findings and chains. Pure logic + a thin CLI.
-// applyVerdicts({ findings, chains, verifierResponses }) -> { ok, error, findings, chains, gaps }
-//   ok:false (error set, inputs returned unchanged) when the batch must be rejected & retried:
-//     verifier status=error, duplicate target_id, a verdict targeting an unknown finding/chain,
-//     or a chain referencing an unknown finding.
+// applyVerdicts({ findings, chains, verifierResponses }) -> { ok, error, error_kind, findings, chains, gaps }
+//   ok:false sets error + error_kind:
+//     "verifier-output"     → the verifier's response is bad; retry/drop THAT batch (status=error,
+//                             duplicate verdict target, verdict→unknown target, downgrade-raise).
+//     "orchestrator-input"  → our findings/chains are malformed; a retry cannot fix it, the caller
+//                             must fix the bug (duplicate canonical id, chain→unknown finding,
+//                             invalid chain topology).
 //   gaps: [{ target_type, target_id, reason }] for expected-but-unverified targets (partial).
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -1289,13 +1325,13 @@ const notIncrease = (origSev, origConf, newSev, newConf) =>
 function collectVerdicts(verifierResponses) {
   const verdicts = [];
   for (const resp of verifierResponses) {
-    if (resp.status === "error") return { error: "verifier returned status=error" };
+    if (resp.status === "error") return { error: "verifier returned status=error", error_kind: "verifier-output" };
     for (const v of resp.verdicts) verdicts.push(v);
   }
   const seen = new Set();
   for (const v of verdicts) {
     const key = `${v.target_type}:${v.target_id}`;
-    if (seen.has(key)) return { error: `duplicate verdict target ${key}` };
+    if (seen.has(key)) return { error: `duplicate verdict target ${key}`, error_kind: "verifier-output" };
     seen.add(key);
   }
   return { verdicts };
@@ -1315,37 +1351,42 @@ function topologyValid(c) {
 }
 
 export function applyVerdicts({ findings, chains, verifierResponses }) {
-  const fail = (error) => ({ ok: false, error, findings, chains, gaps: [] });
+  // error_kind distinguishes a bad VERIFIER response (retry/drop that batch) from a malformed
+  // ORCHESTRATOR INPUT (a bug in findings/chains — retrying cannot fix it; the caller must fix it).
+  const fail = (error, error_kind) => ({ ok: false, error, error_kind, findings, chains, gaps: [] });
 
   const collected = collectVerdicts(verifierResponses);
-  if (collected.error) return fail(collected.error);
+  if (collected.error) return fail(collected.error, collected.error_kind);
 
   const findingById = new Map(findings.map((f) => [f.finding_id, f]));
-  const chainIds = new Set(chains.map((c) => c.chain_id));
+  const chainById = new Map(chains.map((c) => [c.chain_id, c]));
+  // Duplicate canonical ids are an orchestrator bug (Map would silently overwrite).
+  if (findingById.size !== findings.length) return fail("duplicate canonical finding_id in input", "orchestrator-input");
+  if (chainById.size !== chains.length) return fail("duplicate chain_id in input", "orchestrator-input");
 
   const findingVerdict = new Map();
   const chainVerdict = new Map();
   for (const v of collected.verdicts) {
     if (v.target_type === "finding") {
-      if (!findingById.has(v.target_id)) return fail(`verdict targets unknown finding ${v.target_id}`);
+      if (!findingById.has(v.target_id)) return fail(`verdict targets unknown finding ${v.target_id}`, "verifier-output");
       findingVerdict.set(v.target_id, v);
     } else {
-      if (!chainIds.has(v.target_id)) return fail(`verdict targets unknown chain ${v.target_id}`);
+      if (!chainById.has(v.target_id)) return fail(`verdict targets unknown chain ${v.target_id}`, "verifier-output");
       chainVerdict.set(v.target_id, v);
     }
   }
   for (const c of chains) {
     for (const id of c.finding_ids) {
-      if (!findingById.has(id)) return fail(`chain ${c.chain_id} references unknown finding ${id}`);
+      if (!findingById.has(id)) return fail(`chain ${c.chain_id} references unknown finding ${id}`, "orchestrator-input");
     }
   }
 
-  // Reject contradictory FINDING downgrades that raise severity/confidence.
+  // Reject contradictory FINDING downgrades that raise severity/confidence (bad verifier output).
   for (const [id, v] of findingVerdict) {
     if (v.verdict === "downgraded") {
       const f = findingById.get(id);
       if (!notIncrease(f.provisional_severity, f.confidence, v.new_severity, v.new_confidence)) {
-        return fail(`downgraded finding ${id} raises severity/confidence`);
+        return fail(`downgraded finding ${id} raises severity/confidence`, "verifier-output");
       }
     }
   }
@@ -1391,7 +1432,7 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
 
     // Topology is an ORCHESTRATOR-bug check and must run REGARDLESS of any verdict — a malformed
     // chain that loses its verdict (e.g. after a dropped batch) must NOT slip through as not-requested.
-    if (!topologyValid(c)) return fail(`chain ${c.chain_id} has invalid topology (must be entry->f0->...->fN)`);
+    if (!topologyValid(c)) return fail(`chain ${c.chain_id} has invalid topology (must be entry->f0->...->fN)`, "orchestrator-input");
 
     const v = chainVerdict.get(c.chain_id);
 
@@ -1443,7 +1484,7 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
         Math.min(CONF_INDEX[c.confidence], CONF_INDEX[naturalConf])
       ];
       if (!notIncrease(ceilSev, ceilConf, v.new_severity, v.new_confidence)) {
-        return fail(`downgraded chain ${c.chain_id} raises severity/confidence above its ceiling`);
+        return fail(`downgraded chain ${c.chain_id} raises severity/confidence above its ceiling`, "verifier-output");
       }
       nc.verification_status = "downgraded";
       nc.severity = v.new_severity;
@@ -1459,7 +1500,7 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
     outChains.push(nc);
   }
 
-  return { ok: true, error: null, findings: outFindings, chains: outChains, gaps };
+  return { ok: true, error: null, error_kind: null, findings: outFindings, chains: outChains, gaps };
 }
 
 // CLI: node apply-verdicts.mjs --file <input.json> --out <result.json>
@@ -1750,6 +1791,12 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
 - **Otherwise:** dispatch `oswe-analyzer` subagents in parallel, **max 4 concurrent**, **budget 12
   partitions** total; anything beyond the budget → recorded as "non analysé" in Coverage.
 - Every `analyzer-response` (inline or subagent) is **validated** (see Validation below) before aggregating.
+- **`status` semantics** (the field is in the envelope; act on it):
+  - `ok` → aggregate its `findings`; merge its `coverage` into the global Coverage.
+  - `partial` → aggregate the `findings` present **and** copy `coverage.skipped` into the global
+    Coverage so the un-analyzed parts are reported (never silently dropped).
+  - `error` → **do not aggregate** its findings (they may be unsound). **Re-run that partition once**;
+    if it is still `error`, mark the **whole partition as a coverage gap** ("analyzer error") and move on.
 
 ### 4. Aggregate & dedupe
 - Assign **canonical global ids** `OSWE-1, OSWE-2, …`.
@@ -1791,7 +1838,7 @@ the tested CLI (it cannot be imported as a tool — it is invoked as a process):
 # exit 0 → result.ok (read the printed --out JSON); exit 1 → result.ok=false (see error, retry); exit 2 → IO/usage error.
 ```
 
-The CLI encodes the entire decision and returns `{ ok, error, findings, chains, gaps }`:
+The CLI encodes the entire decision and returns `{ ok, error, error_kind, findings, chains, gaps }`:
 - finding: `verification_status` + `final_severity`/`final_confidence` (`accepted` → provisional;
   `downgraded` → verdict `new_*`; `rejected` → final fields removed; unverified → provisional, `not-requested`);
 - the **global chain verdict is honoured first** (`rejected` → chain rejected; `downgraded` → chain
@@ -1802,15 +1849,17 @@ The CLI encodes the entire decision and returns `{ ok, error, findings, chains, 
   caps it below Critique), `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
 - a chain with **no verdict** stays **`not-requested`** (not rejected) and is added to `gaps`.
 
-Handle the result:
-- **`ok === false`** (verifier `status:"error"`, a **duplicate `target_id`**, an `if/then` violation,
-  or a verdict/chain referencing an **unknown** finding/chain) → **re-run only the offending verifier
-  batch once**. If it still fails, you must **not** keep feeding the bad response to `applyVerdicts`
-  (it would return `ok:false` forever). Instead **drop that batch's `verifier-response` from the
-  `verifierResponses` array entirely** and call `applyVerdicts` again with the remaining valid
-  responses: the targets that lost their verdict then surface naturally as **`gaps`** (findings →
-  `not-requested`, chains → `not-requested`), which you record in **Coverage**. Never apply a
-  contradictory batch.
+Handle the result by **`error_kind`** (the retry strategy differs — do not treat both the same):
+- **`ok === false` with `error_kind: "verifier-output"`** (verifier `status:"error"`, a duplicate
+  verdict `target_id`, a verdict targeting an **unknown** target, or a downgrade that raises severity)
+  → the verifier's response is bad. **Re-run only the offending verifier batch once.** If it still
+  fails, **drop that batch's `verifier-response` from the `verifierResponses` array** and call
+  `applyVerdicts` again with the remaining valid responses: the targets that lost their verdict then
+  surface as **`gaps`** (→ `not-requested`), recorded in **Coverage**. Never apply a contradictory batch.
+- **`ok === false` with `error_kind: "orchestrator-input"`** (duplicate canonical id, a chain
+  referencing an unknown finding, or **invalid chain topology**) → this is **our own bug**; a retry
+  cannot fix it and dropping a verifier batch will not help. **Stop and fix the construction step**
+  (aggregation §4 / chain building §5) that produced the malformed input. Do not ship the report.
 - **`gaps`** (partial verification) → record each in **Coverage**.
 - Then **re-validate** every returned finding against kind **`final-finding`** and every returned
   chain against kind `chain`. A re-validation failure is a bug — fix it, do not ship the report.
