@@ -1,0 +1,2 @@
+# Intentionally vulnerable Flask app for OSWE auditor validation. DO NOT DEPLOY.
+Flask==3.0.3
