@@ -1258,6 +1258,14 @@ test("duplicate canonical finding_id in input is an orchestrator-input error", (
   assert.equal(r.error_kind, "orchestrator-input");
 });
 
+test("malformed input (non-array / missing) yields a structured orchestrator-input error, not a throw", () => {
+  for (const arg of [undefined, {}, { findings: null, chains: [], batches: [] }, { findings: [], chains: [], batches: "nope" }]) {
+    const r = applyVerdicts(arg);
+    assert.equal(r.ok, false);
+    assert.equal(r.error_kind, "orchestrator-input");
+  }
+});
+
 test("a chain whose own batch errored is a coverage gap, left not-requested", () => {
   // findings batch ok; the chain's dedicated batch errors (0 verdicts) → chain → gap.
   const batches = [
@@ -1579,6 +1587,7 @@ const _tkey = (tt, tid) => `${tt}:${tid}`;
 // overwrite a duplicate, making source_finding_ids / verdict targeting ambiguous). Used by BOTH
 // applyVerdicts and the validate-batch CLI so they enforce an identical contract.
 export function checkCanonicalIds(findings, chains) {
+  if (!Array.isArray(findings) || !Array.isArray(chains)) return { ok: false, error: "findings and chains must be arrays", error_kind: "orchestrator-input" };
   const fset = new Set();
   for (const f of findings) { if (fset.has(f.finding_id)) return { ok: false, error: "duplicate canonical finding_id in input", error_kind: "orchestrator-input" }; fset.add(f.finding_id); }
   const cset = new Set();
@@ -1653,9 +1662,13 @@ export function validateBoundBatch(batch, { findingById, chainById }) {
   return { ok: true };
 }
 
-export function applyVerdicts({ findings, chains, batches }) {
+export function applyVerdicts({ findings, chains, batches } = {}) {
   const fail = (error, error_kind, error_batch_id = null) =>
     ({ ok: false, error, error_kind, error_batch_id, findings, chains, gaps: [] });
+
+  // Defensive: a malformed orchestrator call yields a structured orchestrator-input error, not a throw.
+  if (!Array.isArray(findings) || !Array.isArray(chains) || !Array.isArray(batches))
+    return fail("findings, chains, and batches must be arrays", "orchestrator-input");
 
   const idCheck = checkCanonicalIds(findings, chains);
   if (!idCheck.ok) return fail(idCheck.error, idCheck.error_kind);
@@ -2490,39 +2503,44 @@ findings. **Validate each built chain** against `chain.schema.json`.
   concurrent**). For each batch, record its **`batch_id`** and the exact **`expected_targets`** you
   dispatched, and pair them with the verifier's response as a bound wrapper:
   `{ batch_id, expected_targets: [{target_type, target_id}], response }`.
-- **Validate each response against the FULL bound-batch contract — before exhausting the retry —
-  using the SAME helper `applyVerdicts` uses.** After the schema check, write
-  `{ "findings": [ …full finding objects ], "chains": [ …full chain objects ], "batch": <the bound wrapper> }`
-  to a temp file and run
+- **One shared retry budget.** Keep a set **`retriedBatchIds`**. **Each batch may be re-dispatched at
+  most ONCE total**, whether the failure was found by the local per-batch check or by the global
+  preflight. Before any re-dispatch, check the set: if the `batch_id` is already in it, **do not retry
+  again — neutralize immediately** (set its response to `{ "status": "error", "verdicts": [] }`,
+  keeping `batch_id` + `expected_targets`; never delete the wrapper, or its `expected_targets` — and
+  thus the coverage gap — vanish). When you do re-dispatch, add the `batch_id` to the set first.
+
+- **Step A — per-batch check (local).** For each bound wrapper, after the `verifier-response` schema
+  check, write `{ "findings": [ …full finding objects ], "chains": [ …full chain objects ],
+  "batch": <wrapper> }` to a temp file and run
   `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-batch.mjs" --file <in>` (exit 0 valid /
-  1 invalid). With the full objects it checks (b) every verdict targets one of this batch's
-  `expected_targets`, (c) no duplicate verdict, (d) coverage matches `status`, **plus** transition
-  mismatches/contradictions and finding downgrade-raises. A schema-valid response with any of these is
-  **just as retryable** as a malformed one — do not defer it to 6b.
-- **Per-response retry** (do not also retry in 6b). Any response failing the per-batch check
-  → **re-dispatch that batch once**. If it still fails, **keep the wrapper but replace its response
-  with `{ "status": "error", "verdicts": [] }`** (preserving `batch_id` and `expected_targets`).
-  **Do not delete the wrapper** — deleting it would also delete its `expected_targets`, and those
-  targets would vanish without a coverage gap. With the neutralized response, every expected target
-  surfaces as a **gap**.
-- **GLOBAL preflight + retry loop (this is where ALL remaining retries happen).** Some
-  `verifier-output` errors are only detectable across all batches — chiefly the **chain downgrade
-  ceiling** (it depends on member verdicts in other batches). So after the per-response checks, run
-  the **full `apply-verdicts.mjs` preflight** (the exact §6b invocation below) and inspect the result:
-  - `ok:false`, `error_kind: "verifier-output"` → `error_batch_id` names the offending batch:
-    **re-dispatch it once**; if it still fails, **neutralize it in place** (`{status:"error",verdicts:[]}`,
-    keep `batch_id`+`expected_targets`); **re-run the preflight**. Repeat until it no longer reports a
-    verifier-output error. This is what gives the chain-downgrade-ceiling violation its one retry.
+  1 invalid). It checks: every verdict targets one of this batch's `expected_targets`, no duplicate
+  verdict, coverage matches `status`, **plus** transition mismatches/contradictions and finding
+  downgrade-raises. On failure → **re-dispatch once per the shared budget**; then **re-run BOTH the
+  schema check AND `validate-batch` on the new response** (a retried response is not trusted — it gets
+  the same gate). If still failing (or budget already spent) → neutralize in place.
+
+- **Step B — global preflight loop.** Some `verifier-output` errors are only visible across batches —
+  chiefly the **chain downgrade ceiling** (it depends on member verdicts in other batches). After
+  Step A, run the **full `apply-verdicts.mjs` preflight** (the exact §6b invocation below) and loop:
+  - `ok:false`, `error_kind: "verifier-output"` → `error_batch_id` names the offending batch. If it is
+    **not yet in `retriedBatchIds`**: re-dispatch it once (add to the set), then **re-run Step A's
+    schema + `validate-batch` gate on the new response**, then re-run the preflight. If it is **already
+    in the set**: **neutralize it in place** and re-run the preflight. Repeat until no verifier-output
+    error remains.
   - `ok:false`, `error_kind: "orchestrator-input"` → our own bug (§4/§5/§6 construction) — **stop and
     fix it**, do not ship.
-  - `ok:true` → carry that settled result into §6b (no re-run needed).
+  - `ok:true` → **capture the JSON the command printed to stdout** (the `cat` below) into your
+    orchestration state. That printed JSON is the settled result you reuse in §6b — **the `--out` file
+    itself is deleted by the `trap`, so rely on the captured stdout, not the file**.
 
 ### 6b. Apply verdicts → final severity (deterministic CLI)
 **Do not apply verdicts or decide Critique by hand.** This is the **same `apply-verdicts.mjs`
-invocation** §6's preflight loop already settled — once that loop reached `ok:true`, reuse its `--out`
-result directly (no need to re-run). The invocation, for reference and for the preflight: write a
-single JSON input `{ "findings": [...], "chains": [...], "batches": [...] }` (the bound wrappers from
-§6) to a literal temp path and run the tested CLI (a process, not an importable tool):
+invocation** §6's preflight loop already settled — once that loop reached `ok:true`, **reuse the JSON
+it printed to stdout** (captured in Step B; the temp `--out` file is gone by then). The invocation,
+for reference and for the preflight loop: write a single JSON input
+`{ "findings": [...], "chains": [...], "batches": [...] }` (the bound wrappers from §6) to a literal
+temp path and run the tested CLI (a process, not an importable tool):
 
 ```bash
 ( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"' EXIT
@@ -2530,9 +2548,10 @@ single JSON input `{ "findings": [...], "chains": [...], "batches": [...] }` (th
     --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" \
     --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"
   rc=$?                                                           # capture BEFORE cat
-  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"
+  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"      # <-- THIS stdout is the result you keep
   exit "$rc" )                                                    # preserve the CLI's exit code
-# exit 0 → result.ok (read the printed --out JSON); exit 1 → result.ok=false (see error, retry); exit 2 → IO/usage error.
+# exit 0 → result.ok (KEEP the printed JSON); exit 1 → result.ok=false (see error_kind/error_batch_id); exit 2 → IO/usage error.
+# The --out file is removed on subshell exit; persist the printed JSON in orchestration state instead.
 ```
 
 The CLI encodes the entire decision and returns `{ ok, error, error_kind, error_batch_id, findings, chains, gaps, decisions }`:

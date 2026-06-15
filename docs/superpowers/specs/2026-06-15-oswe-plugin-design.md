@@ -45,13 +45,19 @@ claude-oswe/
 │       │   ├── analyzer-response.schema.json   # enveloppe analyseur { partition_id, status, findings[], coverage }
 │       │   ├── verifier-response.schema.json    # enveloppe vérificateur { status, verdicts[] }
 │       │   ├── finding.schema.json
+│       │   ├── final-finding.schema.json        # finding post-orchestration (provenance + sévérité finale requises)
 │       │   ├── chain.schema.json
 │       │   └── verdict.schema.json
 │       ├── scripts/
 │       │   ├── validate-output.mjs             # CLI : parse une réponse + valide via validators.mjs
+│       │   ├── confine-path.mjs                 # confinement de périmètre déterministe (realpath, anti symlink)
+│       │   ├── aggregate-findings.mjs           # dédup/fusion/numérotation OSWE-N indépendante de l'ordre
+│       │   ├── apply-verdicts.mjs               # application des verdicts + liaison batch + promotion Critique + journal
+│       │   ├── validate-batch.mjs               # CLI du contrat bound-batch (pré-retry §6)
 │       │   ├── validators.mjs                  # AJV standalone PRÉCOMPILÉ (autonome, en-tête licence MIT ajv)
 │       │   ├── build-validators.mjs            # (dev) régénère validators.mjs depuis schemas/
-│       │   └── package.json                    # (dev) manifeste devDependencies (ajv, ajv-cli) pour régénérer
+│       │   ├── package.json                    # (dev) manifeste devDependencies (ajv, esbuild) pour régénérer
+│       │   └── test/                            # node:test : validate-output, confine-path, aggregate-findings, apply-verdicts
 │       └── references/
 │           ├── php.md   ├── node.md   ├── python.md   ├── java.md   └── dotnet.md
 ├── test-fixtures/
