@@ -1391,32 +1391,72 @@ test("a downgraded CHAIN that raises severity is an error", () => {
   assert.ok(r.error_batch_id, "chain downgrade-raise must name the offending batch");
 });
 
-// --- validateBoundBatch (the shared pre-retry contract check) ---
+// --- validateBoundBatch (the shared pre-retry contract check; takes Maps of full objects) ---
 const fbatch = (status, verdicts, expected) => ({ batch_id: "B1", expected_targets: expected, response: { status, verdicts } });
+const fmap = (...fs) => new Map(fs.map((f) => [f.finding_id, f]));
+const cmap = (...cs) => new Map(cs.map((c) => [c.chain_id, c]));
 
 test("validateBoundBatch: ok batch covering its targets passes", () => {
   const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
-  assert.equal(validateBoundBatch(b, { findingIds: ids("OSWE-1"), chainIds: ids() }).ok, true);
+  assert.equal(validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() }).ok, true);
 });
 
 test("validateBoundBatch: unexpected target → verifier-output", () => {
   const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
-  const r = validateBoundBatch(b, { findingIds: ids("OSWE-1", "OSWE-2"), chainIds: ids() });
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1"), finding("OSWE-2")), chainById: cmap() });
   assert.equal(r.ok, false);
   assert.equal(r.error_kind, "verifier-output");
 });
 
 test("validateBoundBatch: mixed composition → orchestrator-input", () => {
   const b = fbatch("ok", [], [{ target_type: "finding", target_id: "OSWE-1" }, { target_type: "chain", target_id: "CHAIN-1" }]);
-  const r = validateBoundBatch(b, { findingIds: ids("OSWE-1"), chainIds: ids("CHAIN-1") });
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap(chain()) });
   assert.equal(r.ok, false);
   assert.match(r.error, /composition must be/);
+});
+
+test("validateBoundBatch: missing response.verdicts → orchestrator-input (defensive shape)", () => {
+  const b = { batch_id: "B1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok" } };
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "orchestrator-input");
+});
+
+test("validateBoundBatch: unknown status → verifier-output (not treated as partial)", () => {
+  const b = fbatch("done", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "verifier-output");
+});
+
+test("validateBoundBatch: chain transition mismatch is caught pre-retry", () => {
+  const cv = { target_type: "chain", target_id: "CHAIN-1", verdict: "accepted", transition_verdicts: [], justification: "x" };
+  const b = fbatch("ok", [cv], [{ target_type: "chain", target_id: "CHAIN-1" }]);
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1"), finding("OSWE-2")), chainById: cmap(chain()) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /transition_verdicts do not match/);
+});
+
+test("validateBoundBatch: a rejected chain verdict STILL needs the exact transition set", () => {
+  const cv = { target_type: "chain", target_id: "CHAIN-1", verdict: "rejected", transition_verdicts: [], justification: "x" };
+  const b = fbatch("ok", [cv], [{ target_type: "chain", target_id: "CHAIN-1" }]);
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1"), finding("OSWE-2")), chainById: cmap(chain()) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /transition_verdicts do not match/);
+});
+
+test("validateBoundBatch: finding downgrade-raise is caught pre-retry", () => {
+  const v = { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Haute", new_confidence: "preuve statique forte", justification: "x" };
+  const b = fbatch("ok", [v], [{ target_type: "finding", target_id: "OSWE-1" }]);
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1", "Moyenne")), chainById: cmap() });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /raises severity/);
 });
 
 test("validateBoundBatch and applyVerdicts agree on a coverage mismatch", () => {
   const expected = [{ target_type: "finding", target_id: "OSWE-1" }, { target_type: "finding", target_id: "OSWE-2" }];
   const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], expected);
-  assert.equal(validateBoundBatch(b, { findingIds: ids("OSWE-1", "OSWE-2"), chainIds: ids() }).ok, false);
+  assert.equal(validateBoundBatch(b, { findingById: fmap(finding("OSWE-1"), finding("OSWE-2")), chainById: cmap() }).ok, false);
   const r = applyVerdicts({ findings: bothFindings(), chains: [], batches: [b] });
   assert.equal(r.ok, false);
   assert.equal(r.error_kind, "verifier-output");
@@ -1438,6 +1478,26 @@ test("CLI exits 0/1/2 (spawnSync)", () => {
 
   const usage = spawnSync(process.execPath, [CLI, "--file", inOk]); // missing --out
   assert.equal(usage.status, 2);
+});
+
+test("validate-batch.mjs CLI exits 0/1/2 (spawnSync)", () => {
+  const VB = fileURLToPath(new URL("../validate-batch.mjs", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "oswe-vb-"));
+  const okIn = join(dir, "ok.json");
+  writeFileSync(okIn, JSON.stringify({
+    findings: [finding("OSWE-1")], chains: [],
+    batch: { batch_id: "B1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }] } }
+  }));
+  assert.equal(spawnSync(process.execPath, [VB, "--file", okIn]).status, 0);
+
+  const badIn = join(dir, "bad.json");
+  writeFileSync(badIn, JSON.stringify({
+    findings: [finding("OSWE-1"), finding("OSWE-2")], chains: [],
+    batch: { batch_id: "B1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "x" }] } }
+  }));
+  assert.equal(spawnSync(process.execPath, [VB, "--file", badIn]).status, 1); // unexpected target
+
+  assert.equal(spawnSync(process.execPath, [VB]).status, 2); // missing --file
 });
 ```
 
@@ -1498,36 +1558,68 @@ function topologyValid(c) {
 
 const _tkey = (tt, tid) => `${tt}:${tid}`;
 
-// Single-batch contract check, shared by the orchestrator (phase 6, BEFORE exhausting the retry)
-// and by applyVerdicts (phase 6b, as a backstop). Pure; `findingIds`/`chainIds` are Sets of existing
-// ids. Returns { ok:true } or { ok:false, error, error_kind }. Cross-batch checks (duplicate batch_id,
-// overlapping expected_targets) and completeness are the caller's job — they need all batches.
-export function validateBoundBatch(batch, { findingIds, chainIds }) {
-  const exists = (tt, tid) => (tt === "finding" ? findingIds.has(tid) : chainIds.has(tid));
+// The verifier's transition_verdicts must be the EXACT set of the chain's transitions (no missing,
+// extra, or duplicated {from,to}) — required for EVERY chain verdict, including 'rejected'.
+function exactTransitionMatch(c, tv) {
+  const vKeys = tv.map((t) => `${t.from}->${t.to}`);
+  const cKeys = c.transitions.map((t) => `${t.from}->${t.to}`);
+  const vSet = new Set(vKeys), cSet = new Set(cKeys);
+  return vKeys.length === cKeys.length && vKeys.length === vSet.size && cKeys.length === cSet.size &&
+    [...cSet].every((k) => vSet.has(k)) && [...vSet].every((k) => cSet.has(k));
+}
+
+// Single-batch contract check, shared by the orchestrator (phase 6, BEFORE exhausting the retry) and
+// by applyVerdicts (phase 6b backstop). Pure; `findingById`/`chainById` are Maps of the FULL objects
+// so it can also catch transition mismatches/contradictions and finding downgrade-raises pre-retry.
+// Returns { ok:true } or { ok:false, error, error_kind }. NOTE: the chain downgrade ceiling depends on
+// member verdicts from OTHER batches, so it stays in applyVerdicts (6b). Cross-batch checks (duplicate
+// batch_id, overlapping expected_targets) and completeness are the caller's job (they need all batches).
+export function validateBoundBatch(batch, { findingById, chainById }) {
+  const bad = (error, error_kind) => ({ ok: false, error, error_kind });
+  // Defensive shape validation (the wrapper is orchestrator-built; a malformed one is our bug).
+  if (!batch || typeof batch !== "object") return bad("batch is not an object", "orchestrator-input");
+  const bid = batch.batch_id;
+  if (!Array.isArray(batch.expected_targets) || batch.expected_targets.length === 0) return bad(`batch ${bid} has no expected_targets`, "orchestrator-input");
+  if (!batch.response || typeof batch.response !== "object" || !Array.isArray(batch.response.verdicts)) return bad(`batch ${bid} has no response.verdicts array`, "orchestrator-input");
+  if (!["ok", "partial", "error"].includes(batch.response.status)) return bad(`batch ${bid} has invalid status ${batch.response.status}`, "verifier-output");
+
+  const exists = (tt, tid) => (tt === "finding" ? findingById.has(tid) : chainById.has(tid));
   const types = batch.expected_targets.map((t) => t.target_type);
-  if (types.some((tt) => tt !== "finding" && tt !== "chain")) return { ok: false, error: `batch ${batch.batch_id} has an invalid target_type`, error_kind: "orchestrator-input" };
+  if (types.some((tt) => tt !== "finding" && tt !== "chain")) return bad(`batch ${bid} has an invalid target_type`, "orchestrator-input");
   const chainCount = types.filter((tt) => tt === "chain").length;
   const findingCount = types.length - chainCount;
   if (!((chainCount === 1 && findingCount === 0) || (chainCount === 0 && findingCount >= 1 && findingCount <= 5)))
-    return { ok: false, error: `batch ${batch.batch_id} composition must be 1-5 findings XOR exactly 1 chain`, error_kind: "orchestrator-input" };
+    return bad(`batch ${bid} composition must be 1-5 findings XOR exactly 1 chain`, "orchestrator-input");
+
   const expected = new Set();
   for (const t of batch.expected_targets) {
     const k = _tkey(t.target_type, t.target_id);
-    if (expected.has(k)) return { ok: false, error: `batch ${batch.batch_id} lists ${k} twice in expected_targets`, error_kind: "orchestrator-input" };
-    if (!exists(t.target_type, t.target_id)) return { ok: false, error: `batch ${batch.batch_id} expects unknown ${k}`, error_kind: "orchestrator-input" };
+    if (expected.has(k)) return bad(`batch ${bid} lists ${k} twice in expected_targets`, "orchestrator-input");
+    if (!exists(t.target_type, t.target_id)) return bad(`batch ${bid} expects unknown ${k}`, "orchestrator-input");
     expected.add(k);
   }
   const covered = new Set();
-  for (const v of (batch.response.verdicts || [])) {
+  for (const v of batch.response.verdicts) {
     const k = _tkey(v.target_type, v.target_id);
-    if (!expected.has(k)) return { ok: false, error: `batch ${batch.batch_id} returned a verdict for unexpected target ${k}`, error_kind: "verifier-output" };
-    if (covered.has(k)) return { ok: false, error: `batch ${batch.batch_id} returned a duplicate verdict for ${k}`, error_kind: "verifier-output" };
+    if (!expected.has(k)) return bad(`batch ${bid} returned a verdict for unexpected target ${k}`, "verifier-output");
+    if (covered.has(k)) return bad(`batch ${bid} returned a duplicate verdict for ${k}`, "verifier-output");
     covered.add(k);
+    // Semantic checks possible from THIS batch alone:
+    if (v.target_type === "finding" && v.verdict === "downgraded") {
+      const f = findingById.get(v.target_id);
+      if (!notIncrease(f.provisional_severity, f.confidence, v.new_severity, v.new_confidence)) return bad(`downgraded finding ${v.target_id} raises severity/confidence`, "verifier-output");
+    }
+    if (v.target_type === "chain") {
+      const c = chainById.get(v.target_id);
+      const tv = v.transition_verdicts || [];
+      if (!exactTransitionMatch(c, tv)) return bad(`chain ${v.target_id} transition_verdicts do not match its transitions`, "verifier-output");
+      if (v.verdict !== "rejected" && !tv.every((t) => t.verdict === "accepted")) return bad(`chain ${v.target_id} has a rejected transition but its verdict is '${v.verdict}', not 'rejected'`, "verifier-output");
+    }
   }
   const st = batch.response.status;
-  if (st === "error") { if (covered.size !== 0) return { ok: false, error: `batch ${batch.batch_id} status=error must carry no verdicts`, error_kind: "verifier-output" }; }
-  else if (st === "ok") { if (covered.size !== expected.size) return { ok: false, error: `batch ${batch.batch_id} status=ok must cover all expected targets`, error_kind: "verifier-output" }; }
-  else { if (covered.size === 0 || covered.size === expected.size) return { ok: false, error: `batch ${batch.batch_id} status=partial must cover a strict non-empty subset`, error_kind: "verifier-output" }; }
+  if (st === "error") { if (covered.size !== 0) return bad(`batch ${bid} status=error must carry no verdicts`, "verifier-output"); }
+  else if (st === "ok") { if (covered.size !== expected.size) return bad(`batch ${bid} status=ok must cover all expected targets`, "verifier-output"); }
+  else { if (covered.size === 0 || covered.size === expected.size) return bad(`batch ${bid} status=partial must cover a strict non-empty subset`, "verifier-output"); }
   return { ok: true };
 }
 
@@ -1542,8 +1634,6 @@ export function applyVerdicts({ findings, chains, batches }) {
   if (chainById.size !== chains.length) return fail("duplicate chain_id in input", "orchestrator-input");
 
   const tkey = (tt, tid) => `${tt}:${tid}`;
-  const findingIds = new Set(findingById.keys());
-  const chainIds = new Set(chainById.keys());
 
   // --- Per-batch contract (shared helper) + cross-batch checks; bind verdicts to their batch. ---
   const expectedBatchOf = new Map();          // "type:id" -> batch_id (also enforces disjointness)
@@ -1552,7 +1642,7 @@ export function applyVerdicts({ findings, chains, batches }) {
   for (const b of batches) {
     if (seenBatchIds.has(b.batch_id)) return fail(`duplicate batch_id ${b.batch_id}`, "orchestrator-input");
     seenBatchIds.add(b.batch_id);
-    const vb = validateBoundBatch(b, { findingIds, chainIds });   // the SAME check phase 6 runs pre-retry
+    const vb = validateBoundBatch(b, { findingById, chainById }); // the SAME check phase 6 runs pre-retry
     if (!vb.ok) return fail(vb.error, vb.error_kind, vb.error_kind === "verifier-output" ? b.batch_id : null);
     for (const t of b.expected_targets) {
       const k = tkey(t.target_type, t.target_id);
@@ -1580,21 +1670,13 @@ export function applyVerdicts({ findings, chains, batches }) {
     if (!expectedBatchOf.has(k)) return fail(`required target ${k} was not dispatched to any batch`, "orchestrator-input");
   }
 
+  // Per-batch contract (incl. transition match/contradiction and FINDING downgrade-raise) was already
+  // enforced by validateBoundBatch above; here we only apply verdicts and resolve cross-batch state.
   const findingVerdict = new Map();
   const chainVerdict = new Map();
   for (const [k, { v }] of verdictOf) {
     if (v.target_type === "finding") findingVerdict.set(v.target_id, v);
     else chainVerdict.set(v.target_id, v);
-  }
-
-  // Reject contradictory FINDING downgrades that raise severity/confidence (bad verifier output).
-  for (const [id, v] of findingVerdict) {
-    if (v.verdict === "downgraded") {
-      const f = findingById.get(id);
-      if (!notIncrease(f.provisional_severity, f.confidence, v.new_severity, v.new_confidence)) {
-        return fail(`downgraded finding ${id} raises severity/confidence`, "verifier-output", verdictOf.get(tkey("finding", id)).batch_id);
-      }
-    }
   }
 
   // Every expected target with no verdict (status=partial/error) is a coverage gap.
@@ -1665,30 +1747,13 @@ export function applyVerdicts({ findings, chains, batches }) {
       continue;
     }
 
+    // validateBoundBatch already guaranteed (for EVERY chain verdict, incl. 'rejected') that
+    // transition_verdicts exactly match the chain's transitions, and that an accepted/downgraded
+    // verdict has no rejected transition. So here we trust the transitions and resolve member state.
     if (v.verdict === "rejected") {
       decisions.push({ target_type: "chain", target_id: c.chain_id, outcome: "rejected", reason: v.justification });
       outChains.push(reject(nc));
       continue;
-    }
-
-    // accepted / downgraded: the verdict must be CONSISTENT with its transition verdicts.
-    const vList = v.transition_verdicts || [];
-    const vKeys = vList.map((t) => `${t.from}->${t.to}`);
-    const chainKeys = c.transitions.map((t) => `${t.from}->${t.to}`);
-    const vSet = new Set(vKeys);
-    const chainSet = new Set(chainKeys);
-    const exactMatch =
-      vList.length === c.transitions.length &&
-      vKeys.length === vSet.size && chainKeys.length === chainSet.size &&
-      [...chainSet].every((k) => vSet.has(k)) && [...vSet].every((k) => chainSet.has(k));
-    const batchId = verdictOf.get(tkey("chain", c.chain_id)).batch_id;
-
-    // (a) The reported transition set must exactly match the chain's transitions.
-    if (!exactMatch) return fail(`chain ${c.chain_id} transition_verdicts do not match its transitions`, "verifier-output", batchId);
-    // (b) CONTRADICTION: a rejected transition with a non-'rejected' chain verdict. A rejected
-    //     transition implies the chain verdict MUST be 'rejected'; anything else is a verifier bug.
-    if (!vList.every((t) => t.verdict === "accepted")) {
-      return fail(`chain ${c.chain_id} has a rejected transition but its verdict is '${v.verdict}', not 'rejected'`, "verifier-output", batchId);
     }
 
     const members = c.finding_ids.map((id) => statusById.get(id));
@@ -1791,22 +1856,27 @@ Create `skills/audit/scripts/validate-batch.mjs`:
 ```js
 // CLI around validateBoundBatch — phase 6 runs this per response BEFORE exhausting the retry, with
 // the SAME contract applyVerdicts enforces in 6b. node validate-batch.mjs --file <in.json>
-//   in.json: { "finding_ids": ["OSWE-1", …], "chain_ids": ["CHAIN-1", …], "batch": { … } }
+//   in.json: { "findings": [ …full finding objects ], "chains": [ …full chain objects ], "batch": { … } }
 //   exit 0 valid / 1 invalid (prints {ok:false,error,error_kind}) / 2 usage|IO.
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { validateBoundBatch } from "./apply-verdicts.mjs";
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const args = process.argv.slice(2);
-  const fi = args.indexOf("--file");
-  if (fi === -1) { process.stderr.write("usage: validate-batch.mjs --file <in.json>\n"); process.exit(2); }
+export function runCli(argv) {
+  const fi = argv.indexOf("--file");
+  if (fi === -1) { process.stderr.write("usage: validate-batch.mjs --file <in.json>\n"); return 2; }
   let input;
-  try { input = JSON.parse(readFileSync(args[fi + 1], "utf8")); }
-  catch (e) { process.stderr.write("cannot read --file: " + e.message + "\n"); process.exit(2); }
-  const r = validateBoundBatch(input.batch, { findingIds: new Set(input.finding_ids || []), chainIds: new Set(input.chain_ids || []) });
+  try { input = JSON.parse(readFileSync(argv[fi + 1], "utf8")); }
+  catch (e) { process.stderr.write("cannot read --file: " + e.message + "\n"); return 2; }
+  const findingById = new Map((input.findings || []).map((f) => [f.finding_id, f]));
+  const chainById = new Map((input.chains || []).map((c) => [c.chain_id, c]));
+  const r = validateBoundBatch(input.batch, { findingById, chainById });
   console.log(JSON.stringify(r));
-  process.exit(r.ok ? 0 : 1);
+  return r.ok ? 0 : 1;
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  process.exit(runCli(process.argv.slice(2)));
 }
 ```
 
@@ -1912,6 +1982,17 @@ test("duplicate analyzer finding_id is an error", () => {
   assert.match(r.error, /duplicate analyzer finding_id/);
 });
 
+test("numbering is total-ordered even when groups share file+line but differ in symbol/kind", () => {
+  // Same source file+line and same sink, but different source.symbol → two distinct groups.
+  const a = raw("p-F001", "p", { source: loc("a.php", 10, "aaa", "http-param") });
+  const b = raw("p-F002", "p", { source: loc("a.php", 10, "zzz", "http-param") });
+  const r1 = aggregateFindings([a, b]);
+  const r2 = aggregateFindings([b, a]); // reversed input
+  assert.equal(r1.findings.length, 2);
+  assert.deepEqual(r1.findings, r2.findings); // identical numbering regardless of order
+  assert.equal(r1.findings.find((f) => f.source.symbol === "aaa").finding_id, "OSWE-1");
+});
+
 test("CLI exits 0/1/2 (spawnSync)", () => {
   const dir = mkdtempSync(join(tmpdir(), "oswe-agg-"));
   const inOk = join(dir, "in.json");
@@ -2008,7 +2089,10 @@ export function aggregateFindings(rawFindings) {
 
   merged.sort((a, b) =>
     cmp(a.source.file, b.source.file) || cmp(a.source.line, b.source.line) ||
-    cmp(a.sink.file, b.sink.file) || cmp(a.sink.line, b.sink.line) || cmp(a.vuln_class, b.vuln_class));
+    cmp(a.sink.file, b.sink.file) || cmp(a.sink.line, b.sink.line) || cmp(a.vuln_class, b.vuln_class) ||
+    // Final tiebreaker = the full canonical dedupe key, so groups that share file+line+class but
+    // differ in symbol/kind get a TOTAL order (numbering never depends on arrival order).
+    cmp(canon({ vc: a.vuln_class, s: locKey(a.source), k: locKey(a.sink) }), canon({ vc: b.vuln_class, s: locKey(b.source), k: locKey(b.sink) })));
   merged.forEach((f, i) => { f.finding_id = `OSWE-${i + 1}`; });
 
   return { ok: true, error: null, findings: merged };
@@ -2315,7 +2399,8 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
 - **Bind each response to its assigned partition** (the schema cannot — it doesn't know what you
   dispatched). For an analyzer dispatched for partition `P`, **reject the response unless**
   `response.partition_id === P` **and** every `finding.partition_id === P` **and** every
-  `finding.finding_id` starts with `P-F` **and** the `finding_id`s are **unique within the response**
+  `finding.finding_id` matches **exactly `^<P>-F[0-9]{3,}$`** (with `P` regex-escaped — `startsWith("P-F")`
+  is too loose: it would accept `P-Foo-F001`) **and** the `finding_id`s are **unique within the response**
   (collect them in a Set; a repeat like two `P-F001` makes `source_finding_ids` ambiguous). A mismatch
   is treated like an analyzer `error` (re-run the partition once, then coverage gap) — never aggregate
   cross-partition, mislabeled, or duplicate-id findings. (The aggregator in §4 also rejects a globally
@@ -2374,11 +2459,13 @@ findings. **Validate each built chain** against `chain.schema.json`.
   `{ batch_id, expected_targets: [{target_type, target_id}], response }`.
 - **Validate each response against the FULL bound-batch contract — before exhausting the retry —
   using the SAME helper `applyVerdicts` uses.** After the schema check, write
-  `{ "finding_ids": […], "chain_ids": […], "batch": <the bound wrapper> }` to a temp file and run
+  `{ "findings": [ …full finding objects ], "chains": [ …full chain objects ], "batch": <the bound wrapper> }`
+  to a temp file and run
   `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-batch.mjs" --file <in>` (exit 0 valid /
-  1 invalid). It checks (b) every verdict targets one of this batch's `expected_targets`, (c) no
-  duplicate verdict, (d) coverage matches `status`. A schema-valid response with an unexpected target
-  or a coverage/status mismatch is **just as retryable** as a malformed one — do not defer it to 6b.
+  1 invalid). With the full objects it checks (b) every verdict targets one of this batch's
+  `expected_targets`, (c) no duplicate verdict, (d) coverage matches `status`, **plus** transition
+  mismatches/contradictions and finding downgrade-raises. A schema-valid response with any of these is
+  **just as retryable** as a malformed one — do not defer it to 6b.
 - **This is the ONLY place retries happen** (do not also retry in 6b). Any response failing (a)–(d)
   → **re-dispatch that batch once**. If it still fails, **keep the wrapper but replace its response
   with `{ "status": "error", "verdicts": [] }`** (preserving `batch_id` and `expected_targets`).
