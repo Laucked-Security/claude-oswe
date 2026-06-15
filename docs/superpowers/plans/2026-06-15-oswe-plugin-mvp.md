@@ -1445,6 +1445,20 @@ test("validateBoundBatch: missing/empty batch_id → orchestrator-input", () => 
   assert.match(r.error, /non-empty batch_id/);
 });
 
+test("validateBoundBatch: null expected_target element → orchestrator-input (no throw)", () => {
+  const b = { batch_id: "B1", expected_targets: [null], response: { status: "error", verdicts: [] } };
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "orchestrator-input");
+});
+
+test("validateBoundBatch: null verdict element → verifier-output (no throw)", () => {
+  const b = { batch_id: "B1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [null] } };
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "verifier-output");
+});
+
 test("validateBoundBatch: unknown status → verifier-output (not treated as partial)", () => {
   const b = fbatch("done", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
   const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
@@ -1639,10 +1653,14 @@ export function validateBoundBatch(batch, { findingById, chainById }) {
   if (!["ok", "partial", "error"].includes(batch.response.status)) return bad(`batch ${bid} has invalid status ${batch.response.status}`, "verifier-output");
 
   const exists = (tt, tid) => (tt === "finding" ? findingById.has(tid) : chainById.has(tid));
-  const types = batch.expected_targets.map((t) => t.target_type);
-  if (types.some((tt) => tt !== "finding" && tt !== "chain")) return bad(`batch ${bid} has an invalid target_type`, "orchestrator-input");
-  const chainCount = types.filter((tt) => tt === "chain").length;
-  const findingCount = types.length - chainCount;
+  // Every expected_target must be a well-formed {target_type, target_id} (a null/typeless element is
+  // our bug). Validate shape BEFORE reading fields, so [null] can't throw.
+  for (const t of batch.expected_targets) {
+    if (!t || (t.target_type !== "finding" && t.target_type !== "chain") || typeof t.target_id !== "string")
+      return bad(`batch ${bid} has a malformed expected_target`, "orchestrator-input");
+  }
+  const chainCount = batch.expected_targets.filter((t) => t.target_type === "chain").length;
+  const findingCount = batch.expected_targets.length - chainCount;
   if (!((chainCount === 1 && findingCount === 0) || (chainCount === 0 && findingCount >= 1 && findingCount <= 5)))
     return bad(`batch ${bid} composition must be 1-5 findings XOR exactly 1 chain`, "orchestrator-input");
 
@@ -1655,6 +1673,9 @@ export function validateBoundBatch(batch, { findingById, chainById }) {
   }
   const covered = new Set();
   for (const v of batch.response.verdicts) {
+    // A null/typeless verdict is a verifier-output defect (the response is JSON the verifier emitted).
+    if (!v || (v.target_type !== "finding" && v.target_type !== "chain") || typeof v.target_id !== "string")
+      return bad(`batch ${bid} returned a malformed verdict`, "verifier-output");
     const k = _tkey(v.target_type, v.target_id);
     if (!expected.has(k)) return bad(`batch ${bid} returned a verdict for unexpected target ${k}`, "verifier-output");
     if (covered.has(k)) return bad(`batch ${bid} returned a duplicate verdict for ${k}`, "verifier-output");
@@ -2632,8 +2653,13 @@ The file tool cannot see a shell variable, so use a **literal path you choose**:
 ```
 
 where `<kind>` is `analyzer-response`, `verifier-response`, `chain`, `finding`, or `final-finding`.
-A non-zero exit prints `{valid:false, errors:[…]}`. On **invalid** output: retry the agent **once**;
-if it still fails, record the finding/partition as a **coverage gap** — never invent or guess data.
+**Branch on the exit code — they mean different things:**
+- **exit 0** → valid; proceed.
+- **exit 1** → the agent's output is **invalid** (`{valid:false, errors:[…]}`): retry the agent
+  **once**; if it still fails, record the finding/partition as a **coverage gap** — never invent data.
+- **exit 2** → an **orchestration error** (you wrote an unreadable/missing temp file, or passed an
+  unknown `<kind>`): **stop and fix the call** — do NOT retry the agent or record a gap.
+
 (Node is a verified prerequisite — see the top of the pipeline — so there is no degraded text-only
 path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitignored (via `.oswe/`).
 
@@ -2643,11 +2669,19 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
 - **Exploit chains**: each chain step by step (from `chain` objects), proof per transition.
 - **Detailed findings**: one block per finding, with **`final_severity`** (or `provisional_severity`
   if `not-requested`), `final_confidence`/`confidence`, and `verification_status`.
-- **Coverage**: analyzed vs skipped + reason (budget, exclusion, out of scope, unsupported stack,
-  analyzer error, partition-binding mismatch, validation gap, dropped verifier batch).
-- **Annexe « Findings écartés »**: every `rejected` finding/chain from `decisions`, with its `reason`
-  — including **implicit** chain rejections (a rejected/unverified member, or a transition mismatch),
-  whose cause `applyVerdicts` records so it is never lost.
+- **Coverage**: analyzed vs skipped + reason. This is where **everything that was NOT a clean
+  refutation** is recorded with its cause, sourced from `applyVerdicts`'s **`gaps[]`** plus the
+  decisions whose `outcome` is `not-requested`:
+  - budget / exclusion / out of scope / unsupported stack / analyzer error / partition-binding mismatch;
+  - a finding or chain left **`not-requested`** because its batch was **neutralized** (retry exhausted).
+    **At the moment you neutralize (§6), record the cause in Coverage** — the `batch_id`, the affected
+    `expected_targets`, and the original failure (e.g. "transition mismatch", "unexpected target") —
+    because the neutralized `{status:error, verdicts:[]}` response no longer carries it;
+  - a chain left **`not-requested`** because a **member was unverified** (its `gaps[]` reason names the member).
+- **Annexe « Findings écartés »**: **only** items with **`outcome: "rejected"`** in `decisions`
+  (a real refutation), with their `reason` — a verifier `rejected` finding/chain, or a chain implicitly
+  rejected because a **member was rejected** (refuted). Items that are merely `not-requested` (unverified
+  member, neutralized batch) belong in **Coverage**, not here.
 - **Chat summary**: verdict, RCE chains, top criticals, coverage (not the full detail).
 
 ### Report security
@@ -2669,8 +2703,8 @@ Confidence: `preuve statique forte` · `probable` · `à vérifier`.
 
 - [ ] **Step 2: Verify key directives are present**
 
-Run: `for s in "disable-model-invocation: true" "node --version" "confine-path.mjs" "aggregate-findings.mjs" "validate-batch.mjs" "apply-verdicts.mjs" "retriedBatchIds" "orchestrator-input" "expected_targets" "final-finding"; do grep -q -- "$s" skills/audit/SKILL.md && echo "OK: $s" || echo "MISSING: $s"; done`
-Expected: every line prints `OK:` — the model-invocation guard, Node prerequisite, the four helper CLIs (`confine-path`, `aggregate-findings`, `validate-batch`, `apply-verdicts`), the shared retry budget (`retriedBatchIds`), the local error-kind branch (`orchestrator-input` = stop vs retry), the batch binding (`expected_targets`), and `final-finding` re-validation. Any `MISSING:` means SKILL.md is incomplete — fix it before proceeding.
+Run: `missing=0; for s in "disable-model-invocation: true" "node --version" "confine-path.mjs" "aggregate-findings.mjs" "validate-batch.mjs" "apply-verdicts.mjs" "retriedBatchIds" "orchestrator-input" "expected_targets" "final-finding"; do if grep -q -- "$s" skills/audit/SKILL.md; then echo "OK: $s"; else echo "MISSING: $s"; missing=$((missing+1)); fi; done; echo "missing=$missing"; exit "$missing"`
+Expected: every line prints `OK:`, `missing=0`, and the command **exits 0**. A non-zero exit (one or more `MISSING:`) is a hard failure — SKILL.md lacks a critical-protocol marker (a helper CLI, the shared retry budget `retriedBatchIds`, the local error-kind branch, the batch binding, or `final-finding` re-validation). Fix SKILL.md before proceeding.
 
 - [ ] **Step 3: Commit**
 
