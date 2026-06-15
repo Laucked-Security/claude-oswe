@@ -110,6 +110,7 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
 - Create: `skills/audit/schemas/chain.schema.json`
 - Create: `skills/audit/schemas/verdict.schema.json`
 - Create: `skills/audit/schemas/verifier-response.schema.json`
+- Create: `skills/audit/schemas/final-finding.schema.json` (Step 6)
 
 > These are validated end-to-end by the unit tests in Task 4. This task just authors them.
 
@@ -1561,8 +1562,9 @@ Create `skills/audit/scripts/apply-verdicts.mjs`:
 // Deterministic application of verifier verdicts to findings and chains. Pure logic + a thin CLI.
 // applyVerdicts({ findings, chains, batches })
 //   -> { ok, error, error_kind, error_batch_id, findings, chains, gaps, decisions }
-//   decisions: [{ target_type, target_id, outcome, reason }] — auditable log incl. the cause of every
-//     implicit chain rejection (drives the report's "Findings écartés" annex).
+//   decisions: [{ target_type, target_id, outcome, reason }] — auditable log of settled outcomes;
+//     outcome:"rejected" entries (incl. a chain rejected because a member was rejected) drive the
+//     report annex. Transition-mismatch/neutralization causes live in Coverage, not here.
 //
 // batches bind each verifier response to the exact targets it was asked about (round-trip integrity):
 //   batches: [{ batch_id, expected_targets: [{target_type, target_id}], response: { status, verdicts } }]
@@ -1769,8 +1771,10 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
     }
   }
 
-  // decisions: an auditable log of every outcome + reason (drives the report's "Findings écartés" annex,
-  // including IMPLICIT chain rejections whose cause — a member or transition — would otherwise be lost).
+  // decisions: an auditable log of every settled outcome + reason. outcome:"rejected" entries
+  // (incl. a chain implicitly rejected because a MEMBER was rejected) drive the report's
+  // "Findings écartés" annex. Transition-mismatch causes are NOT here — such a response is a
+  // verifier-output error retried/neutralized in §6, and the orchestrator records that cause in Coverage.
   const decisions = [];
 
   const outFindings = findings.map((f) => {
@@ -2653,10 +2657,14 @@ The file tool cannot see a shell variable, so use a **literal path you choose**:
 ```
 
 where `<kind>` is `analyzer-response`, `verifier-response`, `chain`, `finding`, or `final-finding`.
-**Branch on the exit code — they mean different things:**
+**Branch on the exit code AND the `<kind>` — they mean different things:**
 - **exit 0** → valid; proceed.
-- **exit 1** → the agent's output is **invalid** (`{valid:false, errors:[…]}`): retry the agent
-  **once**; if it still fails, record the finding/partition as a **coverage gap** — never invent data.
+- **exit 1 on an AGENT output** (`<kind>` = `analyzer-response` or `verifier-response`) → the agent
+  misbehaved: retry the agent **once**; if it still fails, record the finding/partition as a
+  **coverage gap** — never invent data.
+- **exit 1 on an ORCHESTRATOR-built object** (`<kind>` = `chain`, `finding`, or `final-finding`) →
+  **our own bug** (we built/mutated it wrong in §4/§5/§6b): **stop and fix the construction** — there
+  is no agent to retry.
 - **exit 2** → an **orchestration error** (you wrote an unreadable/missing temp file, or passed an
   unknown `<kind>`): **stop and fix the call** — do NOT retry the agent or record a gap.
 
@@ -2667,8 +2675,13 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
 - **Header**: target, detected stack + framework, date, scope, authorization reminder.
 - **Executive summary**: counts per severity + verdict (was an unauth-RCE path found? with what proof level?).
 - **Exploit chains**: each chain step by step (from `chain` objects), proof per transition.
-- **Detailed findings**: one block per finding, with **`final_severity`** (or `provisional_severity`
-  if `not-requested`), `final_confidence`/`confidence`, and `verification_status`.
+- **Detailed findings**: one block per finding, showing `verification_status` and a severity chosen by
+  status:
+  - `accepted` / `downgraded` → **`final_severity`** + `final_confidence`;
+  - `not-requested` → `provisional_severity` + `confidence` (unverified);
+  - `rejected` → it has **no** final severity by design; show `provisional_severity` struck through /
+    labelled **« réfutée »** (do not present it as a live finding). A rejected finding also appears in
+    the annex (§ « Findings écartés ») with its reason.
 - **Coverage**: analyzed vs skipped + reason. This is where **everything that was NOT a clean
   refutation** is recorded with its cause, sourced from `applyVerdicts`'s **`gaps[]`** plus the
   decisions whose `outcome` is `not-requested`:
