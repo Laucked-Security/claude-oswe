@@ -1,7 +1,7 @@
-# Plugin OSWE / White-Box — Design (v6)
+# Plugin OSWE / White-Box — Design (v7)
 
 **Date :** 2026-06-15
-**Statut :** Révisé (5e tour) — en attente d'approbation pour plan d'implémentation
+**Statut :** Révisé (6e tour) — en attente d'approbation pour plan d'implémentation
 **Approche :** C (skill orchestrateur → sous-agents analyseurs parallèles + vérificateur)
 **Cible Claude Code :** 2.1.177+
 
@@ -15,7 +15,7 @@ OSWE / OffSec en profondeur** :
 - recherche de vulnérabilités web **et chaînage vers un RCE non authentifié** (signature OSWE),
   sous **contrats de données validés par un validateur déterministe** (§6) ;
 - sortie double : **résumé dans le chat** + **rapport markdown daté** dans `.oswe/reports/` ;
-- passage à l'échelle via **sous-agents analyseurs parallèles plafonnés** + **vérificateur** indépendant **batché**.
+- passage à l'échelle via **analyseurs parallèles plafonnés** + **vérificateur** indépendant **batché**.
 
 **Cadre :** audit white-box **autorisé**, à visée **défensive** (identifier pour corriger).
 
@@ -42,13 +42,15 @@ claude-oswe/
 │   └── audit/
 │       ├── SKILL.md             # cœur : déclencheur /oswe:audit + méthodologie + orchestration
 │       ├── schemas/             # JSON Schema faisant foi
-│       │   ├── analyzer-response.schema.json   # enveloppe de réponse analyseur
+│       │   ├── analyzer-response.schema.json   # enveloppe analyseur { partition_id, status, findings[], coverage }
+│       │   ├── verifier-response.schema.json    # enveloppe vérificateur { status, verdicts[] }
 │       │   ├── finding.schema.json
 │       │   ├── chain.schema.json
 │       │   └── verdict.schema.json
 │       ├── scripts/
-│       │   ├── validate-output.mjs             # validateur déterministe (Node)
-│       │   └── vendor/                         # ajv bundlé (committé, zéro install runtime)
+│       │   ├── validate-output.mjs             # CLI : parse une réponse + valide via validators.mjs
+│       │   ├── validators.mjs                  # AJV standalone PRÉCOMPILÉ (autonome, en-tête licence MIT ajv)
+│       │   └── build-validators.mjs            # (dev) régénère validators.mjs depuis schemas/
 │       └── references/
 │           ├── php.md   ├── node.md   ├── python.md   ├── java.md   └── dotnet.md
 ├── test-fixtures/
@@ -66,17 +68,18 @@ claude-oswe/
 **Responsabilités par unité :**
 
 - **`skills/audit/SKILL.md`** — cœur : déclencheur, méthodologie, orchestration (§4), agrégation,
-  **appel du validateur** sur chaque sortie d'agent et sur les chaînes construites (§6.5).
+  **appel du validateur** sur chaque réponse d'agent et sur les chaînes construites (§6.5).
 - **`skills/audit/schemas/*.json`** — JSON Schema **faisant foi** (exemples de §6 illustratifs).
-- **`skills/audit/scripts/validate-output.mjs`** — **validateur déterministe** : reçoit une réponse
-  d'agent (ou une chaîne), la parse en JSON et la valide via **ajv**. Sortie : `valid` / liste
-  d'erreurs. **Stratégie de dépendance** : ajv **vendoré** sous `scripts/vendor/` (bundle autonome
-  committé) → **aucun `npm install` au runtime** ; exécuté via `node`. **Si Node indisponible**,
-  l'orchestrateur effectue une **validation structurelle de repli** et **signale la garantie réduite**
-  dans la Couverture.
+- **`skills/audit/scripts/`** — **stratégie de dépendance décidée** : pas de `vendor/` opaque, mais un
+  **bundle AJV standalone précompilé** : `build-validators.mjs` (dev only) compile les schémas en
+  **`validators.mjs` autonome** (validateurs précompilés, **aucune dépendance runtime**), committé
+  **avec l'en-tête de licence MIT d'ajv**. `validate-output.mjs` parse une réponse d'agent/une chaîne
+  et appelle ces validateurs → `valid` / liste d'erreurs. **Si Node indisponible**, l'orchestrateur
+  fait une **validation structurelle de repli** et **signale la garantie réduite** dans la Couverture.
 - **`agents/oswe-analyzer.md`** — analyse **une partition**, renvoie l'**enveloppe §6.1** en
-  **JSON brut uniquement, sans bloc Markdown ni texte hors JSON**. `tools: Read, Grep, Glob`.
-- **`agents/oswe-verifier.md`** — vérificateur indépendant (§6.4), même contrainte « JSON brut ». Read-only.
+  **JSON brut uniquement (sans bloc Markdown ni texte hors JSON)**. `tools: Read, Grep, Glob`.
+- **`agents/oswe-verifier.md`** — vérificateur indépendant, renvoie l'**enveloppe §6.4** (« JSON brut »),
+  read-only.
 
 ## 4. Flux d'exécution (ordre strict)
 
@@ -92,21 +95,19 @@ claude-oswe/
    **`provisional_severity` (jamais Critique)** et **`verification_status: not-requested`** par défaut.
    - **Petit repo** (≤ **2 partitions**) → **en ligne, sans sous-agents *analyseurs***.
    - Sinon → **dispatch parallèle** d'`oswe-analyzer`, **max 4 concurrents**, **budget 12 partitions**.
-   - **Chaque enveloppe de réponse est validée** (§6.5) avant agrégation.
+   - **Chaque enveloppe analyseur est validée** (§6.5) avant agrégation.
 4. **Agrégation & dédoublonnage** — **IDs canoniques globaux**, dédoublonnage (clé §6.4), fusion en
-   conservant `partitions[]`.
+   peuplant `partitions[]`.
 5. **Construction des chaînes candidates** — l'orchestrateur assemble les **chaînes** (§6.2) ;
-   **chaque chaîne construite est validée contre `chain.schema.json`** (§6.5).
-6. **Vérification (batchée)** — `oswe-verifier` reçoit :
-   - **tous les findings impliqués dans une chaîne candidate**,
-   - **tous les findings provisoirement `Haute`**,
-   - **la (les) chaîne(s) complète(s)**.
-
+   **chaque chaîne est validée contre `chain.schema.json`** (§6.5).
+6. **Vérification (batchée)** — `oswe-verifier` reçoit : **tous les findings d'une chaîne candidate**,
+   **tous les findings provisoirement `Haute`**, **la (les) chaîne(s) complète(s)**.
    **Batching** : **≤ 5 findings OU 1 chaîne complète par invocation**, **max 2 vérificateurs
-   concurrents**. Chaque cible reçoit un verdict (§6.4) ; on met à jour son
-   **`verification_status`** (`accepted|downgraded|rejected`). Les findings **non soumis** restent
-   `not-requested`. La sévérité **`Critique` n'est attribuée ici** qu'à une chaîne **validée** (toutes
-   transitions `accepted`). Un `rejected` part en **annexe** (§7).
+   concurrents**. Chaque invocation renvoie l'**enveloppe `verifier-response`** (§6.4), **validée**
+   (§6.5). On met à jour le **`verification_status`** de chaque finding **et chaîne** ciblé
+   (`accepted|downgraded|rejected`) ; les cibles non soumises restent `not-requested`. La sévérité
+   **`Critique` n'est attribuée ici** qu'à une chaîne **validée** (toutes transitions `accepted`).
+   Un `rejected` part en **annexe** (§7).
 7. **Rapport** — résumé chat **et** rapport complet dans `.oswe/reports/`.
 
 ## 5. Modèle de sévérité
@@ -125,27 +126,34 @@ claude-oswe/
 
 > Blocs **illustratifs** ; les **JSON Schema de `skills/audit/schemas/` font foi**, le **validateur les applique**.
 
-### 6.1 Enveloppe de réponse analyseur (`analyzer-response.schema.json`)
+### 6.1 Enveloppe analyseur (`analyzer-response.schema.json`)
 
 `{ partition_id, status: "ok"|"partial"|"error", findings: Finding[], coverage: { analyzed: string[], skipped: [{ path, reason }] } }`
 
-**Finding** (`finding.schema.json`) — champs : `finding_id` (`<partition_id>-F<nnn>` ; réattribué
-canonique à l'agrégation), `partition_id`, `title`, `vuln_class` (vocabulaire **ouvert**, `other`),
-`source`/`sink` = `{ file, line, symbol, kind }`, `auth`
-(`unauthenticated|authenticated|admin`), `transformations[]`, `sanitizers[]`
-(`{ file, line, what, why_insufficient }`), `prerequisites[]`, `evidence[] = { file, line }`,
-`provisional_severity` (`Haute|Moyenne|Basse|Info` — **jamais Critique**),
-`confidence` (`preuve statique forte|probable|à vérifier`),
-**`verification_status` (`not-requested|accepted|downgraded|rejected`)**,
-**`partitions[]`** (peuplé à la fusion, §6.4).
+**Finding** (`finding.schema.json`) — champs :
+- `finding_id` : **deux formats admis** — partition-scopé `^.+-F\d{3,}$` (sortie analyseur) **ou**
+  canonique `^OSWE-\d+$` (après agrégation). Le schéma autorise explicitement les deux.
+- `partition_id`, `title`, `vuln_class` (vocabulaire **ouvert**, `other`),
+- `source`/`sink` = `{ file, line, symbol, kind }`, `auth` (`unauthenticated|authenticated|admin`),
+- `transformations[]`, `sanitizers[] = { file, line, what, why_insufficient }`,
+- `prerequisites[]`, `evidence[] = { file, line }`,
+- `provisional_severity` (`Haute|Moyenne|Basse|Info` — **jamais Critique**),
+- `confidence` (`preuve statique forte|probable|à vérifier`),
+- `verification_status` (`not-requested|accepted|downgraded|rejected`),
+- **`partitions[]` : FACULTATIF** (absent dans la réponse initiale de l'analyseur ; **peuplé à la
+  fusion**, §6.4 — donc sa présence n'est exigée qu'après agrégation).
 
 ### 6.2 Chaîne (`chain.schema.json`, construite par l'orchestrateur)
 
 `chain_id` (`CHAIN-<n>`), `entry_point { file, line, route, auth }`, `finding_ids[]` (canoniques,
 ordre d'exploitation), `transitions[] { from, to, how, evidence[] }`,
-`final_impact` (`unauth-rce|auth-rce|account-takeover|data-exfiltration|...`), `severity`, `confidence`.
+`final_impact` (`unauth-rce|auth-rce|account-takeover|data-exfiltration|...`),
+`severity`, `confidence`, **`verification_status` (`not-requested|accepted|downgraded|rejected`)**.
 
-### 6.3 (réservé) — voir 6.1/6.2
+### 6.3 Enveloppe vérificateur (`verifier-response.schema.json`)
+
+`{ status: "ok"|"partial"|"error", verdicts: Verdict[] }` — une invocation batchée renvoie **plusieurs**
+verdicts.
 
 ### 6.4 Verdict & dédoublonnage
 
@@ -156,8 +164,8 @@ ordre d'exploitation), `transitions[] { from, to, how, evidence[] }`,
 
 **Dédoublonnage inter-partitions** : clé = `vuln_class` + source canonique + sink canonique,
 chaque objet sur **`{ file, symbol, line, kind }`** (inclure **`line` et `kind`** évite de fusionner
-deux flux distincts dans la même fonction). **Sans `partition_id`.** Fusion → conserve `partitions[]`
-et la liste des `finding_id` sources.
+deux flux distincts dans la même fonction). **Sans `partition_id`.** Fusion → peuple `partitions[]` et
+conserve la liste des `finding_id` sources.
 
 **Règle de chaîne** : `preuve statique forte` **seulement si chaque transition** est `accepted`,
 sinon **rétrogradée** (`probable`/`à vérifier`).
@@ -165,8 +173,8 @@ sinon **rétrogradée** (`probable`/`à vérifier`).
 ### 6.5 Validation des sorties (déterministe)
 
 - Les agents émettent du **JSON brut uniquement** (pas de bloc Markdown, pas de texte hors JSON).
-- L'orchestrateur passe **chaque réponse d'agent** (`analyzer-response`, `verdict`) **et chaque chaîne
-  construite** à **`validate-output.mjs`** (ajv vendoré).
+- L'orchestrateur passe **chaque `analyzer-response`, chaque `verifier-response`, et chaque chaîne
+  construite** à **`validate-output.mjs`** (validateurs AJV précompilés).
 - **Sortie non conforme** → **une nouvelle tentative** ; échec persistant → **lacune de couverture**
   (§7), **jamais inventée**. Repli si Node absent : validation structurelle + garantie réduite signalée.
 
@@ -176,7 +184,7 @@ Fichier : `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (
 
 - **En-tête** : cible, stack + framework, date, périmètre, rappel d'autorisation.
 - **Résumé exécutif** : compte par sévérité + **verdict**.
-- **Chaînes d'exploitation** : étape par étape (§6.2), preuve par transition.
+- **Chaînes d'exploitation** : étape par étape (§6.2) avec `verification_status`, preuve par transition.
 - **Findings détaillés** : un bloc par vuln (§6.1) avec sévérité, confiance, **`verification_status`**.
 - **Couverture** : analysé vs **ignoré + raison** (budget, exclusion, hors périmètre, stack non
   supportée, échec d'agent, lacune de validation §6.5, repli sans Node).
@@ -200,13 +208,14 @@ Fichier : `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (
 - **`claude plugin validate . --strict`** passe.
 - **`claude --plugin-dir .`** : `/oswe:audit` déclenche le skill ; **pas d'auto-lancement**
   (`disable-model-invocation: true`).
-- **`validate-output.mjs`** rejette une enveloppe malformée et accepte une enveloppe conforme
-  (tests unitaires du validateur avec fixtures JSON valides/invalides).
+- **`validate-output.mjs`** : tests unitaires acceptant les enveloppes `analyzer-response` et
+  `verifier-response` conformes et rejetant les malformées (fixtures JSON valides/invalides).
 - **Fixtures par stack, positives ET négatives** :
   - *positive* : **détection** + **chaîne** RCE reconstruite (ex PHP : type juggling → bypass auth →
     upload non filtré → RCE) ;
   - *négative* : **aucun finding critique faux positif**.
-- Chaque finding du rapport porte un **`verification_status`** ; la **couverture** liste analysé vs ignoré.
+- Chaque finding **et chaîne** du rapport porte un **`verification_status`** ; la **couverture** liste
+  analysé vs ignoré.
 
 ## 10. Livraison par phases
 
