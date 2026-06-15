@@ -1258,10 +1258,18 @@ test("duplicate canonical finding_id in input is an orchestrator-input error", (
   assert.equal(r.error_kind, "orchestrator-input");
 });
 
-test("malformed input (non-array / missing) yields a structured orchestrator-input error, not a throw", () => {
-  for (const arg of [undefined, {}, { findings: null, chains: [], batches: [] }, { findings: [], chains: [], batches: "nope" }]) {
+test("malformed input (non-array / missing / null elements) yields a structured error, not a throw", () => {
+  const cases = [
+    undefined, {},
+    { findings: null, chains: [], batches: [] },
+    { findings: [], chains: [], batches: "nope" },
+    { findings: [null], chains: [], batches: [] },                 // null finding element
+    { findings: [finding("OSWE-1")], chains: [null], batches: [] }, // null chain element
+    { findings: [finding("OSWE-1")], chains: [], batches: [null] }  // null batch element
+  ];
+  for (const arg of cases) {
     const r = applyVerdicts(arg);
-    assert.equal(r.ok, false);
+    assert.equal(r.ok, false, JSON.stringify(arg));
     assert.equal(r.error_kind, "orchestrator-input");
   }
 });
@@ -1589,9 +1597,17 @@ const _tkey = (tt, tid) => `${tt}:${tid}`;
 export function checkCanonicalIds(findings, chains) {
   if (!Array.isArray(findings) || !Array.isArray(chains)) return { ok: false, error: "findings and chains must be arrays", error_kind: "orchestrator-input" };
   const fset = new Set();
-  for (const f of findings) { if (fset.has(f.finding_id)) return { ok: false, error: "duplicate canonical finding_id in input", error_kind: "orchestrator-input" }; fset.add(f.finding_id); }
+  for (const f of findings) {
+    if (!f || typeof f.finding_id !== "string") return { ok: false, error: "a finding is missing a string finding_id", error_kind: "orchestrator-input" };
+    if (fset.has(f.finding_id)) return { ok: false, error: "duplicate canonical finding_id in input", error_kind: "orchestrator-input" };
+    fset.add(f.finding_id);
+  }
   const cset = new Set();
-  for (const c of chains) { if (cset.has(c.chain_id)) return { ok: false, error: "duplicate chain_id in input", error_kind: "orchestrator-input" }; cset.add(c.chain_id); }
+  for (const c of chains) {
+    if (!c || typeof c.chain_id !== "string") return { ok: false, error: "a chain is missing a string chain_id", error_kind: "orchestrator-input" };
+    if (cset.has(c.chain_id)) return { ok: false, error: "duplicate chain_id in input", error_kind: "orchestrator-input" };
+    cset.add(c.chain_id);
+  }
   return { ok: true };
 }
 
@@ -1682,10 +1698,12 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
   const verdictOf = new Map();                // "type:id" -> { v, batch_id }
   const seenBatchIds = new Set();
   for (const b of batches) {
-    if (seenBatchIds.has(b.batch_id)) return fail(`duplicate batch_id ${b.batch_id}`, "orchestrator-input");
-    seenBatchIds.add(b.batch_id);
+    // validateBoundBatch first: it tolerates a null/shapeless wrapper and a missing batch_id, so we
+    // never touch b.batch_id before the shape is known good.
     const vb = validateBoundBatch(b, { findingById, chainById }); // the SAME check phase 6 runs pre-retry
     if (!vb.ok) return fail(vb.error, vb.error_kind, vb.error_kind === "verifier-output" ? b.batch_id : null);
+    if (seenBatchIds.has(b.batch_id)) return fail(`duplicate batch_id ${b.batch_id}`, "orchestrator-input");
+    seenBatchIds.add(b.batch_id);
     for (const t of b.expected_targets) {
       const k = tkey(t.target_type, t.target_id);
       if (expectedBatchOf.has(k)) return fail(`target ${k} expected by multiple batches`, "orchestrator-input");
@@ -2498,7 +2516,7 @@ findings. **Validate each built chain** against `chain.schema.json`.
 - **Build the target set**: all findings used in a candidate chain, all provisional-`Haute` findings,
   and the full chain(s). **Deduplicate by `target_type:target_id`** — a finding can be both a chain
   member and provisional-`Haute`, and several chains can share a finding; each distinct target is
-  verified **at most once** and lands in **exactly one** batch.
+  **assigned to exactly one** batch (then dispatched once, with at most one retry per the shared budget).
 - **Partition the targets into batches** (≤ 5 findings OR 1 full chain per batch, **max 2 verifiers
   concurrent**). For each batch, record its **`batch_id`** and the exact **`expected_targets`** you
   dispatched, and pair them with the verifier's response as a bound wrapper:
@@ -2514,11 +2532,18 @@ findings. **Validate each built chain** against `chain.schema.json`.
   check, write `{ "findings": [ …full finding objects ], "chains": [ …full chain objects ],
   "batch": <wrapper> }` to a temp file and run
   `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-batch.mjs" --file <in>` (exit 0 valid /
-  1 invalid). It checks: every verdict targets one of this batch's `expected_targets`, no duplicate
-  verdict, coverage matches `status`, **plus** transition mismatches/contradictions and finding
-  downgrade-raises. On failure → **re-dispatch once per the shared budget**; then **re-run BOTH the
-  schema check AND `validate-batch` on the new response** (a retried response is not trusted — it gets
-  the same gate). If still failing (or budget already spent) → neutralize in place.
+  1 invalid / 2 usage|IO). It checks: every verdict targets one of this batch's `expected_targets`, no
+  duplicate verdict, coverage matches `status`, **plus** transition mismatches/contradictions and
+  finding downgrade-raises.
+  **Branch on the failure kind — not every failure is retryable.** On exit 1, read the printed
+  `{ ok:false, error, error_kind }`:
+  - **schema-invalid response, or `error_kind: "verifier-output"`** → the verifier misbehaved:
+    **re-dispatch once per the shared budget**, then **re-run BOTH the schema check AND `validate-batch`
+    on the new response** (a retried response is not trusted — same gate). If still failing (or budget
+    already spent) → **neutralize in place**.
+  - **`error_kind: "orchestrator-input"`** (malformed wrapper: bad composition, unknown/duplicated
+    expected target, missing `batch_id`, …) or **exit 2** (usage/IO) → **our own bug, not retryable.
+    Stop and fix the batch-assembly step** — do NOT re-dispatch or neutralize.
 
 - **Step B — global preflight loop.** Some `verifier-output` errors are only visible across batches —
   chiefly the **chain downgrade ceiling** (it depends on member verdicts in other batches). After
@@ -2644,8 +2669,8 @@ Confidence: `preuve statique forte` · `probable` · `à vérifier`.
 
 - [ ] **Step 2: Verify key directives are present**
 
-Run: `grep -n "disable-model-invocation: true" skills/audit/SKILL.md && grep -n "node --version" skills/audit/SKILL.md && grep -n "confine-path.mjs" skills/audit/SKILL.md && grep -n "aggregate-findings.mjs" skills/audit/SKILL.md && grep -n "apply-verdicts.mjs" skills/audit/SKILL.md && grep -n "expected_targets" skills/audit/SKILL.md && grep -n "error_kind" skills/audit/SKILL.md`
-Expected: matching lines for each (model-invocation guard, concurrency cap, confinement helper, `--file` validator contract, verdict-application helper, `final-finding` re-validation, exact transition match).
+Run: `for s in "disable-model-invocation: true" "node --version" "confine-path.mjs" "aggregate-findings.mjs" "validate-batch.mjs" "apply-verdicts.mjs" "retriedBatchIds" "orchestrator-input" "expected_targets" "final-finding"; do grep -q -- "$s" skills/audit/SKILL.md && echo "OK: $s" || echo "MISSING: $s"; done`
+Expected: every line prints `OK:` — the model-invocation guard, Node prerequisite, the four helper CLIs (`confine-path`, `aggregate-findings`, `validate-batch`, `apply-verdicts`), the shared retry budget (`retriedBatchIds`), the local error-kind branch (`orchestrator-input` = stop vs retry), the batch binding (`expected_targets`), and `final-finding` re-validation. Any `MISSING:` means SKILL.md is incomplete — fix it before proceeding.
 
 - [ ] **Step 3: Commit**
 
