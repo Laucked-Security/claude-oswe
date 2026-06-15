@@ -28,14 +28,19 @@ Created in this plan (Phase 1):
 | `skills/audit/SKILL.md` | Orchestrator: trigger `/oswe:audit`, methodology, 7-phase pipeline |
 | `skills/audit/schemas/finding.schema.json` | Finding contract (provisional severity, dual ID format, optional `partitions`) |
 | `skills/audit/schemas/analyzer-response.schema.json` | Analyzer envelope `{partition_id,status,findings[],coverage}` + `not-requested` invariant |
-| `skills/audit/schemas/chain.schema.json` | Chain contract + Critique invariant (`if/then`) |
+| `skills/audit/schemas/chain.schema.json` | Chain contract + Critique invariant (`if/then`, incl. unauth entry) |
 | `skills/audit/schemas/verdict.schema.json` | Single verifier verdict (finding\|chain) |
 | `skills/audit/schemas/verifier-response.schema.json` | Verifier batch envelope `{status,verdicts[]}` |
+| `skills/audit/schemas/final-finding.schema.json` | Post-orchestration finding (final fields required unless rejected) |
 | `skills/audit/scripts/package.json` | Dev manifest (ajv, esbuild) to regenerate validators |
 | `skills/audit/scripts/build-validators.mjs` | Dev build: schemas → standalone → bundled `validators.mjs` |
 | `skills/audit/scripts/validators.mjs` | Generated, committed, zero-runtime-dep validators |
 | `skills/audit/scripts/validate-output.mjs` | Runtime validation API + CLI |
+| `skills/audit/scripts/confine-path.mjs` | Deterministic scope-confinement helper (realpath, anti symlink/sibling-prefix) |
+| `skills/audit/scripts/apply-verdicts.mjs` | Deterministic verdict application + exact transition match + Critique promotion |
 | `skills/audit/scripts/test/validate-output.test.mjs` | Unit tests (node:test) for validator + invariants |
+| `skills/audit/scripts/test/confine-path.test.mjs` | Unit tests for scope confinement |
+| `skills/audit/scripts/test/apply-verdicts.test.mjs` | Unit tests for verdict application + chain promotion |
 | `skills/audit/references/php.md` | PHP/Laravel/Symfony sources, sinks, gadget chains |
 | `skills/audit/references/node.md` | Node/Express sources, sinks, prototype pollution, NoSQLi |
 | `agents/oswe-analyzer.md` | Read-only partition analyzer subagent |
@@ -742,6 +747,440 @@ git commit -m "test(oswe): add validator runtime API and schema invariant unit t
 
 ---
 
+## Task 4A: Deterministic scope confinement (TDD)
+
+> Scope confinement must be code, not prose — the orchestrator calls this helper instead of
+> "comparing canonical paths" by hand.
+
+**Files:**
+- Create: `skills/audit/scripts/confine-path.mjs`
+- Test: `skills/audit/scripts/test/confine-path.test.mjs`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `skills/audit/scripts/test/confine-path.test.mjs`:
+
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { confinePath } from "../confine-path.mjs";
+
+function setup() {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "oswe-confine-")));
+  const root = join(base, "project");
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "app.js"), "// x");
+  mkdirSync(join(base, "project-old"), { recursive: true }); // sibling sharing a prefix
+  writeFileSync(join(base, "project-old", "secret.txt"), "s");
+  writeFileSync(join(base, "outside.txt"), "o");
+  return { base, root };
+}
+
+test("accepts project root when no arg", () => {
+  const { root } = setup();
+  assert.equal(confinePath(root, undefined), realpathSync(root));
+});
+
+test("accepts a sub-path", () => {
+  const { root } = setup();
+  assert.equal(confinePath(root, "src/app.js"), realpathSync(join(root, "src", "app.js")));
+});
+
+test("rejects ../ escape", () => {
+  const { root } = setup();
+  assert.throws(() => confinePath(root, "../outside.txt"), /escapes project dir/);
+});
+
+test("rejects sibling-prefix dir (project vs project-old)", () => {
+  const { root } = setup();
+  assert.throws(() => confinePath(root, "../project-old/secret.txt"), /escapes project dir/);
+});
+
+test("rejects nonexistent path with ENOENT", () => {
+  const { root } = setup();
+  assert.throws(() => confinePath(root, "nope/missing.js"), (e) => e.code === "ENOENT");
+});
+
+test("rejects a symlink escaping the project", (t) => {
+  const { base, root } = setup();
+  const link = join(root, "evil-link");
+  try {
+    symlinkSync(join(base, "outside.txt"), link);
+  } catch (e) {
+    t.skip("symlink creation not permitted here: " + e.code);
+    return;
+  }
+  assert.throws(() => confinePath(root, "evil-link"), /escapes project dir/);
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `( cd skills/audit/scripts && node --test test/confine-path.test.mjs )`
+Expected: FAIL — `../confine-path.mjs` does not exist yet (cannot find module).
+
+- [ ] **Step 3: Write the helper**
+
+Create `skills/audit/scripts/confine-path.mjs`:
+
+```js
+// Deterministic scope confinement. Resolves the REAL canonical path and rejects anything that
+// escapes the project dir: ../ traversal, symlink/junction escapes, and sibling-prefix dirs
+// (e.g. /x/project vs /x/project-old). Throws on nonexistent (ENOENT) or escaping paths.
+import { realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
+
+export function confinePath(projectDir, arg) {
+  const root = realpathSync(resolve(projectDir));
+  const candidate = resolve(root, arg == null || arg === "" ? "." : arg);
+  let real;
+  try {
+    real = realpathSync(candidate);
+  } catch {
+    const err = new Error(`path does not exist: ${arg}`);
+    err.code = "ENOENT";
+    throw err;
+  }
+  // Containment: equal to root, or strictly under root + path separator.
+  // The `+ sep` is what rejects the sibling-prefix case (project-old).
+  if (real !== root && !real.startsWith(root + sep)) {
+    throw new Error(`path escapes project dir: ${arg}`);
+  }
+  return real;
+}
+
+// CLI: node confine-path.mjs <projectDir> [arg]  -> prints confined path (exit 0) or error (exit 1)
+import { fileURLToPath } from "node:url";
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  try {
+    process.stdout.write(confinePath(process.argv[2], process.argv[3]) + "\n");
+  } catch (e) {
+    process.stderr.write(String(e.message) + "\n");
+    process.exit(1);
+  }
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `( cd skills/audit/scripts && node --test test/confine-path.test.mjs )`
+Expected: all pass (`# fail 0`); the symlink test may report as skipped on platforms without symlink permission.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add skills/audit/scripts/confine-path.mjs skills/audit/scripts/test/confine-path.test.mjs
+git commit -m "feat(oswe): add tested deterministic scope-confinement helper"
+```
+
+---
+
+## Task 4B: Deterministic verdict application & chain promotion (TDD)
+
+> The Critique decision must be code, not prose: a pure function compares the verifier's transition
+> verdicts to the chain's transitions exactly, applies finding verdicts, and promotes a chain to
+> Critique only when every gate holds.
+
+**Files:**
+- Create: `skills/audit/scripts/apply-verdicts.mjs`
+- Test: `skills/audit/scripts/test/apply-verdicts.test.mjs`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `skills/audit/scripts/test/apply-verdicts.test.mjs`:
+
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { applyVerdicts } from "../apply-verdicts.mjs";
+
+const loc = (file, line, symbol, kind) => ({ file, line, symbol, kind });
+
+const finding = (id, sev = "Haute") => ({
+  finding_id: id,
+  partition_id: id.split("-")[0],
+  title: id,
+  vuln_class: "auth-bypass",
+  source: loc("a.php", 1, "$_POST", "http-param"),
+  sink: loc("a.php", 2, "==", "comparison"),
+  auth: "unauthenticated",
+  provisional_severity: sev,
+  confidence: "preuve statique forte",
+  verification_status: "not-requested"
+});
+
+const chain = (overrides = {}) => ({
+  chain_id: "CHAIN-1",
+  entry_point: { file: "a.php", line: 1, route: "POST /login", auth: "unauthenticated" },
+  finding_ids: ["auth-F001", "up-F001"],
+  transitions: [
+    { from: "entry", to: "auth-F001", how: "bypass", evidence: [{ file: "a.php", line: 2 }] },
+    { from: "auth-F001", to: "up-F001", how: "upload", evidence: [{ file: "u.php", line: 4 }] }
+  ],
+  final_impact: "unauth-rce",
+  severity: "Haute",
+  confidence: "probable",
+  verification_status: "not-requested",
+  ...overrides
+});
+
+const vresp = (verdicts, status = "ok") => [{ status, verdicts }];
+
+const acceptBoth = [
+  { target_type: "finding", target_id: "auth-F001", verdict: "accepted", justification: "a.php:2" },
+  { target_type: "finding", target_id: "up-F001", verdict: "accepted", justification: "u.php:4" }
+];
+const acceptChain = {
+  target_type: "chain", target_id: "CHAIN-1", verdict: "accepted",
+  transition_verdicts: [
+    { from: "entry", to: "auth-F001", verdict: "accepted", justification: "a.php:2" },
+    { from: "auth-F001", to: "up-F001", verdict: "accepted", justification: "u.php:4" }
+  ],
+  justification: "all hold"
+};
+
+test("fully accepted unauth-rce chain is promoted to Critique", () => {
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, acceptChain]) });
+  assert.equal(r.ok, true);
+  assert.equal(r.chains[0].severity, "Critique");
+  assert.equal(r.chains[0].verification_status, "accepted");
+  assert.equal(r.chains[0].confidence, "preuve statique forte");
+});
+
+test("accepted chain with a downgraded member is NOT Critique", () => {
+  const verdicts = [
+    { target_type: "finding", target_id: "auth-F001", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "up-F001", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" },
+    acceptChain
+  ];
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp(verdicts) });
+  assert.notEqual(r.chains[0].severity, "Critique");
+  assert.equal(r.chains[0].verification_status, "accepted");
+});
+
+test("chain referencing a rejected member is rejected", () => {
+  const verdicts = [
+    { target_type: "finding", target_id: "auth-F001", verdict: "rejected", justification: "x" },
+    { target_type: "finding", target_id: "up-F001", verdict: "accepted", justification: "x" },
+    acceptChain
+  ];
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp(verdicts) });
+  assert.equal(r.chains[0].verification_status, "rejected");
+  assert.notEqual(r.chains[0].severity, "Critique");
+  // rejected finding loses final fields
+  const rejected = r.findings.find((f) => f.finding_id === "auth-F001");
+  assert.equal("final_severity" in rejected, false);
+});
+
+test("empty transition_verdicts does not yield Critique", () => {
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [] }]) });
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("missing transition is not an exact match (no Critique)", () => {
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [acceptChain.transition_verdicts[0]] }]) });
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("extra transition is not an exact match (no Critique)", () => {
+  const extra = { from: "up-F001", to: "ghost", verdict: "accepted", justification: "x" };
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [...acceptChain.transition_verdicts, extra] }]) });
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("duplicated transition is not an exact match (no Critique)", () => {
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp([...acceptBoth, { ...acceptChain, transition_verdicts: [acceptChain.transition_verdicts[0], acceptChain.transition_verdicts[0]] }]) });
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("authenticated entry is not promoted to Critique", () => {
+  const c = chain({ entry_point: { file: "a.php", line: 1, route: "POST /x", auth: "authenticated" } });
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [c], verifierResponses: vresp([...acceptBoth, acceptChain]) });
+  assert.notEqual(r.chains[0].severity, "Critique");
+});
+
+test("verifier status=error rejects the batch for retry", () => {
+  const r = applyVerdicts({ findings: [finding("auth-F001")], chains: [], verifierResponses: vresp(acceptBoth, "error") });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /error/);
+});
+
+test("duplicate target_id is an error", () => {
+  const dup = [
+    { target_type: "finding", target_id: "auth-F001", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "auth-F001", verdict: "rejected", justification: "x" }
+  ];
+  const r = applyVerdicts({ findings: [finding("auth-F001")], chains: [], verifierResponses: vresp(dup) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /duplicate/);
+});
+
+test("partial verification records a coverage gap for missing chain verdict", () => {
+  const r = applyVerdicts({ findings: [finding("auth-F001"), finding("up-F001")], chains: [chain()], verifierResponses: vresp(acceptBoth, "partial") });
+  assert.equal(r.ok, true);
+  assert.equal(r.chains[0].verification_status, "rejected");
+  assert.ok(r.gaps.some((g) => g.target_type === "chain" && g.target_id === "CHAIN-1"));
+});
+
+test("finding downgraded gets new final severity/confidence", () => {
+  const v = [{ target_type: "finding", target_id: "auth-F001", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" }];
+  const r = applyVerdicts({ findings: [finding("auth-F001")], chains: [], verifierResponses: vresp(v) });
+  const f = r.findings[0];
+  assert.equal(f.verification_status, "downgraded");
+  assert.equal(f.final_severity, "Moyenne");
+  assert.equal(f.final_confidence, "probable");
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `( cd skills/audit/scripts && node --test test/apply-verdicts.test.mjs )`
+Expected: FAIL — `../apply-verdicts.mjs` does not exist yet.
+
+- [ ] **Step 3: Write the verdict-application logic**
+
+Create `skills/audit/scripts/apply-verdicts.mjs`:
+
+```js
+// Deterministic application of verifier verdicts to findings and chains. Pure function (no IO).
+// The orchestrator validates inputs (schemas) before calling and re-validates outputs after.
+//
+// applyVerdicts({ findings, chains, verifierResponses }) -> { ok, error, findings, chains, gaps }
+//   error: set when the batch must be rejected & retried (verifier status=error, or duplicate
+//          target_id). When set, ok=false and findings/chains are returned unchanged.
+//   gaps:  [{ target_type, target_id, reason }] for expected-but-unverified targets (partial).
+
+const SEV_ORDER = ["Info", "Basse", "Moyenne", "Haute"]; // Critique is chain-only, handled apart.
+
+function collectVerdicts(verifierResponses) {
+  const verdicts = [];
+  for (const resp of verifierResponses) {
+    if (resp.status === "error") return { error: "verifier returned status=error" };
+    for (const v of resp.verdicts) verdicts.push(v);
+  }
+  const seen = new Set();
+  for (const v of verdicts) {
+    const key = `${v.target_type}:${v.target_id}`;
+    if (seen.has(key)) return { error: `duplicate verdict target ${key}` };
+    seen.add(key);
+  }
+  return { verdicts };
+}
+
+export function applyVerdicts({ findings, chains, verifierResponses }) {
+  const collected = collectVerdicts(verifierResponses);
+  if (collected.error) return { ok: false, error: collected.error, findings, chains, gaps: [] };
+
+  const findingVerdict = new Map();
+  const chainVerdict = new Map();
+  for (const v of collected.verdicts) {
+    (v.target_type === "finding" ? findingVerdict : chainVerdict).set(v.target_id, v);
+  }
+
+  const gaps = [];
+  const inChain = new Set();
+  for (const c of chains) for (const id of c.finding_ids) inChain.add(id);
+
+  const outFindings = findings.map((f) => {
+    const v = findingVerdict.get(f.finding_id);
+    const nf = { ...f };
+    if (!v) {
+      if (inChain.has(f.finding_id) || f.provisional_severity === "Haute") {
+        gaps.push({ target_type: "finding", target_id: f.finding_id, reason: "no verdict (partial verification)" });
+      }
+      nf.verification_status = "not-requested";
+      nf.final_severity = f.provisional_severity;
+      nf.final_confidence = f.confidence;
+      return nf;
+    }
+    nf.verification_status = v.verdict;
+    if (v.verdict === "accepted") {
+      nf.final_severity = f.provisional_severity;
+      nf.final_confidence = f.confidence;
+    } else if (v.verdict === "downgraded") {
+      nf.final_severity = v.new_severity;
+      nf.final_confidence = v.new_confidence;
+    } else {
+      delete nf.final_severity;
+      delete nf.final_confidence;
+    }
+    return nf;
+  });
+
+  const statusById = new Map(outFindings.map((f) => [f.finding_id, f.verification_status]));
+  const sevById = new Map(outFindings.map((f) => [f.finding_id, f.final_severity]));
+
+  const outChains = chains.map((c) => {
+    const nc = { ...c };
+    const v = chainVerdict.get(c.chain_id);
+    if (!v) {
+      gaps.push({ target_type: "chain", target_id: c.chain_id, reason: "no verdict (partial verification)" });
+      nc.verification_status = "rejected";
+      nc.severity = "Moyenne";
+      nc.confidence = "à vérifier";
+      return nc;
+    }
+    const chainKeys = c.transitions.map((t) => `${t.from}->${t.to}`);
+    const vList = v.transition_verdicts || [];
+    const vKeys = vList.map((t) => `${t.from}->${t.to}`);
+    const chainSet = new Set(chainKeys);
+    const vSet = new Set(vKeys);
+    const exactMatch =
+      vList.length === c.transitions.length &&
+      vKeys.length === vSet.size &&             // no duplicates in verdict
+      chainKeys.length === chainSet.size &&     // no duplicates in chain
+      [...chainSet].every((k) => vSet.has(k)) &&
+      [...vSet].every((k) => chainSet.has(k));
+    const allTransitionsAccepted = vList.length > 0 && vList.every((t) => t.verdict === "accepted");
+
+    const members = c.finding_ids.map((id) => statusById.get(id));
+    const anyRejected = members.some((s) => s === "rejected");
+    const anyDowngraded = members.some((s) => s === "downgraded");
+    const allMembersAccepted = members.every((s) => s === "accepted");
+
+    const chainAccepted = exactMatch && allTransitionsAccepted && !anyRejected;
+    const canBeCritique =
+      chainAccepted && allMembersAccepted &&
+      c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
+
+    if (canBeCritique) {
+      nc.verification_status = "accepted";
+      nc.severity = "Critique";
+      nc.confidence = "preuve statique forte";
+    } else if (chainAccepted) {
+      nc.verification_status = "accepted";
+      const idx = Math.max(0, ...c.finding_ids.map((id) => SEV_ORDER.indexOf(sevById.get(id) ?? "Info")));
+      nc.severity = SEV_ORDER[idx];
+      nc.confidence = anyDowngraded ? "probable" : "preuve statique forte";
+    } else {
+      nc.verification_status = "rejected";
+      nc.severity = "Moyenne";
+      nc.confidence = "à vérifier";
+    }
+    return nc;
+  });
+
+  return { ok: true, error: null, findings: outFindings, chains: outChains, gaps };
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `( cd skills/audit/scripts && node --test test/apply-verdicts.test.mjs )`
+Expected: all pass (`# fail 0`).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add skills/audit/scripts/apply-verdicts.mjs skills/audit/scripts/test/apply-verdicts.test.mjs
+git commit -m "feat(oswe): add tested deterministic verdict application and chain promotion"
+```
+
+---
+
 ## Task 5: Analyzer subagent
 
 **Files:**
@@ -958,9 +1397,11 @@ Do not audit hostile repositories. The analyzer/verifier subagents are read-only
 ## Pipeline (strict order)
 
 ### 1. Entry & recon
-- Normalize `$ARGUMENTS`: resolve the **real canonical path** (realpath, following symlinks/junctions).
-  **Refuse** a path that does not exist or whose canonical form escapes `${CLAUDE_PROJECT_DIR}`
-  (compare canonical paths to block symlink/junction escape). No argument → scope = project root.
+- Normalize `$ARGUMENTS` with the **tested confinement helper** (do not hand-roll the comparison):
+  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/confine-path.mjs" "${CLAUDE_PROJECT_DIR}" "<arg>"`
+  — or import `confinePath`. It resolves the real canonical path and **throws** on a nonexistent
+  path or one that escapes `${CLAUDE_PROJECT_DIR}` (`../`, symlink/junction, sibling-prefix like
+  `project-old`). On a throw, **abort the audit** with that message. No argument → scope = project root.
 - Detect **stack** via manifests (`composer.json`, `package.json`, `pyproject.toml`/
   `requirements.txt`, `pom.xml`/`build.gradle`, `*.csproj`) and file extensions; detect **framework**
   via dependencies/structure.
@@ -999,37 +1440,30 @@ findings. **Validate each built chain** against `chain.schema.json`.
 ### 6. Verify (batched)
 Send to `oswe-verifier`: all findings used in a candidate chain, all provisional-`Haute` findings,
 and the full chain(s). **Batch: ≤ 5 findings OR 1 full chain per invocation, max 2 verifiers
-concurrent.** Validate each `verifier-response`.
+concurrent.** Validate each `verifier-response` (kind `verifier-response`). A response with
+`status: "error"` → **retry that batch once**; persistent error → record the targets as coverage gaps.
 
-### 6b. Apply verdicts → final severity, then re-validate
-This is the **single place** the final severity model is decided:
-- For each finding the verifier touched, set `verification_status` to the verdict
-  (`accepted|downgraded|rejected`). Findings never sent to a verifier keep
-  `verification_status: "not-requested"`.
-- Compute **`final_severity`** / **`final_confidence`** for every finding:
-  - `accepted` → `final_severity = provisional_severity`, `final_confidence = confidence`;
-  - `downgraded` → use the verdict's `new_severity` / `new_confidence`;
-  - `rejected` → no final severity; the finding moves to the report annex;
-  - `not-requested` → `final_severity = provisional_severity`, `final_confidence = confidence`.
-- **Chain acceptance** requires an **exact transition match**: the set of `{from, to}` pairs in the
-  verdict's `transition_verdicts` must equal the chain's own `transitions` set — **no missing, extra,
-  or duplicated** transition. An empty or mismatched `transition_verdicts` → the chain is **not**
-  accepted (this blocks the `transition_verdicts: []` vacuous-truth bug). A chain is `accepted` only
-  if that exact-match holds **and every** transition verdict is `accepted`.
-- **`Critique` gating** — a chain becomes `Critique` **only if ALL** of the following hold
-  simultaneously; otherwise it keeps a non-`Critique` severity reflecting its real impact/auth:
-  1. `entry_point.auth == "unauthenticated"`,
-  2. the demonstrated `final_impact == "unauth-rce"` (an account-takeover or authenticated path is
-     **not** promoted),
-  3. the exact-coverage transition match above, with **every** transition `accepted`.
-  For a Critique chain, set `severity: "Critique"`, `confidence: "preuve statique forte"`,
-  `final_impact: "unauth-rce"`, `verification_status: "accepted"`. An accepted-but-not-Critique chain
-  (e.g. authenticated entry, or impact = account-takeover) keeps `severity` at `Haute` or below and
-  `verification_status: "accepted"`.
-- **Re-validate** every mutated finding against kind **`final-finding`** (enforces: final fields
-  required unless `rejected`, where they are forbidden) and every chain against kind `chain` (the
-  `if/then` invariant guarantees no chain is `Critique` unless accepted + strong proof + `unauth-rce`).
-  A re-validation failure here is a bug in the application logic — fix it, do not ship the report.
+### 6b. Apply verdicts → final severity (deterministic helper)
+**Do not apply verdicts or decide Critique by hand.** Call the tested pure function
+`applyVerdicts({ findings, chains, verifierResponses })` from
+`${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/apply-verdicts.mjs`. It encodes the entire decision:
+
+- sets each finding's `verification_status` and computes `final_severity` / `final_confidence`
+  (`accepted` → provisional; `downgraded` → verdict's `new_*`; `rejected` → final fields removed;
+  unverified → provisional, kept `not-requested`);
+- enforces **exact transition match** (no missing / extra / duplicated `{from,to}`; empty array never
+  matches) and **all-accepted** transitions for chain acceptance;
+- promotes a chain to **`Critique` only if** it is accepted, **every member finding is accepted**
+  (a `rejected` member rejects the chain; a `downgraded` member caps it below Critique),
+  `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
+- returns `{ ok, error, findings, chains, gaps }`.
+
+Handle the result:
+- **`ok === false`** (verifier `status:"error"`, or a **duplicate `target_id`**) → **retry the batch
+  once**; if it still fails, treat those targets as coverage gaps. Never apply a contradictory batch.
+- **`gaps`** (partial verification — expected targets with no verdict) → record each in **Coverage**.
+- Then **re-validate** every returned finding against kind **`final-finding`** and every returned
+  chain against kind `chain`. A re-validation failure is a bug — fix it, do not ship the report.
 
 ### 7. Report
 Write `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (always relative to the
@@ -1043,19 +1477,26 @@ JSON into the shell command (apostrophes in code excerpts like `$_POST['password
 command and allow shell injection). Create the temp dir first, use a **per-invocation unique
 filename**, and **delete it in a `finally`** so stale/colliding data can't leak between validations:
 
+The file tool cannot see a shell variable, so use a **literal path you choose**:
+
+1. Generate a literal token yourself (e.g. `7f3c1a9e`). Run `mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"`.
+2. Write the JSON with the file-writing tool to the **literal** path
+   `${CLAUDE_PROJECT_DIR}/.oswe/tmp/out-7f3c1a9e.json` (no `echo`, no shell interpolation).
+3. Validate that literal path; a `trap … EXIT` cleans up **without masking** the validator's exit code
+   (the subshell exits with node's status, then the trap runs):
+
 ```bash
-mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"
-tmp="${CLAUDE_PROJECT_DIR}/.oswe/tmp/out-$$-$(date +%s%N).json"
-# (write the agent/chain/finding JSON to "$tmp" with a file-writing tool, not via echo)
-node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-output.mjs" <kind> --file "$tmp"; rc=$?
-rm -f "$tmp"
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/out-7f3c1a9e.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-output.mjs" <kind> \
+    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/out-7f3c1a9e.json" )
+# the subshell's exit status IS the validator's (0 valid / 1 invalid / 2 unreadable file)
 ```
 
 where `<kind>` is `analyzer-response`, `verifier-response`, `chain`, `finding`, or `final-finding`.
-Exit 0 = valid; non-zero prints `{valid:false, errors:[…]}` (a missing/unreadable `--file` exits 2).
-On **invalid** output: retry the agent **once**; if it still fails, record the finding/partition as a
-**coverage gap** — never invent or guess data. If Node is unavailable, fall back to a structural check
-yourself and note the **reduced guarantee** in Coverage. `.oswe/tmp/` is gitignored (via `.oswe/`).
+A non-zero exit prints `{valid:false, errors:[…]}`. On **invalid** output: retry the agent **once**;
+if it still fails, record the finding/partition as a **coverage gap** — never invent or guess data. If
+Node is unavailable, fall back to a structural check yourself and note the **reduced guarantee** in
+Coverage. `.oswe/tmp/` is gitignored (via `.oswe/`).
 
 ## Report format
 - **Header**: target, detected stack + framework, date, scope, authorization reminder.
@@ -1087,8 +1528,8 @@ Confidence: `preuve statique forte` · `probable` · `à vérifier`.
 
 - [ ] **Step 2: Verify key directives are present**
 
-Run: `grep -n "disable-model-invocation: true" skills/audit/SKILL.md && grep -n "max 4 concurrent" skills/audit/SKILL.md && grep -n "CLAUDE_PROJECT_DIR" skills/audit/SKILL.md && grep -n -- "--file" skills/audit/SKILL.md && grep -n "final-finding" skills/audit/SKILL.md && grep -n "exact transition match" skills/audit/SKILL.md && grep -n "Critique. gating" skills/audit/SKILL.md`
-Expected: matching lines for each (model-invocation guard, concurrency cap, project-dir confinement, `--file` validator contract, `final-finding` re-validation, exact transition match, and Critique gating).
+Run: `grep -n "disable-model-invocation: true" skills/audit/SKILL.md && grep -n "max 4 concurrent" skills/audit/SKILL.md && grep -n "confine-path.mjs" skills/audit/SKILL.md && grep -n -- "--file" skills/audit/SKILL.md && grep -n "apply-verdicts.mjs" skills/audit/SKILL.md && grep -n "final-finding" skills/audit/SKILL.md && grep -n "exact transition match" skills/audit/SKILL.md`
+Expected: matching lines for each (model-invocation guard, concurrency cap, confinement helper, `--file` validator contract, verdict-application helper, `final-finding` re-validation, exact transition match).
 
 - [ ] **Step 3: Commit**
 
@@ -1619,7 +2060,8 @@ git commit -m "docs(oswe): add README and finalize MVP acceptance"
 
 - [ ] `claude plugin validate . --strict` passes.
 - [ ] `claude --plugin-dir .` exposes `/oswe:audit`; it does not auto-run (`disable-model-invocation: true`).
-- [ ] `validate-output.mjs` accepts conforming `analyzer-response`/`verifier-response`/`chain` and rejects malformed ones (unit tests green).
+- [ ] All `node --test test/` suites pass: `validate-output` (schema invariants incl. `final-finding`),
+  `confine-path` (scope confinement), and `apply-verdicts` (exact transition match + Critique promotion).
 - [ ] PHP positive fixture → detection + reconstructed RCE chain; PHP negative → no Critique false-positive.
 - [ ] Node positive fixture → detection + reconstructed RCE chain; Node negative → no Critique false-positive.
 - [ ] Every reported finding/chain carries a `verification_status`; the report includes a Coverage section.
