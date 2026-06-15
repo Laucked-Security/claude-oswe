@@ -121,11 +121,11 @@ Chaque app est **auto-suffisante, mono-fichier** (pas de lib gadget externe), et
     `Request.Cookies["admin"] == "1"` (valeur contrôlée par le client, non signée). L'attaquant pose
     le cookie `admin=1`.
   - **Étape 2 — RCE (command injection)** : route admin construit une commande shell par concaténation
-    et l'exécute via `Process.Start` avec `UseShellExecute`/un shell (`"/bin/sh","-c", "ping " + host"`
-    — formulation **cross-platform**, pas `cmd.exe`/Windows-only) ; l'entrée `Request.Query["host"]`
-    n'est ni échappée ni validée. Payload `host=127.0.0.1; whoami` → RCE. Chaîne : unauth → cookie forgé
-    → command injection → **RCE**. (La vuln est la concaténation non assainie dans une invocation shell,
-    indépendante de l'OS ; la fixture est static-only.)
+    et l'exécute via `Process.Start` (`"/bin/sh","-c", "ping -c 1 " + host"` — invocation **Unix-style**,
+    pas `cmd.exe`/Windows-only) ; l'entrée `Request.Query["host"]` n'est ni échappée ni validée. Payload
+    `host=127.0.0.1; whoami` → RCE. Chaîne : unauth → cookie forgé → command injection → **RCE**. (Les
+    fixtures n'étant jamais exécutées, l'OS hôte est indifférent : la vuln est la concaténation non
+    assainie dans une invocation shell, repérée **statiquement** ; fixture static-only.)
 
 ## 5. Fixtures safe (contrepartie durcie)
 
@@ -133,17 +133,21 @@ Pour chaque stack, la version qui **mitige correctement les deux maillons** (l'a
 **aucun Critique faux-positif**). Les contre-mesures sont des **vérifications explicites en code**,
 **non ambiguës à la lecture statique** — on n'emploie **pas** d'annotations (`@PreAuthorize`,
 `[Authorize]`) dont l'effet dépend d'une config de sécurité externe absente d'une fixture mono-fichier
-(ce serait trompeur). Toutes static-only.
+(ce serait trompeur). **Aucun secret hardcodé** : en white-box l'auditeur lit le source, donc tout
+secret/credential littéral serait lui-même un bypass — les secrets viennent de **l'environnement
+uniquement** et l'app **refuse (deny)** s'ils ne sont pas configurés. Toutes static-only.
 
-- **Python safe** : le rôle n'est **jamais** pris du corps client — l'app vérifie des identifiants
-  serveur (`username/password` comparés à une valeur fixe) avant de poser la session ; `/render` rend un
-  **template fixe** (l'entrée n'est qu'une *donnée* passée au contexte, jamais le template) — pas de
-  `render_template_string` sur l'entrée.
-- **Java safe** : l'autorisation **ne lit pas** `X-User-Role` ; un **check explicite en code** valide une
-  session/token serveur avant la route admin. Le sink SpEL **n'existe pas** : la valeur est traitée
-  comme une **donnée littérale** (string), jamais `parseExpression(input)`.
-- **.NET safe** : l'autorisation **ne lit pas** un cookie brut ; **check explicite en code** sur un état
-  d'auth serveur. L'exécution passe par `Process.Start` avec une **liste d'arguments** (`ProcessStartInfo`,
+- **Python safe** : le rôle n'est **jamais** pris du corps client — l'app valide `username/password`
+  contre des identifiants lus dans **l'environnement** (`os.environ`, **pas** de valeur littérale ; deny
+  si absents) avant de poser la session ; `/render` rend un **template fixe** (l'entrée n'est qu'une
+  *donnée* passée au contexte, jamais le template) — pas de `render_template_string` sur l'entrée.
+- **Java safe** : l'autorisation **ne lit pas** `X-User-Role` ; **check explicite en code** comparant un
+  token d'en-tête à un secret lu dans **l'environnement** (`System.getenv`, deny si absent — **pas** de
+  fallback littéral). Le sink SpEL **n'existe pas** : la valeur est traitée comme **donnée littérale**,
+  jamais `parseExpression(input)`.
+- **.NET safe** : l'autorisation **ne lit pas** un cookie brut ; **check explicite en code** comparant un
+  token d'en-tête à un secret lu dans **l'environnement** (`Environment.GetEnvironmentVariable`, deny si
+  absent). L'exécution passe par `Process.Start` avec une **liste d'arguments** (`ProcessStartInfo`,
   `UseShellExecute=false`, **sans shell**) + **allow-list** sur `host` (`^[a-z0-9.-]+$`).
 
 ## 6. EXPECTED.md (par fixture vulnérable)
