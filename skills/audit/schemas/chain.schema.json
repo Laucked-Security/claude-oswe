@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chain.schema.json",
+  "title": "OSWE Exploit Chain",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["chain_id", "entry_point", "finding_ids", "transitions", "final_impact", "severity", "confidence", "verification_status"],
+  "properties": {
+    "chain_id": { "type": "string", "pattern": "^CHAIN-[0-9]+$" },
+    "entry_point": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "line", "route", "auth"],
+      "properties": {
+        "file": { "type": "string" }, "line": { "type": "integer", "minimum": 0 },
+        "route": { "type": "string" }, "auth": { "enum": ["unauthenticated", "authenticated", "admin"] }
+      }
+    },
+    "finding_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^OSWE-[0-9]+$" } },
+    "transitions": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["from", "to", "how", "evidence"],
+        "properties": {
+          "from": { "type": "string", "minLength": 1 }, "to": { "type": "string", "minLength": 1 },
+          "how": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "finding.schema.json#/$defs/fileline" } }
+        }
+      }
+    },
+    "final_impact": { "type": "string", "minLength": 1 },
+    "severity": { "enum": ["Critique", "Haute", "Moyenne", "Basse", "Info"] },
+    "confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
+    "verification_status": { "enum": ["not-requested", "accepted", "downgraded", "rejected"] }
+  },
+  "if": { "properties": { "severity": { "const": "Critique" } }, "required": ["severity"] },
+  "then": {
+    "properties": {
+      "verification_status": { "const": "accepted" },
+      "confidence": { "const": "preuve statique forte" },
+      "final_impact": { "const": "unauth-rce" },
+      "entry_point": { "properties": { "auth": { "const": "unauthenticated" } } }
+    }
+  }
+}

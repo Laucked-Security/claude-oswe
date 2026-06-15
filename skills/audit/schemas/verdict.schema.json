@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "verdict.schema.json",
+  "title": "OSWE Verifier Verdict",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target_type", "target_id", "verdict", "justification"],
+  "properties": {
+    "target_type": { "enum": ["finding", "chain"] },
+    "target_id": { "type": "string", "minLength": 1 },
+    "verdict": { "enum": ["accepted", "downgraded", "rejected"] },
+    "new_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
+    "new_confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
+    "transition_verdicts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["from", "to", "verdict", "justification"],
+        "properties": {
+          "from": { "type": "string", "minLength": 1 }, "to": { "type": "string", "minLength": 1 },
+          "verdict": { "enum": ["accepted", "rejected"] }, "justification": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "justification": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    { "if": { "properties": { "target_type": { "const": "chain" } }, "required": ["target_type"] },
+      "then": { "required": ["transition_verdicts"] } },
+    { "if": { "properties": { "verdict": { "const": "downgraded" } }, "required": ["verdict"] },
+      "then": { "required": ["new_severity", "new_confidence"] } }
+  ]
+}

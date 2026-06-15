@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "verifier-response.schema.json",
+  "title": "OSWE Verifier Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "verdicts"],
+  "properties": {
+    "status": { "enum": ["ok", "partial", "error"] },
+    "verdicts": { "type": "array", "items": { "$ref": "verdict.schema.json" } }
+  }
+}
