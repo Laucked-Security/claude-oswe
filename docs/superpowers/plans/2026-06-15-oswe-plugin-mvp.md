@@ -337,8 +337,10 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
 - [ ] **Step 6: Write `final-finding.schema.json`**
 
 Contract for a finding **after** orchestration applies verdicts (phase 6b). It extends
-`finding.schema.json` and enforces the final lifecycle: final fields are **required** unless the
-finding was `rejected` (in which case they are **forbidden** — a rejected finding has no final severity).
+`finding.schema.json` and enforces the final lifecycle: aggregated **provenance is always required**
+(`partitions[]` and `source_finding_ids[]`, each non-empty and unique), a **canonical id**, and final
+severity fields that are **required** unless the finding was `rejected` (in which case they are
+**forbidden** — a rejected finding has no final severity).
 
 ```json
 {
@@ -347,6 +349,14 @@ finding was `rejected` (in which case they are **forbidden** — a rejected find
   "title": "OSWE Final Finding (post-orchestration)",
   "allOf": [
     { "$ref": "finding.schema.json" },
+    {
+      "required": ["finding_id", "partitions", "source_finding_ids"],
+      "properties": {
+        "finding_id": { "pattern": "^OSWE-[0-9]+$" },
+        "partitions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "source_finding_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
     {
       "if": { "properties": { "verification_status": { "const": "rejected" } }, "required": ["verification_status"] },
       "then": { "not": { "anyOf": [ { "required": ["final_severity"] }, { "required": ["final_confidence"] } ] } },
@@ -468,6 +478,9 @@ Run:
 ```bash
 ( cd skills/audit/scripts && npm install && npm run build )
 ```
+> Behind a corporate proxy/CA, `npm install` may fail with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. Retry
+> with `npm install --use-system-ca` (Node 22+) or set `NODE_EXTRA_CA_CERTS=<corp-ca.pem>`. Do **not**
+> disable `strict-ssl`.
 Expected: ends with `validators.mjs generated: finding.schema.json, final-finding.schema.json, analyzer-response.schema.json, chain.schema.json, verdict.schema.json, verifier-response.schema.json`. `npm install` also creates `skills/audit/scripts/package-lock.json` (committed in Step 5 for reproducible builds).
 
 - [ ] **Step 4: Verify the generated bundle imports cleanly with no runtime deps**
@@ -633,23 +646,40 @@ test("finding with invalid final_severity fails", () => {
 });
 
 // --- final-finding lifecycle (post-orchestration, phase 6b) ---
+// A final finding always carries a canonical id + aggregated provenance.
+const finalBase = (overrides = {}) => baseFinding({ finding_id: "OSWE-3", partitions: ["auth"], source_finding_ids: ["auth-F001"], ...overrides });
 
 test("final-finding: accepted requires final fields", () => {
-  const ok = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  const ok = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
   assert.equal(ok.valid, true, JSON.stringify(ok.errors));
-  const missing = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted" }));
+  const missing = validate("final-finding", finalBase({ verification_status: "accepted" }));
   assert.equal(missing.valid, false);
 });
 
 test("final-finding: rejected forbids final fields", () => {
-  const okRejected = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "rejected" }));
+  const okRejected = validate("final-finding", finalBase({ verification_status: "rejected" }));
   assert.equal(okRejected.valid, true, JSON.stringify(okRejected.errors));
-  const badRejected = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "rejected", final_severity: "Haute", final_confidence: "probable" }));
+  const badRejected = validate("final-finding", finalBase({ verification_status: "rejected", final_severity: "Haute", final_confidence: "probable" }));
   assert.equal(badRejected.valid, false);
 });
 
 test("final-finding: not-requested still requires final fields", () => {
-  const r = validate("final-finding", baseFinding({ verification_status: "not-requested" }));
+  const r = validate("final-finding", finalBase({ verification_status: "not-requested" }));
+  assert.equal(r.valid, false);
+});
+
+test("final-finding: missing provenance fails", () => {
+  const noProv = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  assert.equal(noProv.valid, false); // no partitions / source_finding_ids
+});
+
+test("final-finding: non-canonical id fails", () => {
+  const r = validate("final-finding", finalBase({ finding_id: "auth-F001", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  assert.equal(r.valid, false);
+});
+
+test("final-finding: empty provenance arrays fail", () => {
+  const r = validate("final-finding", finalBase({ partitions: [], source_finding_ids: [], verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
   assert.equal(r.valid, false);
 });
 ```
@@ -766,10 +796,14 @@ Create `skills/audit/scripts/test/confine-path.test.mjs`:
 ```js
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { confinePath } from "../confine-path.mjs";
+
+const CLI = fileURLToPath(new URL("../confine-path.mjs", import.meta.url));
 
 function setup() {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "oswe-confine-")));
@@ -817,6 +851,40 @@ test("rejects a symlink escaping the project", (t) => {
     return;
   }
   assert.throws(() => confinePath(root, "evil-link"), /escapes project dir/);
+});
+
+// --- CLI (--file JSON) exit codes 0/1/2 ---
+
+function runCli(input) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-cli-")));
+  const f = join(dir, "in.json");
+  writeFileSync(f, JSON.stringify(input));
+  return spawnSync(process.execPath, [CLI, "--file", f], { encoding: "utf8" });
+}
+
+test("CLI exit 0 for a confined sub-path (with spaces and shell metachars in the name)", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "oswe-cli-root-")));
+  const root = join(base, "project");
+  const weird = "a b $(touch pwned) `id`"; // never reaches a shell — passed as JSON
+  mkdirSync(join(root, weird), { recursive: true });
+  writeFileSync(join(root, weird, "f.js"), "// x");
+  const r = runCli({ projectDir: root, arg: join(weird, "f.js") });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), realpathSync(join(root, weird, "f.js")));
+});
+
+test("CLI exit 1 for an escaping path", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "oswe-cli-esc-")));
+  const root = join(base, "project");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(base, "outside.txt"), "o");
+  const r = runCli({ projectDir: root, arg: "../outside.txt" });
+  assert.equal(r.status, 1);
+});
+
+test("CLI exit 2 when --file is missing", () => {
+  const r = spawnSync(process.execPath, [CLI], { encoding: "utf8" });
+  assert.equal(r.status, 2);
 });
 ```
 
@@ -1107,7 +1175,7 @@ test("a downgraded FINDING that raises severity is an error", () => {
   assert.match(r.error, /raises severity/);
 });
 
-test("a chain with broken topology is rejected (OSWE-2 unconnected)", () => {
+test("a chain with broken topology is an orchestrator error (ok:false)", () => {
   // transitions do NOT form entry->OSWE-1->OSWE-2 (second hop is entry->OSWE-2)
   const c = chain({
     transitions: [
@@ -1124,8 +1192,21 @@ test("a chain with broken topology is rejected (OSWE-2 unconnected)", () => {
     justification: "x"
   };
   const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp([...acceptBoth, v]) });
-  assert.equal(r.chains[0].verification_status, "rejected");
+  assert.equal(r.ok, false);
+  assert.match(r.error, /invalid topology/);
+});
+
+test("a probable member caps the accepted chain confidence (no Critique, not forte)", () => {
+  // OSWE-2 is downgraded to probable confidence; chain must not become Critique nor claim forte.
+  const verdicts = [
+    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Haute", new_confidence: "probable", justification: "x" },
+    acceptChain
+  ];
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], verifierResponses: vresp(verdicts) });
+  assert.equal(r.chains[0].verification_status, "accepted");
   assert.notEqual(r.chains[0].severity, "Critique");
+  assert.equal(r.chains[0].confidence, "probable");
 });
 
 test("a downgraded CHAIN that raises severity is an error", () => {
@@ -1279,6 +1360,7 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
 
   const statusById = new Map(outFindings.map((f) => [f.finding_id, f.verification_status]));
   const sevById = new Map(outFindings.map((f) => [f.finding_id, f.final_severity]));
+  const confById = new Map(outFindings.map((f) => [f.finding_id, f.final_confidence]));
   const reject = (nc) => { nc.verification_status = "rejected"; nc.severity = "Moyenne"; nc.confidence = "à vérifier"; return nc; };
 
   const outChains = [];
@@ -1293,6 +1375,10 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
       outChains.push(nc);
       continue;
     }
+    // A topologically malformed chain is an ORCHESTRATOR bug, not a security rejection.
+    // Fail the whole batch so it gets fixed — do not route it to the rejected annex.
+    if (!topologyValid(c)) return fail(`chain ${c.chain_id} has invalid topology (must be entry->f0->...->fN)`);
+
     if (v.verdict === "rejected") { outChains.push(reject(nc)); continue; }
 
     // Structural integrity — REQUIRED for both accepted and downgraded (a downgrade cannot bypass it).
@@ -1309,19 +1395,21 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
     const members = c.finding_ids.map((id) => statusById.get(id));
     const allMembersOk = members.every((s) => s === "accepted" || s === "downgraded");
     const allMembersAccepted = members.every((s) => s === "accepted");
-    const anyDowngraded = members.some((s) => s === "downgraded");
 
-    const structurallySound =
-      topologyValid(c) && exactMatch && allTransitionsAccepted && allMembersOk;
-    if (!structurallySound) { outChains.push(reject(nc)); continue; }
+    if (!(exactMatch && allTransitionsAccepted && allMembersOk)) { outChains.push(reject(nc)); continue; }
 
-    // Natural severity the chain would get if accepted (the ceiling a downgrade may not exceed).
+    // Weakest member confidence — the chain is only as strong as its weakest verified link.
+    const minMemberConfIdx = Math.min(...c.finding_ids.map((id) => CONF_INDEX[confById.get(id) ?? "à vérifier"]));
+    const minMemberConf = ["à vérifier", "probable", "preuve statique forte"][minMemberConfIdx];
+
+    // Critique requires every member accepted AND every member confidence "preuve statique forte".
     const canBeCritique =
-      allMembersAccepted && c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
+      allMembersAccepted && minMemberConfIdx === CONF_INDEX["preuve statique forte"] &&
+      c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
     const naturalSev = canBeCritique
       ? "Critique"
       : SEV_BY_INDEX[Math.max(0, ...c.finding_ids.map((id) => SEV_INDEX[sevById.get(id) ?? "Info"]))];
-    const naturalConf = "preuve statique forte";
+    const naturalConf = canBeCritique ? "preuve statique forte" : minMemberConf;
 
     if (v.verdict === "downgraded") {
       if (!notIncrease(naturalSev, naturalConf, v.new_severity, v.new_confidence)) {
@@ -1335,15 +1423,9 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
     }
 
     // v.verdict === "accepted"
-    if (canBeCritique) {
-      nc.verification_status = "accepted";
-      nc.severity = "Critique";
-      nc.confidence = "preuve statique forte";
-    } else {
-      nc.verification_status = "accepted";
-      nc.severity = naturalSev;
-      nc.confidence = anyDowngraded ? "probable" : "preuve statique forte";
-    }
+    nc.verification_status = "accepted";
+    nc.severity = naturalSev;
+    nc.confidence = naturalConf;
     outChains.push(nc);
   }
 
@@ -1685,9 +1767,14 @@ The CLI encodes the entire decision and returns `{ ok, error, findings, chains, 
 - a chain with **no verdict** stays **`not-requested`** (not rejected) and is added to `gaps`.
 
 Handle the result:
-- **`ok === false`** (verifier `status:"error"`, a **duplicate `target_id`**, or a verdict/chain
-  referencing an **unknown** finding/chain) → **retry the batch once**; if it still fails, treat those
-  targets as coverage gaps. Never apply a contradictory batch.
+- **`ok === false`** (verifier `status:"error"`, a **duplicate `target_id`**, an `if/then` violation,
+  or a verdict/chain referencing an **unknown** finding/chain) → **re-run only the offending verifier
+  batch once**. If it still fails, you must **not** keep feeding the bad response to `applyVerdicts`
+  (it would return `ok:false` forever). Instead **drop that batch's `verifier-response` from the
+  `verifierResponses` array entirely** and call `applyVerdicts` again with the remaining valid
+  responses: the targets that lost their verdict then surface naturally as **`gaps`** (findings →
+  `not-requested`, chains → `not-requested`), which you record in **Coverage**. Never apply a
+  contradictory batch.
 - **`gaps`** (partial verification) → record each in **Coverage**.
 - Then **re-validate** every returned finding against kind **`final-finding`** and every returned
   chain against kind `chain`. A re-validation failure is a bug — fix it, do not ship the report.
