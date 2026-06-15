@@ -37,9 +37,11 @@ Created in this plan (Phase 1):
 | `skills/audit/scripts/validators.mjs` | Generated, committed, zero-runtime-dep validators |
 | `skills/audit/scripts/validate-output.mjs` | Runtime validation API + CLI |
 | `skills/audit/scripts/confine-path.mjs` | Deterministic scope-confinement helper (realpath, anti symlink/sibling-prefix) |
-| `skills/audit/scripts/apply-verdicts.mjs` | Deterministic verdict application + exact transition match + Critique promotion |
+| `skills/audit/scripts/aggregate-findings.mjs` | Deterministic order-independent finding aggregation (dedupe, merge, stable OSWE-N) |
+| `skills/audit/scripts/apply-verdicts.mjs` | Deterministic verdict application + batch binding + Critique promotion + decisions log |
 | `skills/audit/scripts/test/validate-output.test.mjs` | Unit tests (node:test) for validator + invariants |
 | `skills/audit/scripts/test/confine-path.test.mjs` | Unit tests for scope confinement |
+| `skills/audit/scripts/test/aggregate-findings.test.mjs` | Unit tests for aggregation (order-independence, merge, numbering) |
 | `skills/audit/scripts/test/apply-verdicts.test.mjs` | Unit tests for verdict application + chain promotion |
 | `skills/audit/references/php.md` | PHP/Laravel/Symfony sources, sinks, gadget chains |
 | `skills/audit/references/node.md` | Node/Express sources, sinks, prototype pollution, NoSQLi |
@@ -1101,11 +1103,31 @@ test("chain whose member is rejected is itself rejected", () => {
   assertResultSchemaValid(r); // a rejected finding (no final fields) must still pass final-finding
 });
 
-test("chain with a not-requested member (no finding verdict) is not accepted", () => {
-  // OSWE-2 has no finding verdict -> not-requested -> blocks chain acceptance.
-  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp([acceptBoth[0], acceptChain]) });
+test("a chain with an unverified member (its finding batch errored) is rejected, with a reason", () => {
+  // OSWE-2 IS dispatched (required) but its batch errors → not-requested → blocks chain acceptance.
+  const batches = [
+    { batch_id: "Bf1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [acceptBoth[0]] } },
+    { batch_id: "Bf2", expected_targets: [{ target_type: "finding", target_id: "OSWE-2" }], response: { status: "error", verdicts: [] } },
+    { batch_id: "Bc", expected_targets: [{ target_type: "chain", target_id: "CHAIN-1" }], response: { status: "ok", verdicts: [acceptChain] } }
+  ];
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches });
+  assert.equal(r.ok, true);
   assert.equal(r.chains[0].verification_status, "rejected");
   assert.notEqual(r.chains[0].severity, "Critique");
+  const d = r.decisions.find((d) => d.target_type === "chain" && d.target_id === "CHAIN-1");
+  assert.match(d.reason, /not positively verified/); // implicit-rejection reason is preserved
+});
+
+test("a required target not dispatched to any batch is an orchestrator-input error", () => {
+  // OSWE-2 is a chain member (required) but only OSWE-1 + the chain are dispatched.
+  const batches = [
+    { batch_id: "Bf1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [acceptBoth[0]] } },
+    { batch_id: "Bc", expected_targets: [{ target_type: "chain", target_id: "CHAIN-1" }], response: { status: "ok", verdicts: [acceptChain] } }
+  ];
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /required target finding:OSWE-2 was not dispatched/);
+  assert.equal(r.error_kind, "orchestrator-input");
 });
 
 test("explicit chain verdict=rejected is honoured despite accepted transitions", () => {
@@ -1310,15 +1332,18 @@ test("a chain with broken topology is an orchestrator error (ok:false)", () => {
   assert.equal(r.error_kind, "orchestrator-input");
 });
 
-test("a malformed-topology chain with NO verdict is still an error (ok:false)", () => {
-  // Simulates the dropped-batch case: the chain lost its verdict but is structurally broken.
+test("a malformed-topology chain is an error even when its batch errored (no verdict)", () => {
   const c = chain({
     transitions: [
       { from: "entry", to: "OSWE-1", how: "x", evidence: [{ file: "a.php", line: 2 }] },
       { from: "entry", to: "OSWE-2", how: "x", evidence: [{ file: "u.php", line: 4 }] }
     ]
   });
-  const r = applyVerdicts({ findings: bothFindings(), chains: [c], batches: vresp(acceptBoth) });
+  const batches = [
+    ...vresp(acceptBoth),
+    { batch_id: "Bce", expected_targets: [{ target_type: "chain", target_id: "CHAIN-1" }], response: { status: "error", verdicts: [] } }
+  ];
+  const r = applyVerdicts({ findings: bothFindings(), chains: [c], batches });
   assert.equal(r.ok, false);
   assert.match(r.error, /invalid topology/);
   assert.equal(r.error_kind, "orchestrator-input");
@@ -1390,7 +1415,9 @@ Create `skills/audit/scripts/apply-verdicts.mjs`:
 ```js
 // Deterministic application of verifier verdicts to findings and chains. Pure logic + a thin CLI.
 // applyVerdicts({ findings, chains, batches })
-//   -> { ok, error, error_kind, error_batch_id, findings, chains, gaps }
+//   -> { ok, error, error_kind, error_batch_id, findings, chains, gaps, decisions }
+//   decisions: [{ target_type, target_id, outcome, reason }] — auditable log incl. the cause of every
+//     implicit chain rejection (drives the report's "Findings écartés" annex).
 //
 // batches bind each verifier response to the exact targets it was asked about (round-trip integrity):
 //   batches: [{ batch_id, expected_targets: [{target_type, target_id}], response: { status, verdicts } }]
@@ -1494,6 +1521,18 @@ export function applyVerdicts({ findings, chains, batches }) {
     }
   }
 
+  // Completeness: every chain, every chain member, and every provisional-Haute finding MUST have
+  // been dispatched (appear in some batch's expected_targets). A missing one is an orchestrator bug.
+  const required = new Set();
+  for (const c of chains) {
+    required.add(tkey("chain", c.chain_id));
+    for (const id of c.finding_ids) required.add(tkey("finding", id));
+  }
+  for (const f of findings) if (f.provisional_severity === "Haute") required.add(tkey("finding", f.finding_id));
+  for (const k of required) {
+    if (!expectedBatchOf.has(k)) return fail(`required target ${k} was not dispatched to any batch`, "orchestrator-input");
+  }
+
   const findingVerdict = new Map();
   const chainVerdict = new Map();
   for (const [k, { v }] of verdictOf) {
@@ -1520,6 +1559,10 @@ export function applyVerdicts({ findings, chains, batches }) {
     }
   }
 
+  // decisions: an auditable log of every outcome + reason (drives the report's "Findings écartés" annex,
+  // including IMPLICIT chain rejections whose cause — a member or transition — would otherwise be lost).
+  const decisions = [];
+
   const outFindings = findings.map((f) => {
     const v = findingVerdict.get(f.finding_id);
     const nf = { ...f };
@@ -1528,6 +1571,7 @@ export function applyVerdicts({ findings, chains, batches }) {
       nf.verification_status = "not-requested";
       nf.final_severity = f.provisional_severity;
       nf.final_confidence = f.confidence;
+      decisions.push({ target_type: "finding", target_id: f.finding_id, outcome: "not-requested", reason: "no verifier verdict (unverified)" });
       return nf;
     }
     nf.verification_status = v.verdict;
@@ -1541,6 +1585,7 @@ export function applyVerdicts({ findings, chains, batches }) {
       delete nf.final_severity;
       delete nf.final_confidence;
     }
+    decisions.push({ target_type: "finding", target_id: f.finding_id, outcome: v.verdict, reason: v.justification });
     return nf;
   });
 
@@ -1568,11 +1613,16 @@ export function applyVerdicts({ findings, chains, batches }) {
     // No verdict → not verified: stay not-requested (any gap was already recorded from expected_targets).
     if (!v) {
       nc.verification_status = "not-requested";
+      decisions.push({ target_type: "chain", target_id: c.chain_id, outcome: "not-requested", reason: "no verifier verdict (unverified)" });
       outChains.push(nc);
       continue;
     }
 
-    if (v.verdict === "rejected") { outChains.push(reject(nc)); continue; }
+    if (v.verdict === "rejected") {
+      decisions.push({ target_type: "chain", target_id: c.chain_id, outcome: "rejected", reason: v.justification });
+      outChains.push(reject(nc));
+      continue;
+    }
 
     // Structural integrity — REQUIRED for both accepted and downgraded (a downgrade cannot bypass it).
     const vList = v.transition_verdicts || [];
@@ -1589,7 +1639,19 @@ export function applyVerdicts({ findings, chains, batches }) {
     const allMembersOk = members.every((s) => s === "accepted" || s === "downgraded");
     const allMembersAccepted = members.every((s) => s === "accepted");
 
-    if (!(exactMatch && allTransitionsAccepted && allMembersOk)) { outChains.push(reject(nc)); continue; }
+    if (!(exactMatch && allTransitionsAccepted && allMembersOk)) {
+      // Capture the SPECIFIC cause of an implicit rejection so the report annex can explain it.
+      let reason;
+      if (!exactMatch) reason = "transition verdicts do not exactly match the chain transitions";
+      else if (!allTransitionsAccepted) reason = "not every transition was accepted";
+      else {
+        const bad = c.finding_ids.filter((id) => !(statusById.get(id) === "accepted" || statusById.get(id) === "downgraded"));
+        reason = `member finding(s) not positively verified: ${bad.join(", ")}`;
+      }
+      decisions.push({ target_type: "chain", target_id: c.chain_id, outcome: "rejected", reason });
+      outChains.push(reject(nc));
+      continue;
+    }
 
     // Weakest member confidence — the chain is only as strong as its weakest verified link.
     const minMemberConfIdx = Math.min(...c.finding_ids.map((id) => CONF_INDEX[confById.get(id) ?? "à vérifier"]));
@@ -1617,6 +1679,7 @@ export function applyVerdicts({ findings, chains, batches }) {
       nc.verification_status = "downgraded";
       nc.severity = v.new_severity;
       nc.confidence = v.new_confidence;
+      decisions.push({ target_type: "chain", target_id: c.chain_id, outcome: "downgraded", reason: v.justification });
       outChains.push(nc);
       continue;
     }
@@ -1625,10 +1688,11 @@ export function applyVerdicts({ findings, chains, batches }) {
     nc.verification_status = "accepted";
     nc.severity = naturalSev;
     nc.confidence = naturalConf;
+    decisions.push({ target_type: "chain", target_id: c.chain_id, outcome: "accepted", reason: v.justification });
     outChains.push(nc);
   }
 
-  return { ok: true, error: null, error_kind: null, error_batch_id: null, findings: outFindings, chains: outChains, gaps };
+  return { ok: true, error: null, error_kind: null, error_batch_id: null, findings: outFindings, chains: outChains, gaps, decisions };
 }
 
 // CLI: node apply-verdicts.mjs --file <input.json> --out <result.json>
@@ -1670,6 +1734,217 @@ Expected: all pass (`# fail 0`).
 ```bash
 git add skills/audit/scripts/apply-verdicts.mjs skills/audit/scripts/test/apply-verdicts.test.mjs
 git commit -m "feat(oswe): add tested deterministic verdict application and chain promotion"
+```
+
+---
+
+## Task 4C: Deterministic finding aggregation (TDD)
+
+> The §4 merge rules are complex and order-sensitive in prose. Implement them in a tested pure
+> function so parallel-analyzer output aggregates identically regardless of arrival order.
+
+**Files:**
+- Create: `skills/audit/scripts/aggregate-findings.mjs`
+- Test: `skills/audit/scripts/test/aggregate-findings.test.mjs`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `skills/audit/scripts/test/aggregate-findings.test.mjs`:
+
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { aggregateFindings } from "../aggregate-findings.mjs";
+import { validate } from "../validate-output.mjs";
+
+const CLI = fileURLToPath(new URL("../aggregate-findings.mjs", import.meta.url));
+const loc = (file, line, symbol, kind) => ({ file, line, symbol, kind });
+
+// A raw per-partition analyzer finding (partition-scoped id, no provenance/final fields).
+const raw = (id, partition, over = {}) => ({
+  finding_id: id,
+  partition_id: partition,
+  title: id,
+  vuln_class: "sqli",
+  source: loc("a.php", 10, "$_GET['q']", "http-param"),
+  sink: loc("db.php", 20, "query", "query"),
+  auth: "authenticated",
+  evidence: [{ file: "db.php", line: 20 }],
+  provisional_severity: "Moyenne",
+  confidence: "probable",
+  verification_status: "not-requested",
+  ...over
+});
+
+test("a unique finding gets single-element provenance and OSWE-1", () => {
+  const r = aggregateFindings([raw("auth-F001", "auth")]);
+  assert.equal(r.ok, true);
+  assert.equal(r.findings[0].finding_id, "OSWE-1");
+  assert.deepEqual(r.findings[0].partitions, ["auth"]);
+  assert.deepEqual(r.findings[0].source_finding_ids, ["auth-F001"]);
+  assert.equal(validate("finding", r.findings[0]).valid, true, JSON.stringify(validate("finding", r.findings[0]).errors));
+});
+
+test("two findings with the same source/sink/class are merged with worst-case fields", () => {
+  const a = raw("auth-F001", "auth", { provisional_severity: "Moyenne", confidence: "probable", auth: "authenticated" });
+  const b = raw("api-F003", "api", { provisional_severity: "Haute", confidence: "preuve statique forte", auth: "unauthenticated", evidence: [{ file: "db.php", line: 21 }] });
+  const r = aggregateFindings([a, b]);
+  assert.equal(r.findings.length, 1);
+  const f = r.findings[0];
+  assert.equal(f.provisional_severity, "Haute");          // max severity
+  assert.equal(f.confidence, "preuve statique forte");    // max confidence
+  assert.equal(f.auth, "unauthenticated");                // most-exposed
+  assert.deepEqual(f.partitions, ["api", "auth"]);        // sorted unique
+  assert.deepEqual(f.source_finding_ids, ["api-F003", "auth-F001"]);
+  assert.equal(f.evidence.length, 2);                     // union
+});
+
+test("aggregation is independent of input order", () => {
+  const a = raw("auth-F001", "auth");
+  const b = raw("api-F003", "api", { source: loc("b.php", 5, "$_POST['x']", "http-param") });
+  const r1 = aggregateFindings([a, b]);
+  const r2 = aggregateFindings([b, a]);
+  assert.deepEqual(r1.findings, r2.findings); // identical canonical output + identical OSWE-N
+});
+
+test("stable numbering follows (source.file, source.line, sink.file, sink.line, vuln_class)", () => {
+  const early = raw("p-F001", "p", { source: loc("a.php", 1, "s", "http-param") });
+  const late = raw("p-F002", "p", { source: loc("z.php", 1, "s", "http-param") });
+  const r = aggregateFindings([late, early]);
+  assert.equal(r.findings.find((f) => f.source.file === "a.php").finding_id, "OSWE-1");
+  assert.equal(r.findings.find((f) => f.source.file === "z.php").finding_id, "OSWE-2");
+});
+
+test("duplicate analyzer finding_id is an error", () => {
+  const r = aggregateFindings([raw("p-F001", "p"), raw("p-F001", "p", { source: loc("c.php", 9, "s", "http-param") })]);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /duplicate analyzer finding_id/);
+});
+
+test("CLI exits 0/1/2 (spawnSync)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oswe-agg-"));
+  const inOk = join(dir, "in.json");
+  const out = join(dir, "out.json");
+  writeFileSync(inOk, JSON.stringify({ findings: [raw("p-F001", "p")] }));
+  const ok = spawnSync(process.execPath, [CLI, "--file", inOk, "--out", out]);
+  assert.equal(ok.status, 0);
+  assert.equal(JSON.parse(readFileSync(out, "utf8")).findings[0].finding_id, "OSWE-1");
+
+  const inBad = join(dir, "bad.json");
+  writeFileSync(inBad, JSON.stringify({ findings: [raw("p-F001", "p"), raw("p-F001", "p")] }));
+  assert.equal(spawnSync(process.execPath, [CLI, "--file", inBad, "--out", out]).status, 1);
+  assert.equal(spawnSync(process.execPath, [CLI, "--file", inOk]).status, 2); // missing --out
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `( cd skills/audit/scripts && node --test test/aggregate-findings.test.mjs )`
+Expected: FAIL — `../aggregate-findings.mjs` does not exist yet.
+
+- [ ] **Step 3: Write the aggregator**
+
+Create `skills/audit/scripts/aggregate-findings.mjs`:
+
+```js
+// Deterministic, order-independent aggregation of per-partition analyzer findings into canonical
+// findings. aggregateFindings(rawFindings) -> { ok, error, findings }
+//   rawFindings: union of all analyzer-response `findings` (partition-scoped ids like "auth-F001").
+//   Source finding_ids must be globally UNIQUE (a duplicate is an analyzer/orchestrator bug).
+import { fileURLToPath } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const SEV = ["Info", "Basse", "Moyenne", "Haute"];                 // analyzer never emits Critique
+const CONF = ["à vérifier", "probable", "preuve statique forte"];
+const AUTH = ["unauthenticated", "authenticated", "admin"];        // index 0 = most exposed
+
+const locKey = (l) => `${l.file} ${l.line} ${l.symbol} ${l.kind}`;
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const cmpJson = (a, b) => cmp(JSON.stringify(a), JSON.stringify(b));
+const uniqSortedObjects = (arr) => {
+  const m = new Map();
+  for (const x of arr) m.set(JSON.stringify(x), x);
+  return [...m.values()].sort(cmpJson);
+};
+const uniqSortedStrings = (arr) => [...new Set(arr)].sort(cmp);
+
+export function aggregateFindings(rawFindings) {
+  const seen = new Set();
+  for (const f of rawFindings) {
+    if (seen.has(f.finding_id)) return { ok: false, error: `duplicate analyzer finding_id ${f.finding_id}`, findings: [] };
+    seen.add(f.finding_id);
+  }
+
+  const groups = new Map();
+  for (const f of rawFindings) {
+    const key = `${f.vuln_class}${locKey(f.source)}${locKey(f.sink)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+
+  const merged = [];
+  for (const group of groups.values()) {
+    const rep = [...group].sort((a, b) => cmp(a.finding_id, b.finding_id))[0];
+    const union = (sel) => uniqSortedObjects(group.flatMap((f) => f[sel] || []));
+    merged.push({
+      finding_id: "PENDING",
+      partition_id: rep.partition_id,
+      title: rep.title,
+      vuln_class: rep.vuln_class,
+      source: rep.source,
+      sink: rep.sink,
+      auth: AUTH[Math.min(...group.map((f) => AUTH.indexOf(f.auth)))],
+      transformations: union("transformations"),
+      sanitizers: union("sanitizers"),
+      prerequisites: uniqSortedStrings(group.flatMap((f) => f.prerequisites || [])),
+      evidence: union("evidence"),
+      provisional_severity: SEV[Math.max(...group.map((f) => SEV.indexOf(f.provisional_severity)))],
+      confidence: CONF[Math.max(...group.map((f) => CONF.indexOf(f.confidence)))],
+      verification_status: "not-requested",
+      partitions: uniqSortedStrings(group.map((f) => f.partition_id)),
+      source_finding_ids: uniqSortedStrings(group.map((f) => f.finding_id))
+    });
+  }
+
+  merged.sort((a, b) =>
+    cmp(a.source.file, b.source.file) || cmp(a.source.line, b.source.line) ||
+    cmp(a.sink.file, b.sink.file) || cmp(a.sink.line, b.sink.line) || cmp(a.vuln_class, b.vuln_class));
+  merged.forEach((f, i) => { f.finding_id = `OSWE-${i + 1}`; });
+
+  return { ok: true, error: null, findings: merged };
+}
+
+// CLI: node aggregate-findings.mjs --file <in.json> --out <out.json>
+//   in.json: { "findings": [ ...rawFindings ] }   exit 0 ok / 1 !ok / 2 usage|IO
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const args = process.argv.slice(2);
+  const fi = args.indexOf("--file"), oi = args.indexOf("--out");
+  if (fi === -1 || oi === -1) { process.stderr.write("usage: aggregate-findings.mjs --file <in.json> --out <out.json>\n"); process.exit(2); }
+  let input;
+  try { input = JSON.parse(readFileSync(args[fi + 1], "utf8")); }
+  catch (e) { process.stderr.write("cannot read --file: " + e.message + "\n"); process.exit(2); }
+  const result = aggregateFindings(input.findings || []);
+  try { writeFileSync(args[oi + 1], JSON.stringify(result, null, 2)); }
+  catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+  process.exit(result.ok ? 0 : 1);
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `( cd skills/audit/scripts && node --test test/aggregate-findings.test.mjs )`
+Expected: all pass (`# fail 0`).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add skills/audit/scripts/aggregate-findings.mjs skills/audit/scripts/test/aggregate-findings.test.mjs
+git commit -m "feat(oswe): add tested deterministic order-independent finding aggregation"
 ```
 
 ---
@@ -1942,8 +2217,11 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
 - **Bind each response to its assigned partition** (the schema cannot — it doesn't know what you
   dispatched). For an analyzer dispatched for partition `P`, **reject the response unless**
   `response.partition_id === P` **and** every `finding.partition_id === P` **and** every
-  `finding.finding_id` starts with `P-F`. A mismatch is treated like an analyzer `error` (re-run the
-  partition once, then coverage gap) — never aggregate cross-partition or mislabeled findings.
+  `finding.finding_id` starts with `P-F` **and** the `finding_id`s are **unique within the response**
+  (collect them in a Set; a repeat like two `P-F001` makes `source_finding_ids` ambiguous). A mismatch
+  is treated like an analyzer `error` (re-run the partition once, then coverage gap) — never aggregate
+  cross-partition, mislabeled, or duplicate-id findings. (The aggregator in §4 also rejects a globally
+  duplicate `finding_id` as a backstop.)
 - **`status` semantics** (the field is in the envelope; act on it):
   - `ok` → aggregate its `findings`; merge its `coverage` into the global Coverage.
   - `partial` → aggregate the `findings` present **and** copy `coverage.skipped` into the global
@@ -1951,9 +2229,16 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
   - `error` → **do not aggregate** its findings (they may be unsound). **Re-run that partition once**;
     if it is still `error`, mark the **whole partition as a coverage gap** ("analyzer error") and move on.
 
-### 4. Aggregate & dedupe (deterministic — order-independent)
-Parallel analyzers return in arbitrary order, so aggregation must be a **pure function of the set of
-findings**, not of arrival order:
+### 4. Aggregate & dedupe (deterministic — via the tested helper)
+**Do not aggregate by hand.** Collect every aggregated analyzer finding into
+`{ "findings": [ …rawFindings ] }`, write it to a literal temp file, and run the tested helper:
+`node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/aggregate-findings.mjs" --file <in> --out <out>`
+(same `--file`/`--out` + temp-file + `trap` discipline as §6b). It returns `{ ok, error, findings }`.
+A **duplicate source `finding_id`** (e.g. two distinct findings both `auth-F001`) → `ok:false` (an
+analyzer/orchestrator bug — fix it, since `source_finding_ids` would be ambiguous). On `ok`, the
+returned canonical findings already carry `partitions[]`/`source_finding_ids[]` and stable `OSWE-N`.
+
+The helper implements these rules (documented here for review; the code is the source of truth):
 1. **Dedupe key** = `vuln_class` + canonical `source` + canonical `sink` (each on
    `{file, symbol, line, kind}` — include `line` and `kind`), **without** `partition_id`. Group all
    findings by this key.
@@ -1988,13 +2273,20 @@ findings. **Validate each built chain** against `chain.schema.json`.
   concurrent**). For each batch, record its **`batch_id`** and the exact **`expected_targets`** you
   dispatched, and pair them with the verifier's response as a bound wrapper:
   `{ batch_id, expected_targets: [{target_type, target_id}], response }`.
-- **Validate** each `verifier-response` (kind `verifier-response`).
-- **This is the ONLY place retries happen** (do not also retry in 6b). A response with
-  `status: "error"`, or one that fails validation, → **re-dispatch that batch once**. If it still
-  fails, **keep the wrapper but replace its response with `{ "status": "error", "verdicts": [] }`**
-  (preserving `batch_id` and `expected_targets`). **Do not delete the wrapper** — deleting it would
-  also delete its `expected_targets`, and those targets would vanish without a coverage gap. With the
-  neutralized response, every expected target surfaces as a **gap**.
+- **Validate each response against the FULL bound-batch contract — before exhausting the retry.** A
+  response is acceptable only if it (a) passes the `verifier-response` schema, **and** (b) every
+  verdict targets one of this batch's `expected_targets` (no unexpected/leaked target), **and** (c) no
+  duplicate verdict target, **and** (d) its coverage matches its `status` (`ok` = all expected,
+  `partial` = strict non-empty subset, `error` = none). A schema-valid response with an unexpected
+  target or a coverage/status mismatch is **just as retryable** as a malformed one — do not defer it
+  to 6b.
+- **This is the ONLY place retries happen** (do not also retry in 6b). Any response failing (a)–(d)
+  → **re-dispatch that batch once**. If it still fails, **keep the wrapper but replace its response
+  with `{ "status": "error", "verdicts": [] }`** (preserving `batch_id` and `expected_targets`).
+  **Do not delete the wrapper** — deleting it would also delete its `expected_targets`, and those
+  targets would vanish without a coverage gap. With the neutralized response, every expected target
+  surfaces as a **gap**. (6b's `applyVerdicts` re-checks (a)–(d) as a backstop; reaching a
+  `verifier-output` error there means §6 missed a violation — neutralize per `error_batch_id`.)
 
 ### 6b. Apply verdicts → final severity (deterministic CLI)
 **Do not apply verdicts or decide Critique by hand.** Write a single JSON input
@@ -2012,7 +2304,7 @@ temp path, then run the tested CLI (it cannot be imported as a tool — it is in
 # exit 0 → result.ok (read the printed --out JSON); exit 1 → result.ok=false (see error, retry); exit 2 → IO/usage error.
 ```
 
-The CLI encodes the entire decision and returns `{ ok, error, error_kind, error_batch_id, findings, chains, gaps }`:
+The CLI encodes the entire decision and returns `{ ok, error, error_kind, error_batch_id, findings, chains, gaps, decisions }`:
 - finding: `verification_status` + `final_severity`/`final_confidence` (`accepted` → provisional;
   `downgraded` → verdict `new_*`; `rejected` → final fields removed; unverified → provisional, `not-requested`);
 - the **global chain verdict is honoured first** (`rejected` → chain rejected; `downgraded` → chain
@@ -2081,7 +2373,9 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
   if `not-requested`), `final_confidence`/`confidence`, and `verification_status`.
 - **Coverage**: analyzed vs skipped + reason (budget, exclusion, out of scope, unsupported stack,
   analyzer error, partition-binding mismatch, validation gap, dropped verifier batch).
-- **Annexe « Findings écartés »**: `rejected` verdicts with justification.
+- **Annexe « Findings écartés »**: every `rejected` finding/chain from `decisions`, with its `reason`
+  — including **implicit** chain rejections (a rejected/unverified member, or a transition mismatch),
+  whose cause `applyVerdicts` records so it is never lost.
 - **Chat summary**: verdict, RCE chains, top criticals, coverage (not the full detail).
 
 ### Report security
@@ -2103,7 +2397,7 @@ Confidence: `preuve statique forte` · `probable` · `à vérifier`.
 
 - [ ] **Step 2: Verify key directives are present**
 
-Run: `grep -n "disable-model-invocation: true" skills/audit/SKILL.md && grep -n "node --version" skills/audit/SKILL.md && grep -n "confine-path.mjs" skills/audit/SKILL.md && grep -n "apply-verdicts.mjs" skills/audit/SKILL.md && grep -n "expected_targets" skills/audit/SKILL.md && grep -n "error_kind" skills/audit/SKILL.md && grep -n "order-independent" skills/audit/SKILL.md`
+Run: `grep -n "disable-model-invocation: true" skills/audit/SKILL.md && grep -n "node --version" skills/audit/SKILL.md && grep -n "confine-path.mjs" skills/audit/SKILL.md && grep -n "aggregate-findings.mjs" skills/audit/SKILL.md && grep -n "apply-verdicts.mjs" skills/audit/SKILL.md && grep -n "expected_targets" skills/audit/SKILL.md && grep -n "error_kind" skills/audit/SKILL.md`
 Expected: matching lines for each (model-invocation guard, concurrency cap, confinement helper, `--file` validator contract, verdict-application helper, `final-finding` re-validation, exact transition match).
 
 - [ ] **Step 3: Commit**
@@ -2636,8 +2930,9 @@ git commit -m "docs(oswe): add README and finalize MVP acceptance"
 - [ ] `claude plugin validate . --strict` passes.
 - [ ] `claude --plugin-dir .` exposes `/oswe:audit`; it does not auto-run (`disable-model-invocation: true`).
 - [ ] All `node --test` suites pass: `validate-output` (schema invariants incl. `final-finding`),
-  `confine-path` (scope confinement), and `apply-verdicts` (topology, exact transition match,
-  downgrade-no-increase, Critique promotion, CLI exit codes).
+  `confine-path` (scope confinement), `aggregate-findings` (order-independence, merge, stable
+  numbering, uniqueness), and `apply-verdicts` (batch binding, completeness, topology, Critique
+  promotion, decisions log, CLI exit codes).
 - [ ] PHP positive fixture → detection + reconstructed RCE chain; PHP negative → no Critique false-positive.
 - [ ] Node positive fixture → detection + reconstructed RCE chain; Node negative → no Critique false-positive.
 - [ ] Every reported finding/chain carries a `verification_status`; the report includes a Coverage section.

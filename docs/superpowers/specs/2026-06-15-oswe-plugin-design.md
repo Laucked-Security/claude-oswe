@@ -188,6 +188,10 @@ sinon **rétrogradée** (`probable`/`à vérifier`).
 - Les agents émettent du **JSON brut uniquement** (pas de bloc Markdown, pas de texte hors JSON).
 - L'orchestrateur passe **chaque `analyzer-response`, chaque `verifier-response`, et chaque chaîne
   construite** à **`validate-output.mjs`** (validateurs AJV précompilés).
+- Les décisions sensibles à l'ordre ou aux invariants sont déléguées à des **helpers Node
+  déterministes et testés**, jamais reconstituées en prose : `confine-path.mjs` (confinement),
+  `aggregate-findings.mjs` (dédoublonnage/fusion/numérotation `OSWE-N` indépendante de l'ordre),
+  `apply-verdicts.mjs` (liaison batch↔réponse, promotion `Critique`, journal `decisions` des rejets).
 - **Sortie non conforme** → **une nouvelle tentative** ; échec persistant → **lacune de couverture**
   (§7), **jamais inventée**. (Node ≥ 20 étant un prérequis vérifié au démarrage, il n'y a pas de
   mode dégradé : sans Node l'audit a déjà abandonné.)
