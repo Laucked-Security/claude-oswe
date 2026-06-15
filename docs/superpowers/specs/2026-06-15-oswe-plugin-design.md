@@ -56,7 +56,7 @@ claude-oswe/
 │       │   ├── validate-batch.mjs               # CLI du contrat bound-batch (pré-retry §6)
 │       │   ├── validators.mjs                  # AJV standalone PRÉCOMPILÉ (autonome, en-tête licence MIT ajv)
 │       │   ├── build-validators.mjs            # (dev) régénère validators.mjs depuis schemas/
-│       │   ├── package.json                    # (dev) manifeste devDependencies (ajv, esbuild) pour régénérer
+│       │   ├── package.json                    # (dev) manifeste devDependencies (ajv seul) pour régénérer
 │       │   └── test/                            # node:test : validate-output, confine-path, aggregate-findings, apply-verdicts
 │       └── references/
 │           ├── php.md   ├── node.md   ├── python.md   ├── java.md   └── dotnet.md
