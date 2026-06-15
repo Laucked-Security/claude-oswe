@@ -131,7 +131,8 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
     "confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
     "verification_status": { "enum": ["not-requested", "accepted", "downgraded", "rejected"] },
     "partitions": { "type": "array", "items": { "type": "string" } },
-    "final_severity": { "enum": ["Critique", "Haute", "Moyenne", "Basse", "Info"] },
+    "source_finding_ids": { "type": "array", "items": { "type": "string" } },
+    "final_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
     "final_confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] }
   },
   "$defs": {
@@ -165,10 +166,11 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
 }
 ```
 
-> Note: `provisional_severity` deliberately omits `Critique` — an analyzer can never emit Critique.
-> `final_severity` / `final_confidence` are **optional** and absent in analyzer output; the
-> orchestrator sets them after applying verifier verdicts (phase 6), and `final_severity` **may** be
-> `Critique`. Findings are re-validated after this application.
+> Note: `Critique` is reserved for **chains** — it appears in neither `provisional_severity` nor
+> `final_severity` (a single finding is at most `Haute`). `final_severity`, `final_confidence`,
+> `source_finding_ids` are **absent in analyzer output** (forbidden by
+> `analyzer-response.schema.json`); the orchestrator sets them after applying verdicts and
+> re-validates each finding against `final-finding.schema.json` (Task 2, Step 6).
 
 - [ ] **Step 2: Write `analyzer-response.schema.json`**
 
@@ -188,7 +190,18 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
       "items": {
         "allOf": [
           { "$ref": "finding.schema.json" },
-          { "properties": { "verification_status": { "const": "not-requested" } } }
+          { "properties": { "verification_status": { "const": "not-requested" } } },
+          {
+            "$comment": "Orchestration-only fields are forbidden in analyzer output.",
+            "not": {
+              "anyOf": [
+                { "required": ["final_severity"] },
+                { "required": ["final_confidence"] },
+                { "required": ["source_finding_ids"] },
+                { "required": ["partitions"] }
+              ]
+            }
+          }
         ]
       }
     },
@@ -253,7 +266,8 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
     "properties": {
       "verification_status": { "const": "accepted" },
       "confidence": { "const": "preuve statique forte" },
-      "final_impact": { "const": "unauth-rce" }
+      "final_impact": { "const": "unauth-rce" },
+      "entry_point": { "properties": { "auth": { "const": "unauthenticated" } } }
     }
   }
 }
@@ -273,10 +287,11 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
     "target_type": { "enum": ["finding", "chain"] },
     "target_id": { "type": "string", "minLength": 1 },
     "verdict": { "enum": ["accepted", "downgraded", "rejected"] },
-    "new_severity": { "enum": ["Critique", "Haute", "Moyenne", "Basse", "Info"] },
+    "new_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
     "new_confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
     "transition_verdicts": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "object", "additionalProperties": false,
         "required": ["from", "to", "verdict", "justification"],
@@ -314,12 +329,34 @@ git commit -m "feat(oswe): add plugin manifest and gitignore"
 }
 ```
 
-- [ ] **Step 6: Sanity-check JSON validity**
+- [ ] **Step 6: Write `final-finding.schema.json`**
+
+Contract for a finding **after** orchestration applies verdicts (phase 6b). It extends
+`finding.schema.json` and enforces the final lifecycle: final fields are **required** unless the
+finding was `rejected` (in which case they are **forbidden** — a rejected finding has no final severity).
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "final-finding.schema.json",
+  "title": "OSWE Final Finding (post-orchestration)",
+  "allOf": [
+    { "$ref": "finding.schema.json" },
+    {
+      "if": { "properties": { "verification_status": { "const": "rejected" } }, "required": ["verification_status"] },
+      "then": { "not": { "anyOf": [ { "required": ["final_severity"] }, { "required": ["final_confidence"] } ] } },
+      "else": { "required": ["final_severity", "final_confidence"] }
+    }
+  ]
+}
+```
+
+- [ ] **Step 7: Sanity-check JSON validity**
 
 Run: `node -e "for (const f of require('fs').readdirSync('skills/audit/schemas')) JSON.parse(require('fs').readFileSync('skills/audit/schemas/'+f)); console.log('all schemas parse')"`
 Expected: `all schemas parse`
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add skills/audit/schemas
@@ -381,6 +418,7 @@ const schemasDir = join(here, "..", "schemas");
 // Map schema $id -> exported JS identifier in validators.mjs
 const EXPORT_NAME = {
   "finding.schema.json": "finding",
+  "final-finding.schema.json": "finalFinding",
   "analyzer-response.schema.json": "analyzerResponse",
   "chain.schema.json": "chain",
   "verdict.schema.json": "verdict",
@@ -425,7 +463,7 @@ Run:
 ```bash
 ( cd skills/audit/scripts && npm install && npm run build )
 ```
-Expected: ends with `validators.mjs generated: finding.schema.json, analyzer-response.schema.json, chain.schema.json, verdict.schema.json, verifier-response.schema.json`. `npm install` also creates `skills/audit/scripts/package-lock.json` (committed in Step 5 for reproducible builds).
+Expected: ends with `validators.mjs generated: finding.schema.json, final-finding.schema.json, analyzer-response.schema.json, chain.schema.json, verdict.schema.json, verifier-response.schema.json`. `npm install` also creates `skills/audit/scripts/package-lock.json` (committed in Step 5 for reproducible builds).
 
 - [ ] **Step 4: Verify the generated bundle imports cleanly with no runtime deps**
 
@@ -433,7 +471,7 @@ Run:
 ```bash
 node --input-type=module -e "import('./skills/audit/scripts/validators.mjs').then(m => console.log('exports:', Object.keys(m).sort().join(',')))"
 ```
-Expected: `exports: analyzerResponse,chain,finding,verdict,verifierResponse`
+Expected: `exports: analyzerResponse,chain,finalFinding,finding,verdict,verifierResponse`
 (If it throws a module-not-found, the bundle is not self-contained — re-check esbuild `bundle: true`.)
 
 - [ ] **Step 5: Commit**
@@ -540,6 +578,11 @@ test("Critique chain with non-unauth-rce impact fails", () => {
   assert.equal(r.valid, false);
 });
 
+test("Critique chain with authenticated entry point fails (gating invariant)", () => {
+  const r = validate("chain", { ...validCriticalChain, entry_point: { ...validCriticalChain.entry_point, auth: "authenticated" } });
+  assert.equal(r.valid, false);
+});
+
 test("non-Critique chain is unconstrained on those fields", () => {
   const r = validate("chain", { ...validCriticalChain, severity: "Haute", verification_status: "not-requested", final_impact: "auth-rce", confidence: "probable" });
   assert.equal(r.valid, true, JSON.stringify(r.errors));
@@ -566,13 +609,39 @@ test("downgraded verdict without new_severity/new_confidence fails", () => {
   assert.equal(r.valid, false);
 });
 
-test("finding with final_severity Critique + final_confidence passes (post-verification)", () => {
+test("finding rejects Critique final_severity (Critique is reserved for chains)", () => {
   const r = validate("finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Critique", final_confidence: "preuve statique forte" }));
+  assert.equal(r.valid, false);
+});
+
+test("finding accepts Haute final_severity with source_finding_ids", () => {
+  const r = validate("finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte", source_finding_ids: ["auth-F001", "upload-F002"] }));
   assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
 
 test("finding with invalid final_severity fails", () => {
   const r = validate("finding", baseFinding({ final_severity: "Catastrophic" }));
+  assert.equal(r.valid, false);
+});
+
+// --- final-finding lifecycle (post-orchestration, phase 6b) ---
+
+test("final-finding: accepted requires final fields", () => {
+  const ok = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  assert.equal(ok.valid, true, JSON.stringify(ok.errors));
+  const missing = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted" }));
+  assert.equal(missing.valid, false);
+});
+
+test("final-finding: rejected forbids final fields", () => {
+  const okRejected = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "rejected" }));
+  assert.equal(okRejected.valid, true, JSON.stringify(okRejected.errors));
+  const badRejected = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "rejected", final_severity: "Haute", final_confidence: "probable" }));
+  assert.equal(badRejected.valid, false);
+});
+
+test("final-finding: not-requested still requires final fields", () => {
+  const r = validate("final-finding", baseFinding({ verification_status: "not-requested" }));
   assert.equal(r.valid, false);
 });
 ```
@@ -596,6 +665,7 @@ const KIND_TO_EXPORT = {
   "analyzer-response": "analyzerResponse",
   "verifier-response": "verifierResponse",
   "finding": "finding",
+  "final-finding": "finalFinding",
   "chain": "chain",
   "verdict": "verdict"
 };
@@ -640,7 +710,15 @@ if (isMain()) {
   };
 
   if (fileIdx !== -1) {
-    run(readFileSync(args[fileIdx + 1], "utf8"));
+    const path = args[fileIdx + 1];
+    let raw;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (e) {
+      console.error(JSON.stringify({ valid: false, errors: [{ message: "cannot read --file " + path + ": " + e.message }] }));
+      process.exit(2);
+    }
+    run(raw);
   } else {
     let raw = "";
     process.stdin.setEncoding("utf8");
@@ -738,8 +816,9 @@ concrete — copy this shape, do not include comments or `|` placeholders):
 
 If you cannot analyze part of the partition (too large, unreadable, out of scope), record it in
 `coverage.skipped` with a reason rather than guessing. Never invent a finding you cannot support
-with `file:line` evidence. Omit `partitions`, `final_severity`, `final_confidence` — the
-orchestrator sets those later.
+with `file:line` evidence. **Do not emit** `partitions`, `source_finding_ids`, `final_severity`, or
+`final_confidence` — these are orchestration-only fields and are rejected by
+`analyzer-response.schema.json`.
 ```
 
 - [ ] **Step 2: Verify the frontmatter and JSON-only contract are present**
@@ -853,9 +932,10 @@ git commit -m "feat(oswe): add read-only independent verifier subagent"
 
 - [ ] **Step 1: Write the skill**
 
-Create `skills/audit/SKILL.md`:
+Create `skills/audit/SKILL.md` (outer block uses **four** backticks — the skill body contains a
+triple-backtick `bash` example):
 
-```markdown
+````markdown
 ---
 name: audit
 description: Deep white-box OSWE-style web application security audit. Invoke ONLY via the explicit /oswe:audit command. Detects stack and attack surface, traces source-to-sink vulnerabilities, chains them toward unauthenticated RCE under a proof contract, and writes a dated report to .oswe/reports/.
@@ -896,17 +976,21 @@ Partition the surface **by module / framework / authentication boundary** (never
 route). Prioritize partitions by exposure to the **unauthenticated** surface.
 
 ### 3. Analyze
-- **Small repo (≤ 2 partitions):** analyze inline yourself (no analyzer subagents).
+- **Small repo (≤ 2 partitions):** analyze inline yourself (no analyzer *subagents*) — but you MUST
+  still produce **one `analyzer-response` object per partition** and **run it through the same
+  validator** (kind `analyzer-response`) before aggregating. The inline path uses the identical
+  contract; it does not skip validation. (Small fixtures take this path, so it must be airtight.)
 - **Otherwise:** dispatch `oswe-analyzer` subagents in parallel, **max 4 concurrent**, **budget 12
   partitions** total; anything beyond the budget → recorded as "non analysé" in Coverage.
-- Each analyzer returns an `analyzer-response`. **Validate every response** (see Validation below)
-  before aggregating.
+- Every `analyzer-response` (inline or subagent) is **validated** (see Validation below) before aggregating.
 
 ### 4. Aggregate & dedupe
 - Assign **canonical global ids** `OSWE-1, OSWE-2, …`.
 - **Dedupe across partitions** with key = `vuln_class` + canonical `source` + canonical `sink`
   (each on `{file, symbol, line, kind}` — include `line` and `kind`), **without** `partition_id`.
-  When merging duplicates, populate `partitions[]` with all origin partitions.
+- When merging duplicates, preserve provenance: set **`partitions[]`** to every origin partition and
+  **`source_finding_ids[]`** to every original per-partition `finding_id` (e.g. `auth-F001`,
+  `upload-F003`) that was merged into the canonical finding.
 
 ### 5. Build candidate chains
 Assemble exploit chains (`chain.schema.json`) toward unauthenticated RCE from the aggregated
@@ -927,14 +1011,25 @@ This is the **single place** the final severity model is decided:
   - `downgraded` → use the verdict's `new_severity` / `new_confidence`;
   - `rejected` → no final severity; the finding moves to the report annex;
   - `not-requested` → `final_severity = provisional_severity`, `final_confidence = confidence`.
-- A **chain** is `accepted` only if **every** transition verdict is `accepted`. For an accepted
-  chain, set `severity: "Critique"`, `confidence: "preuve statique forte"`,
-  `final_impact: "unauth-rce"`, `verification_status: "accepted"`. Otherwise downgrade the chain's
-  `severity`/`confidence` to match the weakest verified link (never `Critique`).
-- **Re-validate** every mutated finding (kind `finding`) and chain (kind `chain`) with the validator.
-  The chain `if/then` invariant guarantees no chain can be `Critique` unless accepted + strong proof
-  + `unauth-rce`. A re-validation failure here is a bug in the application logic — fix it, do not
-  ship the report.
+- **Chain acceptance** requires an **exact transition match**: the set of `{from, to}` pairs in the
+  verdict's `transition_verdicts` must equal the chain's own `transitions` set — **no missing, extra,
+  or duplicated** transition. An empty or mismatched `transition_verdicts` → the chain is **not**
+  accepted (this blocks the `transition_verdicts: []` vacuous-truth bug). A chain is `accepted` only
+  if that exact-match holds **and every** transition verdict is `accepted`.
+- **`Critique` gating** — a chain becomes `Critique` **only if ALL** of the following hold
+  simultaneously; otherwise it keeps a non-`Critique` severity reflecting its real impact/auth:
+  1. `entry_point.auth == "unauthenticated"`,
+  2. the demonstrated `final_impact == "unauth-rce"` (an account-takeover or authenticated path is
+     **not** promoted),
+  3. the exact-coverage transition match above, with **every** transition `accepted`.
+  For a Critique chain, set `severity: "Critique"`, `confidence: "preuve statique forte"`,
+  `final_impact: "unauth-rce"`, `verification_status: "accepted"`. An accepted-but-not-Critique chain
+  (e.g. authenticated entry, or impact = account-takeover) keeps `severity` at `Haute` or below and
+  `verification_status: "accepted"`.
+- **Re-validate** every mutated finding against kind **`final-finding`** (enforces: final fields
+  required unless `rejected`, where they are forbidden) and every chain against kind `chain` (the
+  `if/then` invariant guarantees no chain is `Critique` unless accepted + strong proof + `unauth-rce`).
+  A re-validation failure here is a bug in the application logic — fix it, do not ship the report.
 
 ### 7. Report
 Write `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (always relative to the
@@ -943,19 +1038,24 @@ to `provisional_severity` only for `not-requested` items). See Report format bel
 
 ## Validation
 Validate every analyzer/verifier response, every built chain, and every finding mutated in phase 6b
-with the bundled validator. **Pass the JSON via a temp file with `--file`** — never interpolate JSON
-into the shell command (apostrophes in code excerpts like `$_POST['password']` would break the
-command and allow shell injection):
+with the bundled validator. **Pass the JSON via a unique temp file with `--file`** — never interpolate
+JSON into the shell command (apostrophes in code excerpts like `$_POST['password']` would break the
+command and allow shell injection). Create the temp dir first, use a **per-invocation unique
+filename**, and **delete it in a `finally`** so stale/colliding data can't leak between validations:
 
 ```bash
-# Write the agent/chain JSON to a temp file inside the project, then:
-node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-output.mjs" <kind> --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/out.json"
+mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"
+tmp="${CLAUDE_PROJECT_DIR}/.oswe/tmp/out-$$-$(date +%s%N).json"
+# (write the agent/chain/finding JSON to "$tmp" with a file-writing tool, not via echo)
+node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-output.mjs" <kind> --file "$tmp"; rc=$?
+rm -f "$tmp"
 ```
 
-where `<kind>` is `analyzer-response`, `verifier-response`, `chain`, or `finding`. Exit 0 = valid;
-non-zero prints `{valid:false, errors:[…]}`. On **invalid** output: retry the agent **once**; if it
-still fails, record the finding/partition as a **coverage gap** — never invent or guess data. If Node
-is unavailable, fall back to a structural check yourself and note the **reduced guarantee** in Coverage.
+where `<kind>` is `analyzer-response`, `verifier-response`, `chain`, `finding`, or `final-finding`.
+Exit 0 = valid; non-zero prints `{valid:false, errors:[…]}` (a missing/unreadable `--file` exits 2).
+On **invalid** output: retry the agent **once**; if it still fails, record the finding/partition as a
+**coverage gap** — never invent or guess data. If Node is unavailable, fall back to a structural check
+yourself and note the **reduced guarantee** in Coverage. `.oswe/tmp/` is gitignored (via `.oswe/`).
 
 ## Report format
 - **Header**: target, detected stack + framework, date, scope, authorization reminder.
@@ -983,12 +1083,12 @@ is unavailable, fall back to a structural check yourself and note the **reduced 
 - **Info**: hardening note, no direct vulnerability.
 
 Confidence: `preuve statique forte` · `probable` · `à vérifier`.
-```
+````
 
 - [ ] **Step 2: Verify key directives are present**
 
-Run: `grep -n "disable-model-invocation: true" skills/audit/SKILL.md && grep -n "max 4 concurrent" skills/audit/SKILL.md && grep -n "CLAUDE_PROJECT_DIR" skills/audit/SKILL.md && grep -n -- "--file" skills/audit/SKILL.md && grep -n "final_severity" skills/audit/SKILL.md`
-Expected: five matching lines (note the `--file` validator contract and the final-severity application phase).
+Run: `grep -n "disable-model-invocation: true" skills/audit/SKILL.md && grep -n "max 4 concurrent" skills/audit/SKILL.md && grep -n "CLAUDE_PROJECT_DIR" skills/audit/SKILL.md && grep -n -- "--file" skills/audit/SKILL.md && grep -n "final-finding" skills/audit/SKILL.md && grep -n "exact transition match" skills/audit/SKILL.md && grep -n "Critique. gating" skills/audit/SKILL.md`
+Expected: matching lines for each (model-invocation guard, concurrency cap, project-dir confinement, `--file` validator contract, `final-finding` re-validation, exact transition match, and Critique gating).
 
 - [ ] **Step 3: Commit**
 
@@ -1424,9 +1524,10 @@ git commit -m "test(oswe): add Node vulnerable/safe fixtures for auditor validat
 
 - [ ] **Step 1: Write the README**
 
-Create `README.md`:
+Create `README.md` (outer block uses **four** backticks because the README itself contains
+triple-backtick code fences):
 
-```markdown
+````markdown
 # oswe — White-Box Security Audit Plugin for Claude Code
 
 Deep, OSWE-style white-box web application security audit. Run `/oswe:audit` in a trusted
@@ -1463,9 +1564,9 @@ proof of absence.
 ## Development
 Regenerate the validators after changing any schema:
 ```bash
-cd skills/audit/scripts && npm install && npm run build && npm test
+( cd skills/audit/scripts && npm install && npm run build && npm test )
 ```
-```
+````
 
 - [ ] **Step 2: Run the validator unit tests (regression gate)**
 
