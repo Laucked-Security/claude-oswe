@@ -77,9 +77,10 @@ claude-oswe/
   **avec l'en-tête de licence MIT d'ajv**. Un **`scripts/package.json` (dev)** déclare les
   `devDependencies` (`ajv`, `ajv-cli`) nécessaires pour **régénérer** `validators.mjs` — la chaîne de
   build est ainsi reproductible et non opaque. `validate-output.mjs` parse une réponse d'agent/une
-  chaîne et appelle ces validateurs → `valid` / liste d'erreurs. **Si Node indisponible**,
-  l'orchestrateur fait une **validation structurelle de repli** et **signale la garantie réduite**
-  dans la Couverture.
+  chaîne et appelle ces validateurs → `valid` / liste d'erreurs. **Node.js (≥ 20) est un prérequis
+  dur** : la confinement, la validation et l'application des verdicts reposent toutes sur des helpers
+  Node sans repli cohérent. L'orchestrateur **vérifie `node --version` au démarrage** et **abandonne**
+  si Node est absent ou trop ancien (pas d'audit dégradé en mode texte).
 - **`agents/oswe-analyzer.md`** — analyse **une partition**, renvoie l'**enveloppe §6.1** en
   **JSON brut uniquement (sans bloc Markdown ni texte hors JSON)**. `tools: Read, Grep, Glob`.
 - **`agents/oswe-verifier.md`** — vérificateur indépendant, renvoie l'**enveloppe §6.3** (« JSON brut »),
@@ -188,7 +189,8 @@ sinon **rétrogradée** (`probable`/`à vérifier`).
 - L'orchestrateur passe **chaque `analyzer-response`, chaque `verifier-response`, et chaque chaîne
   construite** à **`validate-output.mjs`** (validateurs AJV précompilés).
 - **Sortie non conforme** → **une nouvelle tentative** ; échec persistant → **lacune de couverture**
-  (§7), **jamais inventée**. Repli si Node absent : validation structurelle + garantie réduite signalée.
+  (§7), **jamais inventée**. (Node ≥ 20 étant un prérequis vérifié au démarrage, il n'y a pas de
+  mode dégradé : sans Node l'audit a déjà abandonné.)
 
 ## 7. Format du rapport
 
@@ -199,7 +201,7 @@ Fichier : `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (
 - **Chaînes d'exploitation** : étape par étape (§6.2) avec `verification_status`, preuve par transition.
 - **Findings détaillés** : un bloc par vuln (§6.1) avec sévérité, confiance, **`verification_status`**.
 - **Couverture** : analysé vs **ignoré + raison** (budget, exclusion, hors périmètre, stack non
-  supportée, échec d'agent, lacune de validation §6.5, repli sans Node).
+  supportée, échec d'agent, lacune de validation §6.5, batch verifier neutralisé).
 - **Annexe « Findings écartés »** : les `rejected`, avec justification.
 - **Résumé chat** : verdict, chaînes RCE, top critiques, couverture.
 
