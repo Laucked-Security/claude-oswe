@@ -1196,6 +1196,28 @@ test("a chain with broken topology is an orchestrator error (ok:false)", () => {
   assert.match(r.error, /invalid topology/);
 });
 
+test("a malformed-topology chain with NO verdict is still an error (ok:false)", () => {
+  // Simulates the dropped-batch case: the chain lost its verdict but is structurally broken.
+  const c = chain({
+    transitions: [
+      { from: "entry", to: "OSWE-1", how: "x", evidence: [{ file: "a.php", line: 2 }] },
+      { from: "entry", to: "OSWE-2", how: "x", evidence: [{ file: "u.php", line: 4 }] }
+    ]
+  });
+  const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp(acceptBoth) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /invalid topology/);
+});
+
+test("a chain downgrade above the CANDIDATE severity is an error", () => {
+  // Candidate claims Moyenne but is naturally Critique; downgrading to Haute exceeds c.severity.
+  const c = chain({ severity: "Moyenne", confidence: "probable" });
+  const dn = { ...acceptChain, verdict: "downgraded", new_severity: "Haute", new_confidence: "probable" };
+  const r = applyVerdicts({ findings: bothFindings(), chains: [c], verifierResponses: vresp([...acceptBoth, dn]) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /raises severity/);
+});
+
 test("a probable member caps the accepted chain confidence (no Critique, not forte)", () => {
   // OSWE-2 is downgraded to probable confidence; chain must not become Critique nor claim forte.
   const verdicts = [
@@ -1366,6 +1388,11 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
   const outChains = [];
   for (const c of chains) {
     const nc = { ...c };
+
+    // Topology is an ORCHESTRATOR-bug check and must run REGARDLESS of any verdict — a malformed
+    // chain that loses its verdict (e.g. after a dropped batch) must NOT slip through as not-requested.
+    if (!topologyValid(c)) return fail(`chain ${c.chain_id} has invalid topology (must be entry->f0->...->fN)`);
+
     const v = chainVerdict.get(c.chain_id);
 
     // No verdict → not verified: stay not-requested + coverage gap (do NOT pollute the rejected annex).
@@ -1375,9 +1402,6 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
       outChains.push(nc);
       continue;
     }
-    // A topologically malformed chain is an ORCHESTRATOR bug, not a security rejection.
-    // Fail the whole batch so it gets fixed — do not route it to the rejected annex.
-    if (!topologyValid(c)) return fail(`chain ${c.chain_id} has invalid topology (must be entry->f0->...->fN)`);
 
     if (v.verdict === "rejected") { outChains.push(reject(nc)); continue; }
 
@@ -1412,8 +1436,14 @@ export function applyVerdicts({ findings, chains, verifierResponses }) {
     const naturalConf = canBeCritique ? "preuve statique forte" : minMemberConf;
 
     if (v.verdict === "downgraded") {
-      if (!notIncrease(naturalSev, naturalConf, v.new_severity, v.new_confidence)) {
-        return fail(`downgraded chain ${c.chain_id} raises severity/confidence`);
+      // A downgrade may not exceed EITHER the candidate's originally-claimed level (c.severity/
+      // c.confidence) OR the natural computed level. Use the lower of the two as the ceiling.
+      const ceilSev = SEV_BY_INDEX[Math.min(SEV_INDEX[c.severity], SEV_INDEX[naturalSev])];
+      const ceilConf = ["à vérifier", "probable", "preuve statique forte"][
+        Math.min(CONF_INDEX[c.confidence], CONF_INDEX[naturalConf])
+      ];
+      if (!notIncrease(ceilSev, ceilConf, v.new_severity, v.new_confidence)) {
+        return fail(`downgraded chain ${c.chain_id} raises severity/confidence above its ceiling`);
       }
       nc.verification_status = "downgraded";
       nc.severity = v.new_severity;
@@ -1725,19 +1755,25 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
 - Assign **canonical global ids** `OSWE-1, OSWE-2, …`.
 - **Dedupe across partitions** with key = `vuln_class` + canonical `source` + canonical `sink`
   (each on `{file, symbol, line, kind}` — include `line` and `kind`), **without** `partition_id`.
-- When merging duplicates, preserve provenance: set **`partitions[]`** to every origin partition and
-  **`source_finding_ids[]`** to every original per-partition `finding_id` (e.g. `auth-F001`,
-  `upload-F003`) that was merged into the canonical finding.
+- **Every canonical finding carries provenance — even a unique (un-merged) one.** Initialize
+  **`partitions[]`** with its origin partition(s) and **`source_finding_ids[]`** with its original
+  per-partition `finding_id`(s) (e.g. `auth-F001`). A unique finding gets single-element arrays
+  (`partitions: ["auth"]`, `source_finding_ids: ["auth-F001"]`); a merged one gets every origin.
+  `final-finding.schema.json` **requires** both arrays non-empty, so this must hold for all findings.
 
 ### 5. Build candidate chains
 Assemble exploit chains (`chain.schema.json`) toward unauthenticated RCE from the aggregated
 findings. **Validate each built chain** against `chain.schema.json`.
 
 ### 6. Verify (batched)
-Send to `oswe-verifier`: all findings used in a candidate chain, all provisional-`Haute` findings,
-and the full chain(s). **Batch: ≤ 5 findings OR 1 full chain per invocation, max 2 verifiers
-concurrent.** Validate each `verifier-response` (kind `verifier-response`). A response with
-`status: "error"` → **retry that batch once**; persistent error → record the targets as coverage gaps.
+Build the verification target set: all findings used in a candidate chain, all provisional-`Haute`
+findings, and the full chain(s). **Deduplicate targets by `target_type:target_id` first** — a finding
+can be both a chain member and provisional-`Haute`, and several chains can share a finding; each
+distinct target must be verified **at most once** (otherwise `applyVerdicts` rejects the duplicate
+`target_id`). Send the deduplicated targets to `oswe-verifier`. **Batch: ≤ 5 findings OR 1 full chain
+per invocation, max 2 verifiers concurrent.** Validate each `verifier-response` (kind
+`verifier-response`). A response with `status: "error"` → **retry that batch once**; persistent error
+→ record the targets as coverage gaps.
 
 ### 6b. Apply verdicts → final severity (deterministic CLI)
 **Do not apply verdicts or decide Critique by hand.** Write a single JSON input
