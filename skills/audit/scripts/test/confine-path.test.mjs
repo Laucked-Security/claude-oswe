@@ -90,3 +90,8 @@ test("CLI exit 2 when --file is missing", () => {
   const r = spawnSync(process.execPath, [CLI], { encoding: "utf8" });
   assert.equal(r.status, 2);
 });
+
+test("CLI exit 2 for malformed input (projectDir not a string), not exit 1", () => {
+  const r = runCli({ arg: "foo" }); // no projectDir -> usage error, not a path-escape
+  assert.equal(r.status, 2);
+});

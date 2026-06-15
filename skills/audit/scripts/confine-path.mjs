@@ -32,7 +32,7 @@ import { readFileSync as _readFileSync } from "node:fs";
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const fileIdx = args.indexOf("--file");
-  if (fileIdx === -1) {
+  if (fileIdx === -1 || !args[fileIdx + 1]) {
     process.stderr.write("usage: confine-path.mjs --file <input.json>\n");
     process.exit(2);
   }
@@ -43,10 +43,21 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.stderr.write("cannot read --file: " + e.message + "\n");
     process.exit(2);
   }
+  if (typeof input.projectDir !== "string") {
+    process.stderr.write("bad input: projectDir must be a string\n");
+    process.exit(2);
+  }
   try {
     process.stdout.write(confinePath(input.projectDir, input.arg) + "\n");
   } catch (e) {
-    process.stderr.write(String(e.message) + "\n");
-    process.exit(1);
+    // exit 1 ONLY for a genuine confinement decision (target missing, or escapes the project);
+    // any other error (malformed input, etc.) is a usage error -> exit 2, so the orchestrator
+    // never mistakes a config bug for a path-escape.
+    if (e.code === "ENOENT" || /escapes project dir/.test(e.message)) {
+      process.stderr.write(String(e.message) + "\n");
+      process.exit(1);
+    }
+    process.stderr.write("bad input: " + e.message + "\n");
+    process.exit(2);
   }
 }
