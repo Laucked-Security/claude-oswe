@@ -33,7 +33,7 @@ Created in this plan (Phase 1):
 | `skills/audit/schemas/verifier-response.schema.json` | Verifier batch envelope `{status,verdicts[]}` |
 | `skills/audit/schemas/final-finding.schema.json` | Post-orchestration finding (final fields required unless rejected) |
 | `skills/audit/scripts/package.json` | Dev manifest (ajv only) to regenerate validators |
-| `skills/audit/scripts/build-validators.mjs` | Dev build: schemas → standalone → bundled `validators.mjs` |
+| `skills/audit/scripts/build-validators.mjs` | Dev build: schemas → AJV standalone (ucs2length inlined) → self-contained `validators.mjs` |
 | `skills/audit/scripts/validators.mjs` | Generated, committed, zero-runtime-dep validators |
 | `skills/audit/scripts/validate-output.mjs` | Runtime validation API + CLI |
 | `skills/audit/scripts/confine-path.mjs` | Deterministic scope-confinement helper (realpath, anti symlink/sibling-prefix) |

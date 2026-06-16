@@ -1,2 +1,5 @@
 node_modules/
 .oswe/
+# Python bytecode from static-only fixture verification (py_compile) — never commit.
+__pycache__/
+*.pyc

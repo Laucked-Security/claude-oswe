@@ -4,8 +4,8 @@ Deep, OSWE-style white-box web application security audit. Run `/oswe:audit` in 
 workspace to detect source-to-sink vulnerabilities and chain them toward unauthenticated RCE,
 with an evidence-backed report.
 
-## Scope (MVP)
-PHP (Laravel/Symfony/vanilla) and Node.js (Express/Nest). Python, Java, .NET are planned (Phase 2).
+## Scope
+PHP (Laravel/Symfony/vanilla), Node.js (Express/Nest), Python (Flask/Django), Java (Spring), and .NET (ASP.NET).
 
 ## Install (local dev)
 ```bash
