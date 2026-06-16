@@ -7,6 +7,11 @@ with an evidence-backed report.
 ## Scope
 PHP (Laravel/Symfony/vanilla), Node.js (Express/Nest), Python (Flask/Django), Java (Spring), and .NET (ASP.NET).
 
+Each audit writes a redaction-safe Markdown report to `.oswe/reports/` **and**, alongside it, a
+self-contained visual HTML report (`oswe-report-*.html`) with severity, exploit-chain, coverage, and
+finding-status charts. The HTML is a single zero-dependency file (inline CSS + SVG, no scripts) —
+open it in a browser and `Ctrl+P → Save as PDF` for a shareable PDF.
+
 ## Install (local dev)
 ```bash
 claude --plugin-dir /path/to/claude-oswe
