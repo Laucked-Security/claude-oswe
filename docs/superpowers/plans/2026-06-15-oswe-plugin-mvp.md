@@ -73,7 +73,7 @@ Create `.claude-plugin/plugin.json`:
   "name": "oswe",
   "version": "0.1.0",
   "description": "Deep white-box OSWE-style web app security audit via /oswe:audit (PHP, Node.js in MVP)",
-  "author": { "name": "Moi" },
+  "author": { "name": "Laucked" },
   "license": "MIT",
   "keywords": ["security", "oswe", "white-box", "audit", "appsec"]
 }

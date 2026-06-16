@@ -44,8 +44,9 @@ This is a security tool, so flaws in *it* (e.g. a way to make the auditor write 
 a path-confinement escape, a schema-gate bypass, or prompt-injection from audited content escaping the
 trust boundary) are taken seriously.
 
-- Please report privately via **GitHub Security Advisories** ("Report a vulnerability") on this
-  repository, or by email to the maintainer listed in `.claude-plugin/plugin.json`.
+- Please report privately via **GitHub Security Advisories** ("Report a vulnerability") on
+  [Laucked-Security/claude-oswe](https://github.com/Laucked-Security/claude-oswe/security/advisories),
+  or by email to the maintainer listed in `.claude-plugin/plugin.json`.
 - Do **not** open a public issue for an unfixed security flaw.
 - Include: affected file(s)/version, a minimal reproduction, and the impact (e.g. "redaction bypass",
   "scope escape").

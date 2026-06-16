@@ -1,14 +1,19 @@
-# oswe — White-Box Security Audit plugin for Claude Code
+<div align="center">
 
+# 🛡️ oswe
+
+### White-Box Security Audit plugin for Claude Code
+
+**A [Laucked Security](https://github.com/Laucked-Security) project**
+
+[![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Tests: 120 passing](https://img.shields.io/badge/tests-120%20passing-brightgreen)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
 
-<!-- After you push to GitHub, enable the live CI badge by replacing OWNER/REPO:
-[![ci](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
--->
+</div>
 
 **Deep, OSWE-style white-box web-app security audit, run from your editor.** Type `/oswe:audit` in a
 repo you're allowed to test; the plugin traces attacker input from **source → sink**, chains the
@@ -46,7 +51,7 @@ Requires **Node.js ≥ 20** (the validators and tests target it; the audit abort
 
 ```bash
 # Run Claude Code with the plugin loaded from a local checkout:
-git clone https://github.com/OWNER/REPO.git claude-oswe
+git clone https://github.com/Laucked-Security/claude-oswe.git
 claude --plugin-dir ./claude-oswe
 ```
 
@@ -200,4 +205,4 @@ for the full responsible-use policy and how to report a vulnerability in the plu
 
 ## License
 
-[MIT](LICENSE) © 2026
+[MIT](LICENSE) © 2026 [Laucked](https://github.com/Laucked-Security)
