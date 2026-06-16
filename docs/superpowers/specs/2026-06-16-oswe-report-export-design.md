@@ -86,9 +86,13 @@ emitted as escaped literal text. Supported:
 - ATX headings `#`, `##`, `###`
 - GFM pipe tables (header row + `|---|` separator + body rows)
 - `**bold**`
-- `*italic*` (used inside blockquotes, e.g. `*"Intentionally vulnerable … DO NOT DEPLOY"*`) → `<em>`.
-  The converter resolves `**bold**` (and `__bold__`) **before** single-`*`/`_` italic so the longer
-  delimiter is not mis-split.
+- `*italic*` → `<em>` (used inside blockquotes, e.g. `*"Intentionally vulnerable … DO NOT DEPLOY"*`).
+  **Asterisk emphasis only — `_underscore_` is NOT treated as emphasis.** The reports are full of
+  identifiers with underscores (`render_template_string`, `SECRET_KEY`, `__class__`, `__globals__`,
+  `__subclasses__`), and underscore emphasis would mangle them; underscores are always literal.
+  Emphasis precedence: `**bold**` is resolved **before** single-`*` `*italic*` so the longer
+  delimiter is not mis-split. **Inline code spans are tokenized/protected _before_ any emphasis
+  pass**, so `*`/`_` inside backticks (e.g. `` `a*b` ``) is always literal.
 - `` `inline code` ``
 - blockquote `> `
 - unordered lists `- `
@@ -203,8 +207,11 @@ explicitly and must mirror how the Markdown report presents the same numbers:
   `finding_status_counts` has **exactly** the four status keys, each an integer ≥ 0;
   `coverage.analyzed`/`skipped` integers ≥ 0.
 - `chains` is an array (possibly empty). Per chain: `id` matches **`^CHAIN-[0-9]+$`**; `severity` ∈
-  the five severities; `entry_auth` ∈ {`unauthenticated`,`authenticated`,`admin`};
-  `final_impact` a bounded string.
+  the five severities; `entry_auth` ∈ {`unauthenticated`,`authenticated`,`admin`}; `final_impact` ∈
+  the **closed enum {`unauth-rce`, `other`}**. (The `chain` schema allows a free `final_impact`
+  string; the summary deliberately constrains it tighter to stay non-sensitive — the orchestrator
+  maps `chain.final_impact === "unauth-rce"` → `"unauth-rce"`, everything else → `"other"`. The HTML
+  only needs this to color the terminal `RCE` node, so a closed enum suffices.)
 - **Graph labels are strictly patterned — no free text (adjustment 3).** Every `nodes[]` entry and
   every `edges[].from`/`edges[].to` matches **exactly one of**: the literal `entry`, the literal
   `RCE`, or **`^OSWE-[0-9]+$`**. `edges[].verdict` ∈ {`accepted`,`downgraded`,`rejected`}. (Node
@@ -217,11 +224,20 @@ explicitly and must mirror how the Markdown report presents the same numbers:
 
 - **MD→HTML constructs:** each supported construct (headings, table, bold, italic, inline code,
   blockquote, list, hr, strikethrough) renders to the expected tag(s). Includes a `**bold**` /
-  `*italic*` precedence case (`**a** and *b*` → `<strong>a</strong> and <em>b</em>`, not mis-split).
+  `*italic*` precedence case (`**a** and *b*` → `<strong>a</strong> and <em>b</em>`, not mis-split)
+  **and an underscore-literal case**: `render_template_string`, `__class__`, `SECRET_KEY` render
+  with their underscores intact and **no `<em>`** (asterisk-only emphasis).
 - **Security / escaping:** a `.md` whose heading, a table cell, and an inline-code span each contain
   `<script>alert(1)</script>` and `"><img onerror=x>` renders them as entities — **no live tags**.
-- **SVG label escaping (adjustment 7):** a summary/meta with `<`/`>`/`"`/`&` in `target`/`stack`
-  (and a node label) yields escaped `<text>`/header content — no raw markup injected into SVG.
+- **SVG / meta escaping (adjustment 7):** a summary whose `meta.target` and `meta.stack` contain
+  `<`/`>`/`"`/`&` (and `<script>`-like payloads) yields escaped `<text>`/header content — no raw
+  markup injected into the SVG or the HTML header. (Node labels are **not** tested for escaping here
+  because the schema forbids any node value outside the closed set — see the next item; escaping them
+  is pure defense-in-depth on already-constrained input.)
+- **Invalid node label → exit 1, no HTML (consistency with §7.2):** a summary with a `nodes[]` entry
+  or `edges[].from/to` outside {`entry`,`RCE`,`^OSWE-[0-9]+$`} (e.g. `"<img onerror=x>"` or a free
+  title) is **schema-rejected → exit 1, no `report.html` written**. This is the path that actually
+  guards diagram labels; escaping is the second layer.
 - **Charts from summary:** a given summary yields SVG carrying the right counts/segments; the chain
   diagram’s node/edge counts equal the summary’s; coverage/status bars reflect their counts.
 - **Empty states (adjustment 4):** all-zero `severity_counts` → grey empty-ring donut, **no NaN /
