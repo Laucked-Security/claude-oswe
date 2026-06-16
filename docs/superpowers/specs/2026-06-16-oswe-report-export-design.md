@@ -24,7 +24,8 @@ against `EXPECTED.md`) are untouched.
   no charting library, no Markdown library, no headless browser. Charts are hand-built inline SVG;
   Markdown→HTML is a small purpose-built converter.
 - **Self-contained output.** One `.html` file: all CSS in a `<style>` block, all charts inline
-  `<svg>`, **no `<script>`**, no external fonts/images/stylesheets, no network access.
+  `<svg>`, **no `<script>`**, no external fonts/images/stylesheets, no network access. A restrictive
+  CSP `<meta>` (§6) reinforces this.
 - **Node ≥ 20**, ESM, same `--file`/`--out` CLI discipline and exit-code contract as the other five
   helpers (`0` ok / `1` invalid input / `2` IO|usage).
 - **Security tool posture.** The audited repo is **untrusted data**; the renderer must never let
@@ -85,6 +86,9 @@ emitted as escaped literal text. Supported:
 - ATX headings `#`, `##`, `###`
 - GFM pipe tables (header row + `|---|` separator + body rows)
 - `**bold**`
+- `*italic*` (used inside blockquotes, e.g. `*"Intentionally vulnerable … DO NOT DEPLOY"*`) → `<em>`.
+  The converter resolves `**bold**` (and `__bold__`) **before** single-`*`/`_` italic so the longer
+  delimiter is not mis-split.
 - `` `inline code` ``
 - blockquote `> `
 - unordered lists `- `
@@ -121,14 +125,20 @@ All four are pure functions of the summary; no randomness, no time, no layout en
   `&lt;img onerror=…&gt;`, never execute.
 - **Adjustment 7 — SVG text is escaped too.** Every dynamic label injected into an SVG `<text>` node,
   and every dynamic `meta` field placed into the HTML (target, stack, date, proof level), is escaped
-  with the same function. SVG is active content, so node labels (`entry`, `OSWE-N`, optional
-  `vuln_class`, `RCE`) and `meta.*` get the identical treatment — defense in depth even though the
-  chart labels are already a constrained set.
+  with the same function. SVG is active content, so node labels (`entry`, `OSWE-N`, `RCE` — the
+  closed set of §7.2) and `meta.*` get the identical treatment — defense in depth even though the
+  node labels are already a strictly-patterned closed set.
 - **Single redaction point.** The `.md` is the only redacted source; the HTML body inherits its
   `[REDACTED]` safety. The summary carries **only non-sensitive aggregates** (counts, enum labels,
   `OSWE-N` ids) — no secrets, no code excerpts, no `file:line`. The `.html` is written to the
   persistent, safe `.oswe/reports/`; the transient `summary.json` lives in `.oswe/tmp/` under a
   `trap … rm` and is purged at phase-7 end (and on any abort), exactly like the other helper inputs.
+- **Content-Security-Policy meta (adjustment 4).** The generated document includes
+  `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">`.
+  Escaping is the real defense, but for a security tool this is coherent hardening: `default-src
+  'none'` blocks any external/script/image/frame load, `style-src 'unsafe-inline'` permits only the
+  inline `<style>` (our CSS), and `base-uri`/`form-action 'none'` neutralize base-tag and form
+  tricks. Inline SVG is part of the document (not a resource load) so it is unaffected.
 - **Print CSS.** An `@media print` block makes `Ctrl+P → Save as PDF` clean (page breaks before each
   chain/finding section, dark-on-white). No interactivity is required for printing.
 
@@ -165,18 +175,49 @@ Shape (validated by `report-summary.schema.json`):
 }
 ```
 
-Schema rules: `meta.verdict` ∈ {`unauth-rce`, `no-critique`}; `meta.proof_level` is a string or
-`null`; severity keys are exactly the five severities (integers ≥ 0); `finding_status_counts` keys
-are exactly the four statuses (integers ≥ 0); `coverage.analyzed`/`skipped` integers ≥ 0; `chains`
-is an array (possibly empty); each chain’s `severity` ∈ the five severities, `entry_auth` ∈
-{`unauthenticated`,`authenticated`,`admin`}, `edges[].verdict` ∈ {`accepted`,`downgraded`,
-`rejected`}; node/label strings are bounded. `additionalProperties:false` throughout so an
-orchestrator mistake is caught as exit 1.
+### 7.1 Field semantics (what each count means)
+
+To avoid the orchestrator counting chains and findings inconsistently, each field is defined
+explicitly and must mirror how the Markdown report presents the same numbers:
+
+- **`severity_counts.Critique` = the number of `accepted` Critique exploit chains.** Critique is
+  reserved for chains (the `finding` schema forbids a `Critique` final severity), so this field
+  counts chains, never findings.
+- **`severity_counts.{Haute,Moyenne,Basse,Info}` = the number of findings whose _reported_ severity
+  equals that level**, using the **same selection the Markdown uses**: `final_severity` for
+  `accepted`/`downgraded` findings, `provisional_severity` for `not-requested` findings, and
+  **`rejected` findings are excluded** (they have no live severity — they appear only struck-through /
+  in the annex). A finding is counted in exactly one of these four buckets.
+- **`finding_status_counts.{accepted,downgraded,rejected,not-requested}` = the number of findings in
+  each `verification_status`.** Their sum = total findings (including rejected); this is independent
+  of `severity_counts`, which excludes rejected.
+- **`coverage.analyzed` / `coverage.skipped`** = analyzed partitions vs coverage gaps, from the
+  orchestrator’s aggregated analyzer-coverage state plus `gaps[]` (see §3.3, adjustment 2).
+
+### 7.2 Schema rules (strict — keeps the summary non-sensitive)
+
+- `meta.verdict` ∈ {`unauth-rce`, `no-critique`}; `meta.proof_level` is a string or `null`;
+  `meta.target`/`stack`/`date` are bounded strings (rendered escaped — they may contain repo-derived
+  text, so they are treated as untrusted, but they carry no secrets/`file:line`).
+- `severity_counts` has **exactly** the five severity keys, each an integer ≥ 0;
+  `finding_status_counts` has **exactly** the four status keys, each an integer ≥ 0;
+  `coverage.analyzed`/`skipped` integers ≥ 0.
+- `chains` is an array (possibly empty). Per chain: `id` matches **`^CHAIN-[0-9]+$`**; `severity` ∈
+  the five severities; `entry_auth` ∈ {`unauthenticated`,`authenticated`,`admin`};
+  `final_impact` a bounded string.
+- **Graph labels are strictly patterned — no free text (adjustment 3).** Every `nodes[]` entry and
+  every `edges[].from`/`edges[].to` matches **exactly one of**: the literal `entry`, the literal
+  `RCE`, or **`^OSWE-[0-9]+$`**. `edges[].verdict` ∈ {`accepted`,`downgraded`,`rejected`}. (Node
+  labels deliberately do **not** include `vuln_class` or any title — the body MD already carries the
+  human-readable class/title; keeping nodes to this closed set guarantees the summary cannot leak
+  repo text through the diagram.)
+- `additionalProperties:false` throughout, so any orchestrator mistake is caught as exit 1.
 
 ## 8. Testing (`skills/audit/scripts/test/render-html.test.mjs`, added to `node --test`)
 
-- **MD→HTML constructs:** each supported construct (headings, table, bold, inline code, blockquote,
-  list, hr, strikethrough) renders to the expected tag(s).
+- **MD→HTML constructs:** each supported construct (headings, table, bold, italic, inline code,
+  blockquote, list, hr, strikethrough) renders to the expected tag(s). Includes a `**bold**` /
+  `*italic*` precedence case (`**a** and *b*` → `<strong>a</strong> and <em>b</em>`, not mis-split).
 - **Security / escaping:** a `.md` whose heading, a table cell, and an inline-code span each contain
   `<script>alert(1)</script>` and `"><img onerror=x>` renders them as entities — **no live tags**.
 - **SVG label escaping (adjustment 7):** a summary/meta with `<`/`>`/`"`/`&` in `target`/`stack`
@@ -190,6 +231,9 @@ orchestrator mistake is caught as exit 1.
   tags and no `href=`/`src=` attributes in generated tags. Escaped occurrences inside text
   (`&lt;img src=…&gt;`) are **accepted**. The only tags the renderer emits are the document chrome
   plus the SVG whitelist (`<svg> <g> <rect> <circle> <path> <text> <line> <polygon>` etc.).
+- **CSP meta present (adjustment 4):** the document contains the exact
+  `Content-Security-Policy` meta with `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none';
+  form-action 'none'`.
 - **CLI behaviour (adjustment 6):**
   - invalid `--summary` (schema-invalid) → **exit 1** and **no final `report.html`** (atomic write +
     early validation guarantee this);
