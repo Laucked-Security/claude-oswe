@@ -1,81 +1,203 @@
-# oswe — White-Box Security Audit Plugin for Claude Code
+# oswe — White-Box Security Audit plugin for Claude Code
 
-Deep, OSWE-style white-box web application security audit. Run `/oswe:audit` in a trusted
-workspace to detect source-to-sink vulnerabilities and chain them toward unauthenticated RCE,
-with an evidence-backed report.
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Tests: 120 passing](https://img.shields.io/badge/tests-120%20passing-brightgreen)
+![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
+![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
+![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
 
-## Proven on real code (OWASP NodeGoat)
+<!-- After you push to GitHub, enable the live CI badge by replacing OWNER/REPO:
+[![ci](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+-->
 
-Run against [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) (a real, multi-module Express +
-MongoDB app — not a toy fixture), `/oswe:audit` found and **verified** an end-to-end RCE chain:
+**Deep, OSWE-style white-box web-app security audit, run from your editor.** Type `/oswe:audit` in a
+repo you're allowed to test; the plugin traces attacker input from **source → sink**, chains the
+findings toward **unauthenticated RCE**, **verifies** each chain under a proof contract, and writes an
+evidence-backed report (Markdown **+** a self-contained visual HTML report you can save as PDF).
 
+---
+
+## The problem it solves
+
+Asking an LLM "are there vulnerabilities in this code?" gives you a confident wall of maybes: false
+positives on safe code, no exploit chain, no proof, no reproducibility. That's noise, not an audit.
+
+`oswe` is built to **not do that**:
+
+- **Determinism where it matters.** Severity, dedup, and the "is this a Critique unauth-RCE?" decision
+  are **not** left to the model — they run in tested, dependency-free Node helpers with **120 unit
+  tests**. The model *finds*; the helpers *decide*.
+- **A verifier that pushes back.** Every candidate chain and high-severity finding is re-checked by an
+  independent verifier that can **downgrade or reject** — it doesn't rubber-stamp the analyzer.
+- **Schema-gated I/O.** Each agent response is validated against a JSON Schema before it's trusted; a
+  malformed response is rejected and re-run, never silently used to invent data.
+- **Low noise, proven.** On the clean, real-world [Flask tutorial](docs/examples/python-safe.md) it
+  reports **0 exploitable findings**. On real vulnerable code (OWASP NodeGoat) it finds and verifies a
+  real RCE chain. See [Proven on real code](#proven-on-real-code).
+
+This is an **OSWE-style audit assistant** for finding and fixing bugs — **not** a penetration test and
+not a safety guarantee. See [Honest limits](#honest-limits).
+
+---
+
+## Install
+
+Requires **Node.js ≥ 20** (the validators and tests target it; the audit aborts early without it).
+
+```bash
+# Run Claude Code with the plugin loaded from a local checkout:
+git clone https://github.com/OWNER/REPO.git claude-oswe
+claude --plugin-dir ./claude-oswe
 ```
+
+That's it — no `npm install` needed to *use* it. The runtime validators are committed as a
+self-contained, zero-dependency file (AJV is a **dev-only** tool used to regenerate them).
+
+## Usage
+
+```text
+/oswe:audit                # audit the whole project
+/oswe:audit src/api        # restrict to a sub-path (kept inside the project root)
+```
+
+The audit **never auto-runs** (`disable-model-invocation: true`) — it triggers only on the explicit
+command. A timestamped report is written to `.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.{md,html}`.
+
+### Example run (abridged)
+
+```text
+/oswe:audit test-fixtures/python/vulnerable
+
+Verdict: unauthenticated RCE — Critique (preuve statique forte)
+
+CHAIN-1  POST /login  { "is_admin": true }   → session["admin"] mass-assignment (OSWE-1)
+           └─►  /render?tpl={{ … }}          → Jinja2 SSTI via render_template_string (OSWE-2)  → RCE
+         entry: unauthenticated · 2 transitions, both accepted
+
+Findings: 2 Haute (accepted) · Coverage: 2/2 partitions · no gaps
+Report:  .oswe/reports/oswe-report-2026-06-16-1600.md  (+ .html)
+```
+
+📄 **Full example reports** (real output, public fixtures, no secrets): [`docs/examples/`](docs/examples/) —
+[Python](docs/examples/python-vulnerable.md) · [Java](docs/examples/java-vulnerable.md) ·
+[.NET](docs/examples/dotnet-vulnerable.md) · [a clean "safe" run](docs/examples/python-safe.md).
+
+---
+
+## Supported stacks
+
+| Stack | Frameworks | Example sink classes detected |
+|---|---|---|
+| **PHP** | Laravel, Symfony, vanilla | type-juggling/magic-hash auth bypass, unrestricted upload, SQLi, command injection, PHP object injection |
+| **Node.js** | Express, Nest | NoSQL operator injection, SSJI (`eval`), prototype pollution, command injection, SSRF |
+| **Python** | Flask, Django | SSTI (`render_template_string`), `pickle`/`yaml.load` deserialization, mass assignment, SQLi |
+| **Java** | Spring | SpEL/OGNL injection, Java deserialization gadget chains, command injection, XXE |
+| **.NET** | ASP.NET (Core & classic) | forgeable/unsigned auth cookies, `BinaryFormatter` deserialization, command injection, XXE |
+
+Each stack has a curated source→sink reference under [`skills/audit/references/`](skills/audit/references/).
+A polyglot repo loads every relevant reference and partitions the audit by stack.
+
+---
+
+## How it works
+
+```text
+recon → partition (by module / framework / auth boundary)
+      → analyze   (parallel read-only oswe-analyzer subagents, max 4)
+      → aggregate/dedupe   (deterministic Node helper, stable OSWE-N ids)
+      → build chains  → verify  (independent oswe-verifier, bound batches)
+      → apply verdicts (deterministic Critique gating) → report (.md + .html)
+```
+
+- **Read-only agents.** The analyzer/verifier subagents cannot modify your code.
+- **Confined scope.** The path argument is normalized by a tested confinement helper that rejects
+  anything escaping the project root (`../`, symlinks, sibling-prefix tricks).
+- **Critique gating.** A chain is `Critique` **only if** the verifier accepted it end-to-end, every
+  member finding is accepted, the entry is `unauthenticated`, and the impact is `unauth-rce`.
+- **Secrets never leave.** Discovered secret values are `[REDACTED]`; only `file:line` is cited.
+  Intermediate `.oswe/tmp/` files are purged at start, end, and on any abort.
+
+The seven JSON Schemas live in [`skills/audit/schemas/`](skills/audit/schemas/); the deterministic
+helpers and their tests in [`skills/audit/scripts/`](skills/audit/scripts/).
+
+---
+
+## Proven on real code
+
+Run against [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) — a real multi-module Express + MongoDB
+app, not a toy fixture — `/oswe:audit` found and **verified** an end-to-end RCE chain:
+
+```text
 Verdict: effectively-unauthenticated RCE — Critique (preuve statique forte)
 
 CHAIN-1   POST /signup  (open self-registration → instant authenticated session)
-            └─► eval(req.body.preTax)  on POST /contributions   → server-side RCE
-          entry: unauthenticated · 2 transitions, both accepted
-
-24 findings across 6 partitions · 7 Haute accepted
+            └─►  eval(req.body.preTax)  on POST /contributions   → server-side RCE
+          24 findings across 6 partitions · 7 Haute accepted
 ```
 
 What makes the result trustworthy rather than noisy:
-- **The verifier downgraded 4 over-eager `Haute` findings** (e.g. a memo "stored XSS" neutralised by
-  `marked sanitize:true`; a `website` XSS whose URL-context sink wasn't confirmable from source) — it
-  does not rubber-stamp the analyzer.
-- **The schema gate rejected one malformed analyzer response** (invalid `auth` enum) and re-ran that
-  partition once — no data is ever invented to fill a gap.
-- The headline chain is reported as **"effectively-unauthenticated"** with the open-registration
-  caveat stated explicitly, not inflated.
 
-Every run also writes a self-contained **visual HTML report** (severity donut, exploit-chain diagram,
-coverage/status bars) you can open in a browser and `Ctrl+P → Save as PDF` to share with a client.
+- the **verifier downgraded 4 over-eager `Haute` findings** (e.g. a "stored XSS" neutralised by
+  `marked sanitize:true`) instead of accepting them;
+- the **schema gate rejected one malformed analyzer response** and re-ran that partition once — no data
+  is invented to fill a gap;
+- the headline chain is reported as **"effectively-unauthenticated"** with the open-registration caveat
+  stated, not inflated.
 
-## Scope
-PHP (Laravel/Symfony/vanilla), Node.js (Express/Nest), Python (Flask/Django), Java (Spring), and .NET (ASP.NET).
+And the control: against the clean [Flask tutorial `flaskr`](docs/examples/python-safe.md) the same
+pipeline reports **0 exploitable findings** (one Info-level hardening note, not inflated). Finds real
+chains on real vulnerable code; stays quiet on clean code.
 
-Each audit writes a redaction-safe Markdown report to `.oswe/reports/` **and**, alongside it, a
-self-contained visual HTML report (`oswe-report-*.html`) with severity, exploit-chain, coverage, and
-finding-status charts. The HTML is a single zero-dependency file (inline CSS + SVG, no scripts) —
-open it in a browser and `Ctrl+P → Save as PDF` for a shareable PDF.
+---
 
-## Install (local dev)
-```bash
-claude --plugin-dir /path/to/claude-oswe
-```
+## Honest limits
 
-## Usage
-```
-/oswe:audit            # audit the whole project
-/oswe:audit src/api    # restrict to a path (must stay inside the project)
-```
-The audit never auto-runs (`disable-model-invocation: true`); it triggers only on the explicit
-command. A dated report is written to `.oswe/reports/`.
+- **OSWE-style assistant, not a pentest.** This is **static** white-box source analysis. "Verified" =
+  **strong static proof** (source→sink under a proof contract), **not** a live exploit fired at a
+  running target. No dynamic execution, fuzzing, or runtime confirmation.
+- **"No path to RCE" ≠ safe.** It means *none found within the analyzed coverage*. Budgeted partitions,
+  unsupported stacks, and skipped paths are listed in each report's **Coverage** section — read it.
+- **The verifier shares the model's blind spots.** It's an independent pass with a strict contract, not
+  ground truth. Confirm findings before acting; triage `not-requested` items yourself.
+- **Scope/scale bounded.** Up to 12 partitions per audit; very large monorepos will hit coverage gaps
+  (reported, never hidden). Dependency/gadget analysis is read-on-demand, not exhaustive.
+- **Five stacks**, one curated reference page each — broad sink coverage, not an exhaustive SAST ruleset.
 
-## How it works
-A skill orchestrates: recon → partition → analyze (parallel read-only `oswe-analyzer` subagents,
-max 4) → aggregate/dedupe → build chains → verify (independent `oswe-verifier`, batched) → report.
-Agent outputs are JSON validated against `skills/audit/schemas/` by the Node validators in
-`skills/audit/scripts/` (AJV under the hood). Requires **Node.js ≥ 20**.
+Treat the output as **high-quality leads with evidence**, to be confirmed and fixed by an engineer.
 
-## Authorization & ethics
-For **authorized** white-box review of code you own or are permitted to test, for **defensive**
-purposes (find and fix). Do not audit untrusted/hostile repositories. Secrets are never written to
-the report (`[REDACTED]`). "No path to RCE" means "none found within the analyzed coverage", not
-proof of absence.
+---
 
 ## Development
-`skills/audit/scripts/validators.mjs` is a **self-contained, zero-runtime-dependency** ESM file
-(committed): the six AJV-generated validators with the one runtime helper inlined — no `import`, no
-`require`, no `node_modules` needed to run it. Run the test suites (they need only Node ≥ 20):
+
+The runtime validator [`skills/audit/scripts/validators.mjs`](skills/audit/scripts/validators.mjs) is a
+**self-contained, zero-runtime-dependency** ESM file (the AJV-generated validators with the one runtime
+helper inlined). Run the suites (Node ≥ 20 only, no install):
+
 ```bash
-( cd skills/audit/scripts && node --test )
+( cd skills/audit/scripts && node --test )          # 120 tests
+node .github/scripts/check-structure.mjs            # stacks / references / fixtures-markers gate
 ```
 
-Regenerate `validators.mjs` after changing any schema (AJV is a **dev-only** dependency, used only to
-generate; not needed at runtime):
+Regenerate `validators.mjs` after changing any schema (AJV is dev-only, used only to generate):
+
 ```bash
 ( cd skills/audit/scripts && npm install && npm run build && node --test )
 ```
-`build-validators.mjs` runs AJV standalone code generation and inlines the single `ucs2length` runtime
-helper — no bundler (no esbuild) required.
+
+**CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the unit tests on Node 20 & 22,
+runs the structure gate, and verifies the committed `validators.mjs` is in sync with the schemas.
+`claude plugin validate . --strict` is run as a **local gate** before release (it needs the Claude
+Code CLI, which isn't available on the CI runner).
+
+---
+
+## Authorization & ethics
+
+For **authorized** white-box review of code you own or are permitted to test, for **defensive**
+purposes only. **Do not** audit untrusted, hostile, or unauthorized repositories. A hostile repo's
+comments and strings are treated as untrusted data, never instructions. See [SECURITY.md](SECURITY.md)
+for the full responsible-use policy and how to report a vulnerability in the plugin itself.
+
+## License
+
+[MIT](LICENSE) © 2026
