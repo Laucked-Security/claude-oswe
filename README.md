@@ -4,6 +4,33 @@ Deep, OSWE-style white-box web application security audit. Run `/oswe:audit` in 
 workspace to detect source-to-sink vulnerabilities and chain them toward unauthenticated RCE,
 with an evidence-backed report.
 
+## Proven on real code (OWASP NodeGoat)
+
+Run against [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) (a real, multi-module Express +
+MongoDB app — not a toy fixture), `/oswe:audit` found and **verified** an end-to-end RCE chain:
+
+```
+Verdict: effectively-unauthenticated RCE — Critique (preuve statique forte)
+
+CHAIN-1   POST /signup  (open self-registration → instant authenticated session)
+            └─► eval(req.body.preTax)  on POST /contributions   → server-side RCE
+          entry: unauthenticated · 2 transitions, both accepted
+
+24 findings across 6 partitions · 7 Haute accepted
+```
+
+What makes the result trustworthy rather than noisy:
+- **The verifier downgraded 4 over-eager `Haute` findings** (e.g. a memo "stored XSS" neutralised by
+  `marked sanitize:true`; a `website` XSS whose URL-context sink wasn't confirmable from source) — it
+  does not rubber-stamp the analyzer.
+- **The schema gate rejected one malformed analyzer response** (invalid `auth` enum) and re-ran that
+  partition once — no data is ever invented to fill a gap.
+- The headline chain is reported as **"effectively-unauthenticated"** with the open-registration
+  caveat stated explicitly, not inflated.
+
+Every run also writes a self-contained **visual HTML report** (severity donut, exploit-chain diagram,
+coverage/status bars) you can open in a browser and `Ctrl+P → Save as PDF` to share with a client.
+
 ## Scope
 PHP (Laravel/Symfony/vanilla), Node.js (Express/Nest), Python (Flask/Django), Java (Spring), and .NET (ASP.NET).
 
