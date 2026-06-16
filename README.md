@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛡️ oswe
+# 🛡️ claude-oswe
 
 ### White-Box Security Audit plugin for Claude Code
 
