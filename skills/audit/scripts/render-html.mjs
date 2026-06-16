@@ -200,29 +200,102 @@ import * as validators from "./validators.mjs";
 
 const CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
 const STYLE = `
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:2rem;color:#111;background:#fff;line-height:1.45}
-h1,h2,h3{line-height:1.2}
-table{border-collapse:collapse;margin:0.6rem 0;width:100%}
-th,td{border:1px solid #ccc;padding:4px 8px;text-align:left;vertical-align:top;font-size:0.92rem}
-th{background:#f3f3f3}
-code{background:#f3f3f3;padding:0 3px;border-radius:3px;font-family:ui-monospace,Consolas,monospace;font-size:0.9em}
-blockquote{border-left:3px solid #bbb;margin:0.6rem 0;padding:0.2rem 0.8rem;color:#444}
-hr{border:0;border-top:1px solid #ddd;margin:1.2rem 0}
-del{color:#999}
-.charts{display:flex;flex-wrap:wrap;gap:1.5rem;align-items:flex-start;margin:1rem 0 1.5rem}
-.chart{max-width:100%}
-.node{fill:#eceff1;stroke:#607d8b}
-.node-entry{fill:#e3f2fd;stroke:#1565c0}
-.node-rce{fill:#ffe0b2;stroke:#e65100}
-.node-rce-crit{fill:#ffcdd2;stroke:#b00020}
-.node-label{font-size:12px;fill:#111}
-.edge{stroke:#888;stroke-width:1.5}
-.arrow{fill:#888}
-.edge-label{font-size:10px;fill:#555}
-.legend,.bar-label,.donut-total,.donut-empty{font-size:12px;fill:#111}
-.chain-id{font-weight:600;margin-top:0.4rem}
-.muted{color:#777}
-@media print{body{margin:0.6rem}.chain,h2{page-break-inside:avoid}h2{page-break-before:always}h1{page-break-before:avoid}}
+:root{
+  --ink:#0f172a; --body:#1e293b; --muted:#64748b; --faint:#94a3b8;
+  --line:#e2e8f0; --panel:#f8fafc; --panel2:#f1f5f9; --bg:#ffffff;
+  --brand:#4f46e5; --brand-ink:#c7d2fe;
+  --crit:#b00020; --haute:#e65100; --moyenne:#f9a825; --basse:#1565c0; --info:#607d8b;
+  --ok:#2e7d32;
+}
+*{box-sizing:border-box}
+html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{font-family:'Inter',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;
+  color:var(--body);background:var(--panel);line-height:1.55;font-size:15px}
+
+/* ---- header band ---- */
+.band{background:linear-gradient(135deg,#0f172a 0%,#1e293b 60%,#312e81 100%);color:#e2e8f0;
+  padding:2rem 1.5rem 2.2rem;border-bottom:3px solid var(--brand)}
+.band-inner{max-width:980px;margin:0 auto}
+.eyebrow{display:flex;align-items:center;gap:.5rem;font-size:.8rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--brand-ink);font-weight:600;margin:0 0 .6rem}
+.eyebrow .dot{color:var(--faint);font-weight:400}
+.band h1{margin:0;font-size:1.9rem;line-height:1.15;color:#fff;letter-spacing:-.01em}
+.band .meta{margin:.5rem 0 0;color:#94a3b8;font-size:.9rem}
+.band .meta strong{color:#cbd5e1;font-weight:600}
+.verdict{display:inline-flex;align-items:center;gap:.5rem;margin-top:1.1rem;padding:.45rem .9rem;
+  border-radius:999px;font-weight:700;font-size:.95rem;border:1px solid transparent}
+.verdict::before{content:"";width:.6rem;height:.6rem;border-radius:50%;background:currentColor;opacity:.9}
+.verdict-rce{background:rgba(176,0,32,.18);color:#fca5a5;border-color:rgba(252,165,165,.4)}
+.verdict-clear{background:rgba(46,125,50,.18);color:#86efac;border-color:rgba(134,239,172,.4)}
+.verdict small{font-weight:500;color:#cbd5e1}
+
+/* ---- layout ---- */
+main{max-width:980px;margin:0 auto;padding:1.6rem 1.5rem 2.5rem}
+h2{font-size:1.3rem;line-height:1.2;color:var(--ink);margin:2rem 0 .8rem;padding-bottom:.35rem;
+  border-bottom:1px solid var(--line)}
+h3{font-size:1.05rem;color:var(--ink);margin:1.4rem 0 .5rem}
+h1{line-height:1.2}
+p{margin:.6rem 0}
+a{color:var(--brand)}
+
+/* ---- charts as cards ---- */
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin:0 0 .5rem}
+.card{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:1rem 1.1rem;
+  box-shadow:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.06)}
+.card figcaption,.card-title{font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);font-weight:700;margin:0 0 .6rem}
+.chart{max-width:100%;display:block}
+.chains-section .card{margin-top:.4rem}
+
+/* ---- SVG text ---- */
+.legend,.bar-label{font-size:12px;fill:var(--body);font-weight:500}
+.donut-total{font-size:30px;fill:var(--ink);font-weight:800}
+.donut-empty{font-size:13px;fill:var(--muted)}
+.node{fill:#eef2ff;stroke:#6366f1}
+.node-entry{fill:#dbeafe;stroke:#1565c0}
+.node-rce{fill:#ffedd5;stroke:#e65100}
+.node-rce-crit{fill:#fee2e2;stroke:#b00020}
+.node-label{font-size:12px;fill:var(--ink);font-weight:600}
+.edge{stroke:#94a3b8;stroke-width:1.5}
+.arrow{fill:#94a3b8}
+.edge-label{font-size:10px;fill:var(--muted);font-weight:600}
+.chain{margin:.2rem 0 1rem}
+.chain-id{font-weight:700;color:var(--ink);margin:.2rem 0 .3rem;font-size:.95rem}
+
+/* ---- report body ---- */
+.report-body{background:var(--bg);border:1px solid var(--line);border-radius:12px;
+  padding:.4rem 1.4rem 1.2rem;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+table{border-collapse:separate;border-spacing:0;margin:1rem 0;width:100%;
+  border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:.92rem}
+th,td{padding:.55rem .8rem;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{background:var(--panel2);color:var(--ink);font-weight:700;font-size:.82rem;
+  letter-spacing:.02em;text-transform:uppercase}
+tbody tr:nth-child(even){background:var(--panel)}
+tbody tr:last-child td{border-bottom:0}
+code{background:var(--panel2);padding:.1em .35em;border-radius:4px;
+  font-family:ui-monospace,'SF Mono',Consolas,monospace;font-size:.86em;color:#312e81}
+blockquote{border-left:3px solid var(--brand);background:var(--panel);margin:.8rem 0;
+  padding:.5rem .9rem;color:var(--muted);border-radius:0 8px 8px 0}
+hr{border:0;border-top:1px solid var(--line);margin:1.4rem 0}
+del{color:var(--faint)}
+ul{margin:.5rem 0;padding-left:1.3rem}
+li{margin:.2rem 0}
+strong{color:var(--ink)}
+.muted{color:var(--muted)}
+
+/* ---- footer ---- */
+.foot{max-width:980px;margin:0 auto;padding:1.2rem 1.5rem 2rem;color:var(--faint);
+  font-size:.82rem;border-top:1px solid var(--line)}
+.foot strong{color:var(--muted)}
+
+@media print{
+  body{background:#fff}
+  .band{padding:1.2rem 0 1.3rem}
+  main{padding:.6rem 0}
+  .card,.report-body{box-shadow:none;break-inside:avoid}
+  .chain,h2,h3{break-inside:avoid}
+  h2{break-before:auto}
+}
 `;
 
 // Runtime graph coherence the schema cannot express: every edge endpoint must be one of that chain's
@@ -244,31 +317,45 @@ export function graphErrors(summary) {
 export function renderReport({ md, summary }) {
   const m = summary.meta;
   const verdictText = m.verdict === "unauth-rce" ? "Unauthenticated RCE found" : "No Critique chain";
+  const verdictClass = m.verdict === "unauth-rce" ? "verdict verdict-rce" : "verdict verdict-clear";
   const head =
-    `<header><h1>OSWE Audit Report</h1>`
-    + `<p class="muted">${escapeHtml(m.target)} — ${escapeHtml(m.stack)} — ${escapeHtml(m.date)}</p>`
-    + `<p><strong>${escapeHtml(verdictText)}</strong>${m.proof_level ? " — " + escapeHtml(m.proof_level) : ""}</p></header>`;
+    `<header class="band"><div class="band-inner">`
+    + `<p class="eyebrow">\u{1F6E1} oswe <span class="dot">·</span> Laucked Security</p>`
+    + `<h1>OSWE Audit Report</h1>`
+    + `<p class="meta"><strong>${escapeHtml(m.target)}</strong> · ${escapeHtml(m.stack)} · ${escapeHtml(m.date)}</p>`
+    + `<p class="${verdictClass}">${escapeHtml(verdictText)}`
+    + `${m.proof_level ? ` <small>${escapeHtml(m.proof_level)}</small>` : ""}</p>`
+    + `</div></header>`;
+  const card = (title, svg) => `<figure class="card"><figcaption>${title}</figcaption>${svg}</figure>`;
   const charts =
     `<section class="charts">`
-    + severityDonut(summary.severity_counts)
-    + coverageBar(summary.coverage)
-    + statusBar(summary.finding_status_counts)
+    + card("Severity", severityDonut(summary.severity_counts))
+    + card("Coverage", coverageBar(summary.coverage))
+    + card("Verification status", statusBar(summary.finding_status_counts))
     + `</section>`
-    + `<section class="chains-section"><h2>Exploit chains (diagram)</h2>${chainDiagram(summary.chains)}</section>`;
-  const body = `<section class="report-body">${mdToHtml(md)}</section>`;
+    + `<section class="chains-section"><h2>Exploit chains</h2>`
+    + `<div class="card">${chainDiagram(summary.chains)}</div></section>`;
+  const body = `<h2>Full report</h2><section class="report-body">${mdToHtml(md)}</section>`;
+  const foot =
+    `<footer class="foot"><strong>Generated by oswe — Laucked Security.</strong> `
+    + `Static white-box source audit, not a penetration test. `
+    + `&ldquo;No path to RCE&rdquo; means none found within the analyzed coverage, not proof of absence.</footer>`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="${CSP}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OSWE Audit Report</title>
+<title>OSWE Audit Report — Laucked Security</title>
 <style>${STYLE}</style>
 </head>
 <body>
 ${head}
+<main>
 ${charts}
 ${body}
+</main>
+${foot}
 </body>
 </html>
 `;
