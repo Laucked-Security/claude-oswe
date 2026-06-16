@@ -1,8 +1,10 @@
 {
   "name": "oswe",
   "version": "0.1.0",
-  "description": "Deep white-box OSWE-style web app security audit via /oswe:audit (PHP, Node.js, Python, Java, .NET) — Markdown + visual HTML reports",
-  "author": { "name": "Moi" },
+  "description": "Deep white-box OSWE-style web app security audit via /oswe:audit (PHP, Node.js, Python, Java, .NET) — Markdown + visual HTML reports. By Laucked Security.",
+  "author": { "name": "Laucked", "url": "https://github.com/Laucked-Security" },
+  "homepage": "https://github.com/Laucked-Security/claude-oswe",
+  "repository": "https://github.com/Laucked-Security/claude-oswe",
   "license": "MIT",
-  "keywords": ["security", "oswe", "white-box", "audit", "appsec"]
+  "keywords": ["security", "oswe", "white-box", "audit", "appsec", "laucked"]
 }
