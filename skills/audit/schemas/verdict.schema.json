@@ -9,8 +9,8 @@
     "target_type": { "enum": ["finding", "chain"] },
     "target_id": { "type": "string", "minLength": 1 },
     "verdict": { "enum": ["accepted", "downgraded", "rejected"] },
-    "new_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
-    "new_confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
+    "new_severity": { "enum": ["High", "Medium", "Low", "Info"] },
+    "new_confidence": { "enum": ["strong static proof", "likely", "to verify"] },
     "transition_verdicts": {
       "type": "array",
       "minItems": 1,

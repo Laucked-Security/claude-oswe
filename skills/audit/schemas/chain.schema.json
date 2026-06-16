@@ -29,15 +29,15 @@
       }
     },
     "final_impact": { "type": "string", "minLength": 1 },
-    "severity": { "enum": ["Critique", "Haute", "Moyenne", "Basse", "Info"] },
-    "confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
+    "severity": { "enum": ["Critical", "High", "Medium", "Low", "Info"] },
+    "confidence": { "enum": ["strong static proof", "likely", "to verify"] },
     "verification_status": { "enum": ["not-requested", "accepted", "downgraded", "rejected"] }
   },
-  "if": { "properties": { "severity": { "const": "Critique" } }, "required": ["severity"] },
+  "if": { "properties": { "severity": { "const": "Critical" } }, "required": ["severity"] },
   "then": {
     "properties": {
       "verification_status": { "const": "accepted" },
-      "confidence": { "const": "preuve statique forte" },
+      "confidence": { "const": "strong static proof" },
       "final_impact": { "const": "unauth-rce" },
       "entry_point": { "properties": { "auth": { "const": "unauthenticated" } } }
     }

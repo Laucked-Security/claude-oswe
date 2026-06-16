@@ -49,8 +49,8 @@ A **findings batch** response (1–5 finding verdicts, no chain):
       "target_type": "finding",
       "target_id": "OSWE-2",
       "verdict": "downgraded",
-      "new_severity": "Moyenne",
-      "new_confidence": "probable",
+      "new_severity": "Medium",
+      "new_confidence": "likely",
       "justification": "extension check present but bypassable, public/upload.php:8"
     }
   ]

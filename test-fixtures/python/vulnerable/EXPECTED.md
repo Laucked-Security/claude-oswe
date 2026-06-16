@@ -1,6 +1,6 @@
 # Expected audit result (Python vulnerable fixture)
 
-The auditor should report a **Critique** unauthenticated-RCE chain:
+The auditor should report a **Critical** unauthenticated-RCE chain:
 
 1. `auth-bypass` (broken access control / mass assignment) — `app.py` `/login`: `session["admin"]`
    is set from the client-supplied `is_admin` body field, so an unauthenticated attacker sending

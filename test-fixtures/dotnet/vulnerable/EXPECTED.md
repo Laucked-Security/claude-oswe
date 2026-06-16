@@ -1,6 +1,6 @@
 # Expected audit result (.NET vulnerable fixture)
 
-The auditor should report a **Critique** unauthenticated-RCE chain:
+The auditor should report a **Critical** unauthenticated-RCE chain:
 
 1. `auth-bypass` (forgeable cookie) — `Program.cs` `IsAdmin`: authorization checks the raw, unsigned
    client cookie `admin == "1"`, so an unauthenticated attacker sets `Cookie: admin=1`.

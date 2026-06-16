@@ -25,9 +25,9 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 
 // Deterministic ordering so a "downgrade" can never RAISE severity or confidence.
-const SEV_INDEX = { Info: 0, Basse: 1, Moyenne: 2, Haute: 3, Critique: 4 };
-const SEV_BY_INDEX = ["Info", "Basse", "Moyenne", "Haute", "Critique"];
-const CONF_INDEX = { "à vérifier": 0, "probable": 1, "preuve statique forte": 2 };
+const SEV_INDEX = { Info: 0, Low: 1, Medium: 2, High: 3, Critical: 4 };
+const SEV_BY_INDEX = ["Info", "Low", "Medium", "High", "Critical"];
+const CONF_INDEX = { "to verify": 0, "likely": 1, "strong static proof": 2 };
 const notIncrease = (origSev, origConf, newSev, newConf) =>
   SEV_INDEX[newSev] <= SEV_INDEX[origSev] && CONF_INDEX[newConf] <= CONF_INDEX[origConf];
 
@@ -180,14 +180,14 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
     }
   }
 
-  // Completeness: every chain, every chain member, and every provisional-Haute finding MUST have
+  // Completeness: every chain, every chain member, and every provisional-High finding MUST have
   // been dispatched (appear in some batch's expected_targets). A missing one is an orchestrator bug.
   const required = new Set();
   for (const c of chains) {
     required.add(tkey("chain", c.chain_id));
     for (const id of c.finding_ids) required.add(tkey("finding", id));
   }
-  for (const f of findings) if (f.provisional_severity === "Haute") required.add(tkey("finding", f.finding_id));
+  for (const f of findings) if (f.provisional_severity === "High") required.add(tkey("finding", f.finding_id));
   for (const k of required) {
     if (!expectedBatchOf.has(k)) return fail(`required target ${k} was not dispatched to any batch`, "orchestrator-input");
   }
@@ -212,7 +212,7 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
 
   // decisions: an auditable log of every settled outcome + reason. outcome:"rejected" entries
   // (incl. a chain implicitly rejected because a MEMBER was rejected) drive the report's
-  // "Findings écartés" annex. Transition-mismatch causes are NOT here — such a response is a
+  // "Dismissed findings" annex. Transition-mismatch causes are NOT here — such a response is a
   // verifier-output error retried/neutralized in §6, and the orchestrator records that cause in Coverage.
   const decisions = [];
 
@@ -245,10 +245,10 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
   const statusById = new Map(outFindings.map((f) => [f.finding_id, f.verification_status]));
   const sevById = new Map(outFindings.map((f) => [f.finding_id, f.final_severity]));
   const confById = new Map(outFindings.map((f) => [f.finding_id, f.final_confidence]));
-  // Rejecting a chain must never RAISE its severity (a Basse/Info candidate stays at most that).
+  // Rejecting a chain must never RAISE its severity (a Low/Info candidate stays at most that).
   const reject = (nc) => {
-    nc.severity = SEV_BY_INDEX[Math.min(SEV_INDEX[nc.severity], SEV_INDEX["Moyenne"])];
-    nc.confidence = "à vérifier";
+    nc.severity = SEV_BY_INDEX[Math.min(SEV_INDEX[nc.severity], SEV_INDEX["Medium"])];
+    nc.confidence = "to verify";
     nc.verification_status = "rejected";
     return nc;
   };
@@ -303,23 +303,23 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
     }
 
     // Weakest member confidence — the chain is only as strong as its weakest verified link.
-    const minMemberConfIdx = Math.min(...c.finding_ids.map((id) => CONF_INDEX[confById.get(id) ?? "à vérifier"]));
-    const minMemberConf = ["à vérifier", "probable", "preuve statique forte"][minMemberConfIdx];
+    const minMemberConfIdx = Math.min(...c.finding_ids.map((id) => CONF_INDEX[confById.get(id) ?? "to verify"]));
+    const minMemberConf = ["to verify", "likely", "strong static proof"][minMemberConfIdx];
 
-    // Critique requires every member accepted AND every member confidence "preuve statique forte".
+    // Critical requires every member accepted AND every member confidence "strong static proof".
     const canBeCritique =
-      allMembersAccepted && minMemberConfIdx === CONF_INDEX["preuve statique forte"] &&
+      allMembersAccepted && minMemberConfIdx === CONF_INDEX["strong static proof"] &&
       c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
     const naturalSev = canBeCritique
-      ? "Critique"
+      ? "Critical"
       : SEV_BY_INDEX[Math.max(0, ...c.finding_ids.map((id) => SEV_INDEX[sevById.get(id) ?? "Info"]))];
-    const naturalConf = canBeCritique ? "preuve statique forte" : minMemberConf;
+    const naturalConf = canBeCritique ? "strong static proof" : minMemberConf;
 
     if (v.verdict === "downgraded") {
       // A downgrade may not exceed EITHER the candidate's originally-claimed level (c.severity/
       // c.confidence) OR the natural computed level. Use the lower of the two as the ceiling.
       const ceilSev = SEV_BY_INDEX[Math.min(SEV_INDEX[c.severity], SEV_INDEX[naturalSev])];
-      const ceilConf = ["à vérifier", "probable", "preuve statique forte"][
+      const ceilConf = ["to verify", "likely", "strong static proof"][
         Math.min(CONF_INDEX[c.confidence], CONF_INDEX[naturalConf])
       ];
       if (!notIncrease(ceilSev, ceilConf, v.new_severity, v.new_confidence)) {

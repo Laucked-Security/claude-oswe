@@ -29,7 +29,7 @@ positives on safe code, no exploit chain, no proof, no reproducibility. That's n
 
 `oswe` is built to **not do that**:
 
-- **Determinism where it matters.** Severity, dedup, and the "is this a Critique unauth-RCE?" decision
+- **Determinism where it matters.** Severity, dedup, and the "is this a Critical unauth-RCE?" decision
   are **not** left to the model — they run in tested, dependency-free Node helpers with **120 unit
   tests**. The model *finds*; the helpers *decide*.
 - **A verifier that pushes back.** Every candidate chain and high-severity finding is re-checked by an
@@ -73,13 +73,13 @@ command. A timestamped report is written to `.oswe/reports/oswe-report-YYYY-MM-D
 ```text
 /oswe:audit test-fixtures/python/vulnerable
 
-Verdict: unauthenticated RCE — Critique (preuve statique forte)
+Verdict: unauthenticated RCE — Critical (strong static proof)
 
 CHAIN-1  POST /login  { "is_admin": true }   → session["admin"] mass-assignment (OSWE-1)
            └─►  /render?tpl={{ … }}          → Jinja2 SSTI via render_template_string (OSWE-2)  → RCE
          entry: unauthenticated · 2 transitions, both accepted
 
-Findings: 2 Haute (accepted) · Coverage: 2/2 partitions · no gaps
+Findings: 2 High (accepted) · Coverage: 2/2 partitions · no gaps
 Report:  .oswe/reports/oswe-report-2026-06-16-1600.md  (+ .html)
 ```
 
@@ -111,13 +111,13 @@ recon → partition (by module / framework / auth boundary)
       → analyze   (parallel read-only oswe-analyzer subagents, max 4)
       → aggregate/dedupe   (deterministic Node helper, stable OSWE-N ids)
       → build chains  → verify  (independent oswe-verifier, bound batches)
-      → apply verdicts (deterministic Critique gating) → report (.md + .html)
+      → apply verdicts (deterministic Critical gating) → report (.md + .html)
 ```
 
 - **Read-only agents.** The analyzer/verifier subagents cannot modify your code.
 - **Confined scope.** The path argument is normalized by a tested confinement helper that rejects
   anything escaping the project root (`../`, symlinks, sibling-prefix tricks).
-- **Critique gating.** A chain is `Critique` **only if** the verifier accepted it end-to-end, every
+- **Critical gating.** A chain is `Critical` **only if** the verifier accepted it end-to-end, every
   member finding is accepted, the entry is `unauthenticated`, and the impact is `unauth-rce`.
 - **Secrets never leave.** Discovered secret values are `[REDACTED]`; only `file:line` is cited.
   Intermediate `.oswe/tmp/` files are purged at start, end, and on any abort.
@@ -133,16 +133,16 @@ Run against [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) — a real multi
 app, not a toy fixture — `/oswe:audit` found and **verified** an end-to-end RCE chain:
 
 ```text
-Verdict: effectively-unauthenticated RCE — Critique (preuve statique forte)
+Verdict: effectively-unauthenticated RCE — Critical (strong static proof)
 
 CHAIN-1   POST /signup  (open self-registration → instant authenticated session)
             └─►  eval(req.body.preTax)  on POST /contributions   → server-side RCE
-          24 findings across 6 partitions · 7 Haute accepted
+          24 findings across 6 partitions · 7 High accepted
 ```
 
 What makes the result trustworthy rather than noisy:
 
-- the **verifier downgraded 4 over-eager `Haute` findings** (e.g. a "stored XSS" neutralised by
+- the **verifier downgraded 4 over-eager `High` findings** (e.g. a "stored XSS" neutralised by
   `marked sanitize:true`) instead of accepting them;
 - the **schema gate rejected one malformed analyzer response** and re-ran that partition once — no data
   is invented to fill a gap;

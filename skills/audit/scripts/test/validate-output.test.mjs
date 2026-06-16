@@ -12,8 +12,8 @@ const baseFinding = (overrides = {}) => ({
   source: loc("login.php", 12, "$_POST['password']", "http-param"),
   sink: loc("login.php", 15, "==", "comparison"),
   auth: "unauthenticated",
-  provisional_severity: "Haute",
-  confidence: "preuve statique forte",
+  provisional_severity: "High",
+  confidence: "strong static proof",
   verification_status: "not-requested",
   ...overrides
 });
@@ -35,8 +35,8 @@ test("analyzer finding with non-'not-requested' status fails (const invariant)",
   assert.equal(r.valid, false);
 });
 
-test("finding with provisional_severity Critique fails (enum excludes Critique)", () => {
-  const r = validate("finding", baseFinding({ provisional_severity: "Critique" }));
+test("finding with provisional_severity Critical fails (enum excludes Critical)", () => {
+  const r = validate("finding", baseFinding({ provisional_severity: "Critical" }));
   assert.equal(r.valid, false);
 });
 
@@ -65,33 +65,33 @@ const validCriticalChain = {
     { from: "OSWE-1", to: "OSWE-2", how: "upload web shell", evidence: [{ file: "upload.php", line: 8 }] }
   ],
   final_impact: "unauth-rce",
-  severity: "Critique",
-  confidence: "preuve statique forte",
+  severity: "Critical",
+  confidence: "strong static proof",
   verification_status: "accepted"
 };
 
-test("Critique chain with accepted + preuve statique forte + unauth-rce passes", () => {
+test("Critical chain with accepted + strong static proof + unauth-rce passes", () => {
   const r = validate("chain", validCriticalChain);
   assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
 
-test("Critique chain not yet accepted fails (if/then invariant)", () => {
+test("Critical chain not yet accepted fails (if/then invariant)", () => {
   const r = validate("chain", { ...validCriticalChain, verification_status: "not-requested" });
   assert.equal(r.valid, false);
 });
 
-test("Critique chain with non-unauth-rce impact fails", () => {
+test("Critical chain with non-unauth-rce impact fails", () => {
   const r = validate("chain", { ...validCriticalChain, final_impact: "auth-rce" });
   assert.equal(r.valid, false);
 });
 
-test("Critique chain with authenticated entry point fails (gating invariant)", () => {
+test("Critical chain with authenticated entry point fails (gating invariant)", () => {
   const r = validate("chain", { ...validCriticalChain, entry_point: { ...validCriticalChain.entry_point, auth: "authenticated" } });
   assert.equal(r.valid, false);
 });
 
-test("non-Critique chain is unconstrained on those fields", () => {
-  const r = validate("chain", { ...validCriticalChain, severity: "Haute", verification_status: "not-requested", final_impact: "auth-rce", confidence: "probable" });
+test("non-Critical chain is unconstrained on those fields", () => {
+  const r = validate("chain", { ...validCriticalChain, severity: "High", verification_status: "not-requested", final_impact: "auth-rce", confidence: "likely" });
   assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
 
@@ -100,7 +100,7 @@ test("verifier-response with multiple verdicts passes", () => {
     status: "ok",
     verdicts: [
       { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "src->sink confirmed login.php:15" },
-      { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "sanitizer partially blocks, upload.php:40" }
+      { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "sanitizer partially blocks, upload.php:40" }
     ]
   });
   assert.equal(r.valid, true, JSON.stringify(r.errors));
@@ -116,13 +116,13 @@ test("downgraded verdict without new_severity/new_confidence fails", () => {
   assert.equal(r.valid, false);
 });
 
-test("finding rejects Critique final_severity (Critique is reserved for chains)", () => {
-  const r = validate("finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Critique", final_confidence: "preuve statique forte" }));
+test("finding rejects Critical final_severity (Critical is reserved for chains)", () => {
+  const r = validate("finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Critical", final_confidence: "strong static proof" }));
   assert.equal(r.valid, false);
 });
 
-test("finding accepts Haute final_severity with source_finding_ids", () => {
-  const r = validate("finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte", source_finding_ids: ["auth-F001", "upload-F002"] }));
+test("finding accepts High final_severity with source_finding_ids", () => {
+  const r = validate("finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", source_finding_ids: ["auth-F001", "upload-F002"] }));
   assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
 
@@ -136,7 +136,7 @@ test("finding with invalid final_severity fails", () => {
 const finalBase = (overrides = {}) => baseFinding({ finding_id: "OSWE-3", partitions: ["auth"], source_finding_ids: ["auth-F001"], ...overrides });
 
 test("final-finding: accepted requires final fields", () => {
-  const ok = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  const ok = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
   assert.equal(ok.valid, true, JSON.stringify(ok.errors));
   const missing = validate("final-finding", finalBase({ verification_status: "accepted" }));
   assert.equal(missing.valid, false);
@@ -145,7 +145,7 @@ test("final-finding: accepted requires final fields", () => {
 test("final-finding: rejected forbids final fields", () => {
   const okRejected = validate("final-finding", finalBase({ verification_status: "rejected" }));
   assert.equal(okRejected.valid, true, JSON.stringify(okRejected.errors));
-  const badRejected = validate("final-finding", finalBase({ verification_status: "rejected", final_severity: "Haute", final_confidence: "probable" }));
+  const badRejected = validate("final-finding", finalBase({ verification_status: "rejected", final_severity: "High", final_confidence: "likely" }));
   assert.equal(badRejected.valid, false);
 });
 
@@ -155,16 +155,16 @@ test("final-finding: not-requested still requires final fields", () => {
 });
 
 test("final-finding: missing provenance fails", () => {
-  const noProv = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  const noProv = validate("final-finding", baseFinding({ finding_id: "OSWE-3", verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
   assert.equal(noProv.valid, false); // no partitions / source_finding_ids
 });
 
 test("final-finding: non-canonical id fails", () => {
-  const r = validate("final-finding", finalBase({ finding_id: "auth-F001", verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  const r = validate("final-finding", finalBase({ finding_id: "auth-F001", verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
   assert.equal(r.valid, false);
 });
 
 test("final-finding: empty provenance arrays fail", () => {
-  const r = validate("final-finding", finalBase({ partitions: [], source_finding_ids: [], verification_status: "accepted", final_severity: "Haute", final_confidence: "preuve statique forte" }));
+  const r = validate("final-finding", finalBase({ partitions: [], source_finding_ids: [], verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
   assert.equal(r.valid, false);
 });

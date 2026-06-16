@@ -1,6 +1,6 @@
 # Expected audit result (Node vulnerable fixture)
 
-The auditor should report a **Critique** unauthenticated-RCE chain:
+The auditor should report a **Critical** unauthenticated-RCE chain:
 
 1. `auth-bypass` (NoSQL operator injection) — `app.js` `/login`: `req.body.pass` can be an object
    such as `{"$ne": null}`, bypassing the credential check (no `String()` cast / mongo-sanitize).
