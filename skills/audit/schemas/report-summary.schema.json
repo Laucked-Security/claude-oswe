@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "report-summary.schema.json",
+  "title": "OSWE HTML Report Summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meta", "severity_counts", "finding_status_counts", "coverage", "chains"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "stack", "date", "verdict", "proof_level"],
+      "properties": {
+        "target": { "type": "string", "maxLength": 4096 },
+        "stack": { "type": "string", "maxLength": 512 },
+        "date": { "type": "string", "maxLength": 64 },
+        "verdict": { "enum": ["unauth-rce", "no-critique"] },
+        "proof_level": { "type": ["string", "null"], "maxLength": 64 }
+      }
+    },
+    "severity_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["Critique", "Haute", "Moyenne", "Basse", "Info"],
+      "properties": {
+        "Critique": { "type": "integer", "minimum": 0 },
+        "Haute": { "type": "integer", "minimum": 0 },
+        "Moyenne": { "type": "integer", "minimum": 0 },
+        "Basse": { "type": "integer", "minimum": 0 },
+        "Info": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "finding_status_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted", "downgraded", "rejected", "not-requested"],
+      "properties": {
+        "accepted": { "type": "integer", "minimum": 0 },
+        "downgraded": { "type": "integer", "minimum": 0 },
+        "rejected": { "type": "integer", "minimum": 0 },
+        "not-requested": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analyzed", "skipped"],
+      "properties": {
+        "analyzed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "chains": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "entry_auth", "final_impact", "nodes", "edges"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^CHAIN-[0-9]+$" },
+          "severity": { "enum": ["Critique", "Haute", "Moyenne", "Basse", "Info"] },
+          "entry_auth": { "enum": ["unauthenticated", "authenticated", "admin"] },
+          "final_impact": { "enum": ["unauth-rce", "other"] },
+          "nodes": {
+            "type": "array",
+            "minItems": 2,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^(entry|RCE|OSWE-[0-9]+)$" }
+          },
+          "edges": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["from", "to", "verdict"],
+              "properties": {
+                "from": { "type": "string", "pattern": "^(entry|RCE|OSWE-[0-9]+)$" },
+                "to": { "type": "string", "pattern": "^(entry|RCE|OSWE-[0-9]+)$" },
+                "verdict": { "enum": ["accepted", "downgraded", "rejected"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
