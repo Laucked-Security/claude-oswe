@@ -234,6 +234,17 @@ a gap). So in 6b you should only ever see `ok:true`. If you somehow see `ok:fals
 Write `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (always relative to the
 project root) and print a chat summary. Findings are reported by **`final_severity`** (falling back
 to `provisional_severity` only for `not-requested` items). See Report format below.
+
+**Then emit the visual HTML report (alongside the `.md`, same basename).** Build a **non-sensitive
+`summary` object** (see "HTML export" below) from the final findings/chains/`gaps` plus the
+orchestrator's aggregated analyzer-coverage state, write it to a literal `.oswe/tmp/` path (file tool,
+no shell interpolation), and run the tested helper under the usual `trap`:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/render-html.mjs" --md "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md" --summary "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.html" )`.
+**The HTML can never fail the audit.** On a non-zero exit (1 = summary the orchestrator built wrong;
+2 = IO), note `HTML export failed: <reason>; Markdown report at <path>` in the chat summary and
+continue — the `.md` is the guaranteed artifact. The atomic write means a failure never leaves a
+partial `.html`.
+
 **Then purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (the report is `[REDACTED]`-safe; the
 raw intermediate files are not — see Temp-file hygiene). This runs on the success path; on any abort
 earlier in the pipeline, purge before exiting too.
@@ -300,6 +311,26 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
   rejected because a **member was rejected** (refuted). Items that are merely `not-requested` (unverified
   member, neutralized batch) belong in **Coverage**, not here.
 - **Chat summary**: verdict, RCE chains, top criticals, coverage (not the full detail).
+
+### HTML export (visual report, alongside the Markdown)
+Every audit also writes `oswe-report-YYYY-MM-DD-HHMM.html` next to the `.md` via the tested
+`render-html.mjs` helper (zero-dependency; the audited repo never executes it). The helper renders the
+**redaction-safe `.md`** as the body (so the HTML inherits its `[REDACTED]` safety) plus four inline
+SVG charts computed from a **non-sensitive `summary`** you build — counts and closed-set graph labels
+only, **never** secrets, code excerpts, or `file:line`. The `summary` shape (validated by
+`report-summary.schema.json`; `additionalProperties:false`, so build it exactly):
+- `meta`: `{ target, stack, date, verdict ("unauth-rce"|"no-critique"), proof_level (string|null) }`.
+- `severity_counts`: `{ Critique, Haute, Moyenne, Basse, Info }` — **`Critique` = number of accepted
+  Critique chains**; the other four = findings by **reported** severity (the same selection the
+  Markdown uses: `final_severity` for accepted/downgraded, `provisional_severity` for not-requested;
+  **rejected findings excluded**).
+- `finding_status_counts`: `{ accepted, downgraded, rejected, not-requested }` — findings per
+  `verification_status` (sum = all findings, rejected included).
+- `coverage`: `{ analyzed, skipped }` — analyzed partitions vs coverage gaps.
+- `chains[]`: `{ id (^CHAIN-[0-9]+$), severity, entry_auth, final_impact ("unauth-rce"|"other" — map
+  any non-`unauth-rce` chain impact to `other`), nodes[], edges[{from,to,verdict}] }`, where every
+  node / edge endpoint is exactly `entry`, `RCE`, or `^OSWE-[0-9]+$` (no free text). A safe audit has
+  `chains: []` and all-zero `severity_counts`.
 
 ### Report security
 - **Never write a secret fragment.** Replace any discovered secret value with `[REDACTED]`; cite only

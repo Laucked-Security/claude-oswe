@@ -22,7 +22,8 @@ const EXPORT_NAME = {
   "analyzer-response.schema.json": "analyzerResponse",
   "chain.schema.json": "chain",
   "verdict.schema.json": "verdict",
-  "verifier-response.schema.json": "verifierResponse"
+  "verifier-response.schema.json": "verifierResponse",
+  "report-summary.schema.json": "reportSummary"
 };
 
 const ajv = new Ajv({ code: { source: true, esm: true }, allErrors: true, strict: false });
