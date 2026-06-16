@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests & structure (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The runtime is dependency-free: validators.mjs is self-contained (AJV is dev-only,
+      # used solely to regenerate it). The unit tests need no install.
+      - name: Run validator + helper unit tests
+        working-directory: skills/audit/scripts
+        run: node --test
+
+      - name: Structure & consistency gate (stacks / references / fixtures markers)
+        run: node .github/scripts/check-structure.mjs
+
+  regen-check:
+    name: validators.mjs is in sync with schemas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # AJV is a dev-only dependency used only to (re)generate the committed validators.mjs.
+      # Regenerate and fail if the working tree differs — guarantees the committed, zero-dep
+      # validators.mjs actually matches the schemas under skills/audit/schemas/.
+      - name: Install dev toolchain (AJV)
+        working-directory: skills/audit/scripts
+        run: npm ci || npm install
+
+      - name: Regenerate validators.mjs and verify it is unchanged
+        working-directory: skills/audit/scripts
+        run: |
+          npm run build
+          if ! git diff --quiet -- validators.mjs; then
+            echo "::error::validators.mjs is out of date — run 'npm run build' in skills/audit/scripts and commit the result."
+            git --no-pager diff --stat -- validators.mjs
+            exit 1
+          fi
+          echo "validators.mjs matches the schemas."
+
+      - name: Re-run tests against the freshly generated validators
+        working-directory: skills/audit/scripts
+        run: node --test
