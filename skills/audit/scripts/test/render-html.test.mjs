@@ -72,3 +72,133 @@ test("coverage and status bars reflect counts, no NaN on empty", () => {
   assert.equal(/NaN/.test(statusBar({ accepted: 0, downgraded: 0, rejected: 0, "not-requested": 0 })), false);
   assert.equal(/NaN/.test(coverageBar({ analyzed: 0, skipped: 0 })), false);
 });
+
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { renderReport, graphErrors } from "../render-html.mjs";
+
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "render-html.mjs");
+
+const fullSummary = () => ({
+  meta: { target: "test-fixtures/python/vulnerable", stack: "Python / Flask 3.0.3", date: "2026-06-16 10:15", verdict: "unauth-rce", proof_level: "preuve statique forte" },
+  severity_counts: { Critique: 1, Haute: 2, Moyenne: 0, Basse: 0, Info: 0 },
+  finding_status_counts: { accepted: 2, downgraded: 0, rejected: 0, "not-requested": 0 },
+  coverage: { analyzed: 2, skipped: 0 },
+  chains: [{ id: "CHAIN-1", severity: "Critique", entry_auth: "unauthenticated", final_impact: "unauth-rce",
+             nodes: ["entry", "OSWE-1", "OSWE-2", "RCE"],
+             edges: [{ from: "entry", to: "OSWE-1", verdict: "accepted" }, { from: "OSWE-1", to: "OSWE-2", verdict: "accepted" }] }]
+});
+
+test("renderReport: meta fields are escaped, never live tags", () => {
+  const s = fullSummary();
+  s.meta.target = "<img src=x onerror=1>";
+  s.meta.stack = `a"&b`;
+  const html = renderReport({ md: "# ok", summary: s });
+  assert.equal(/<img\b/i.test(html), false);
+  assert.equal(html.includes("&lt;img src=x onerror=1&gt;"), true);
+  assert.equal(html.includes("a&quot;&amp;b"), true);
+});
+test("renderReport: self-contained + CSP, no active/external markup", () => {
+  const html = renderReport({ md: "# ok\n\nbody `code`", summary: fullSummary() });
+  assert.equal(html.includes(`content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"`), true);
+  for (const tag of ["<script", "<img", "<iframe", "<object", "<embed", "<link"]) {
+    assert.equal(html.toLowerCase().includes(tag), false, "must not emit " + tag);
+  }
+  assert.equal(/\ssrc=/.test(html), false);
+  assert.equal(/\shref=/.test(html), false);
+});
+test("renderReport: escaped active markup in body is allowed", () => {
+  const html = renderReport({ md: "value `<img src=x>`", summary: fullSummary() });
+  assert.equal(html.includes("&lt;img src=x&gt;"), true);
+  assert.equal(/<img\b/i.test(html), false);
+});
+test("renderReport: deterministic", () => {
+  const a = renderReport({ md: "# A\n\n- x", summary: fullSummary() });
+  const b = renderReport({ md: "# A\n\n- x", summary: fullSummary() });
+  assert.equal(a, b);
+});
+test("graphErrors: coherent graph -> no errors", () => {
+  assert.equal(graphErrors(fullSummary()).length, 0);
+  assert.equal(graphErrors({ chains: [] }).length, 0);
+});
+test("graphErrors: edge endpoint not in nodes -> error", () => {
+  const s = fullSummary();
+  s.chains[0].edges.push({ from: "OSWE-2", to: "OSWE-9", verdict: "accepted" }); // OSWE-9 not a node
+  const errs = graphErrors(s);
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].includes("OSWE-9"), true);
+});
+
+function mkdir() { return mkdtempSync(join(tmpdir(), "oswe-html-")); }
+
+test("CLI: valid input writes html, exit 0", () => {
+  const d = mkdir();
+  const md = join(d, "r.md"), sum = join(d, "s.json"), out = join(d, "r.html");
+  writeFileSync(md, "# Report\n\nbody");
+  writeFileSync(sum, JSON.stringify(fullSummary()));
+  execFileSync(process.execPath, [SCRIPT, "--md", md, "--summary", sum, "--out", out]);
+  assert.equal(existsSync(out), true);
+  assert.equal(readFileSync(out, "utf8").includes("OSWE Audit Report"), true);
+  rmSync(d, { recursive: true, force: true });
+});
+test("CLI: invalid summary -> exit 1, no html, no tmp leftover", () => {
+  const d = mkdir();
+  const md = join(d, "r.md"), sum = join(d, "s.json"), out = join(d, "r.html");
+  writeFileSync(md, "# Report");
+  const bad = fullSummary();
+  bad.chains[0].nodes = ["<img onerror=x>"]; // schema-invalid node label
+  writeFileSync(sum, JSON.stringify(bad));
+  let code = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--md", md, "--summary", sum, "--out", out], { stdio: "pipe" }); }
+  catch (e) { code = e.status; }
+  assert.equal(code, 1);
+  assert.equal(existsSync(out), false);
+  assert.equal(readdirSync(d).some((f) => f.includes(".tmp-")), false);
+  rmSync(d, { recursive: true, force: true });
+});
+test("CLI: incoherent chain graph -> exit 1, no html, no tmp leftover", () => {
+  const d = mkdir();
+  const md = join(d, "r.md"), sum = join(d, "s.json"), out = join(d, "r.html");
+  writeFileSync(md, "# Report");
+  const bad = fullSummary();
+  bad.chains[0].edges.push({ from: "OSWE-2", to: "OSWE-9", verdict: "accepted" }); // schema-valid, graph-incoherent
+  writeFileSync(sum, JSON.stringify(bad));
+  let code = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--md", md, "--summary", sum, "--out", out], { stdio: "pipe" }); }
+  catch (e) { code = e.status; }
+  assert.equal(code, 1);
+  assert.equal(existsSync(out), false);
+  assert.equal(readdirSync(d).some((f) => f.includes(".tmp-")), false);
+  rmSync(d, { recursive: true, force: true });
+});
+test("CLI: missing flags / nonexistent files -> exit 2", () => {
+  const d = mkdir();
+  let code = 0;
+  try {
+    execFileSync(process.execPath, [SCRIPT, "--md", join(d, "nope.md"), "--summary", join(d, "nope.json"), "--out", join(d, "o.html")], { stdio: "pipe" });
+  } catch (e) { code = e.status; }
+  assert.equal(code, 2);
+  let code2 = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--md", join(d, "x.md")], { stdio: "pipe" }); }
+  catch (e) { code2 = e.status; }
+  assert.equal(code2, 2);
+  rmSync(d, { recursive: true, force: true });
+});
+test("CLI: unwritable --out (parent dir missing) -> exit 2, no tmp leftover", () => {
+  const d = mkdir();
+  const md = join(d, "r.md"), sum = join(d, "s.json");
+  const out = join(d, "no-such-dir", "r.html"); // parent does not exist -> writeFileSync ENOENT
+  writeFileSync(md, "# Report");
+  writeFileSync(sum, JSON.stringify(fullSummary()));
+  let code = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--md", md, "--summary", sum, "--out", out], { stdio: "pipe" }); }
+  catch (e) { code = e.status; }
+  assert.equal(code, 2);
+  assert.equal(existsSync(out), false);
+  // the .tmp-<pid> sibling lives in the (missing) dir, so nothing can leak into d
+  assert.equal(readdirSync(d).some((f) => f.includes(".tmp-")), false);
+  rmSync(d, { recursive: true, force: true });
+});

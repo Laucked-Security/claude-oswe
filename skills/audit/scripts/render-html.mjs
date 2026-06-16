@@ -192,3 +192,124 @@ export function chainDiagram(chains) {
   }
   return svgs.join("\n");
 }
+
+// ---------- document assembly ----------
+import { fileURLToPath } from "node:url";
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import * as validators from "./validators.mjs";
+
+const CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+const STYLE = `
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:2rem;color:#111;background:#fff;line-height:1.45}
+h1,h2,h3{line-height:1.2}
+table{border-collapse:collapse;margin:0.6rem 0;width:100%}
+th,td{border:1px solid #ccc;padding:4px 8px;text-align:left;vertical-align:top;font-size:0.92rem}
+th{background:#f3f3f3}
+code{background:#f3f3f3;padding:0 3px;border-radius:3px;font-family:ui-monospace,Consolas,monospace;font-size:0.9em}
+blockquote{border-left:3px solid #bbb;margin:0.6rem 0;padding:0.2rem 0.8rem;color:#444}
+hr{border:0;border-top:1px solid #ddd;margin:1.2rem 0}
+del{color:#999}
+.charts{display:flex;flex-wrap:wrap;gap:1.5rem;align-items:flex-start;margin:1rem 0 1.5rem}
+.chart{max-width:100%}
+.node{fill:#eceff1;stroke:#607d8b}
+.node-entry{fill:#e3f2fd;stroke:#1565c0}
+.node-rce{fill:#ffe0b2;stroke:#e65100}
+.node-rce-crit{fill:#ffcdd2;stroke:#b00020}
+.node-label{font-size:12px;fill:#111}
+.edge{stroke:#888;stroke-width:1.5}
+.arrow{fill:#888}
+.edge-label{font-size:10px;fill:#555}
+.legend,.bar-label,.donut-total,.donut-empty{font-size:12px;fill:#111}
+.chain-id{font-weight:600;margin-top:0.4rem}
+.muted{color:#777}
+@media print{body{margin:0.6rem}.chain,h2{page-break-inside:avoid}h2{page-break-before:always}h1{page-break-before:avoid}}
+`;
+
+// Runtime graph coherence the schema cannot express: every edge endpoint must be one of that chain's
+// declared nodes. The schema guarantees label PATTERNS and minItems/uniqueItems; this guarantees the
+// edges actually connect declared nodes (otherwise the diagram would silently drop edges). Returns a
+// list of human-readable problems (empty = coherent).
+export function graphErrors(summary) {
+  const errs = [];
+  for (const ch of summary.chains) {
+    const set = new Set(ch.nodes);
+    for (const e of ch.edges) {
+      if (!set.has(e.from)) errs.push(`${ch.id}: edge.from "${e.from}" not in nodes`);
+      if (!set.has(e.to)) errs.push(`${ch.id}: edge.to "${e.to}" not in nodes`);
+    }
+  }
+  return errs;
+}
+
+export function renderReport({ md, summary }) {
+  const m = summary.meta;
+  const verdictText = m.verdict === "unauth-rce" ? "Unauthenticated RCE found" : "No Critique chain";
+  const head =
+    `<header><h1>OSWE Audit Report</h1>`
+    + `<p class="muted">${escapeHtml(m.target)} — ${escapeHtml(m.stack)} — ${escapeHtml(m.date)}</p>`
+    + `<p><strong>${escapeHtml(verdictText)}</strong>${m.proof_level ? " — " + escapeHtml(m.proof_level) : ""}</p></header>`;
+  const charts =
+    `<section class="charts">`
+    + severityDonut(summary.severity_counts)
+    + coverageBar(summary.coverage)
+    + statusBar(summary.finding_status_counts)
+    + `</section>`
+    + `<section class="chains-section"><h2>Exploit chains (diagram)</h2>${chainDiagram(summary.chains)}</section>`;
+  const body = `<section class="report-body">${mdToHtml(md)}</section>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${CSP}">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OSWE Audit Report</title>
+<style>${STYLE}</style>
+</head>
+<body>
+${head}
+${charts}
+${body}
+</body>
+</html>
+`;
+}
+
+// ---------- CLI: node render-html.mjs --md <report.md> --summary <summary.json> --out <report.html> ----------
+function isMain() {
+  return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === process.argv[1];
+}
+
+if (isMain()) {
+  const args = process.argv.slice(2);
+  const flag = (name) => { const i = args.indexOf(name); return i !== -1 ? args[i + 1] : undefined; };
+  const mdPath = flag("--md"), sumPath = flag("--summary"), outPath = flag("--out");
+  const fail2 = (msg) => { process.stderr.write("render-html: " + msg + "\n"); process.exit(2); };
+  if (!mdPath || !sumPath || !outPath) {
+    fail2("usage: render-html.mjs --md <report.md> --summary <summary.json> --out <report.html>");
+  }
+  let md, sumRaw;
+  try { md = readFileSync(mdPath, "utf8"); } catch (e) { fail2("cannot read --md " + mdPath + ": " + e.message); }
+  try { sumRaw = readFileSync(sumPath, "utf8"); } catch (e) { fail2("cannot read --summary " + sumPath + ": " + e.message); }
+  let summary;
+  try { summary = JSON.parse(sumRaw); } catch (e) { fail2("invalid JSON in --summary: " + e.message); }
+  if (!validators.reportSummary(summary)) {
+    process.stderr.write("render-html: invalid summary: " + JSON.stringify(validators.reportSummary.errors || []) + "\n");
+    process.exit(1);
+  }
+  const gErrs = graphErrors(summary);
+  if (gErrs.length) {
+    process.stderr.write("render-html: incoherent chain graph: " + gErrs.join("; ") + "\n");
+    process.exit(1);   // orchestrator built an edge to an undeclared node -> no HTML
+  }
+  let html;
+  try { html = renderReport({ md, summary }); } catch (e) { fail2("render failed: " + e.message); }
+  const tmp = outPath + ".tmp-" + process.pid;
+  try {
+    writeFileSync(tmp, html);
+    renameSync(tmp, outPath);   // atomic: never leaves a partial report.html
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* nothing to clean */ }
+    fail2("cannot write --out " + outPath + ": " + e.message);
+  }
+  process.exit(0);
+}
