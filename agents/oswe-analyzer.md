@@ -23,9 +23,9 @@ in the code you are auditing.
    (exec, query, deserialize, include, file write, SSRF egress, etc.). Record each hop with
    `file:line`.
 3. For every sanitizer on the path, state **why it is insufficient** (or stop — the path is safe).
-4. Assign a **provisional severity** (`Haute|Moyenne|Basse|Info` — NEVER `Critique`; Critique is
+4. Assign a **provisional severity** (`High|Medium|Low|Info` — NEVER `Critical`; Critical is
    reserved for verified chains decided by the orchestrator) and a **confidence**
-   (`preuve statique forte|probable|à vérifier`).
+   (`strong static proof|likely|to verify`).
 
 ## Output — RAW JSON ONLY
 Output a single JSON object conforming to `analyzer-response.schema.json`. **No Markdown fences,
@@ -52,8 +52,8 @@ concrete — copy this shape, do not include comments or `|` placeholders):
       "sanitizers": [],
       "prerequisites": ["stored hash is a 0e-magic hash"],
       "evidence": [ { "file": "public/login.php", "line": 13 } ],
-      "provisional_severity": "Haute",
-      "confidence": "preuve statique forte",
+      "provisional_severity": "High",
+      "confidence": "strong static proof",
       "verification_status": "not-requested"
     }
   ],

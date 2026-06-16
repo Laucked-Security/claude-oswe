@@ -11,9 +11,9 @@ replaced with `[REDACTED]` and only `file:line` is cited — see [SECURITY.md](.
 
 | File | Fixture | Outcome |
 |---|---|---|
-| [`python-vulnerable.md`](python-vulnerable.md) | Flask | **Critique** — unauth mass-assignment → SSTI → RCE |
-| [`java-vulnerable.md`](java-vulnerable.md) | Spring Boot | **Critique** — trusted header authz bypass → SpEL → RCE |
-| [`dotnet-vulnerable.md`](dotnet-vulnerable.md) | ASP.NET Core | **Critique** — forgeable cookie → command injection → RCE |
+| [`python-vulnerable.md`](python-vulnerable.md) | Flask | **Critical** — unauth mass-assignment → SSTI → RCE |
+| [`java-vulnerable.md`](java-vulnerable.md) | Spring Boot | **Critical** — trusted header authz bypass → SpEL → RCE |
+| [`dotnet-vulnerable.md`](dotnet-vulnerable.md) | ASP.NET Core | **Critical** — forgeable cookie → command injection → RCE |
 | [`python-safe.md`](python-safe.md) | Flask (hardened) | **Clean** — 0 findings (low-noise control) |
 
 > Reading guide: an audit is reported by **final severity**. A finding is `accepted` (verified),

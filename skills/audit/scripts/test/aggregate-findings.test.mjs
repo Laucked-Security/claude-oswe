@@ -21,8 +21,8 @@ const raw = (id, partition, over = {}) => ({
   sink: loc("db.php", 20, "query", "query"),
   auth: "authenticated",
   evidence: [{ file: "db.php", line: 20 }],
-  provisional_severity: "Moyenne",
-  confidence: "probable",
+  provisional_severity: "Medium",
+  confidence: "likely",
   verification_status: "not-requested",
   ...over
 });
@@ -37,13 +37,13 @@ test("a unique finding gets single-element provenance and OSWE-1", () => {
 });
 
 test("two findings with the same source/sink/class are merged with worst-case fields", () => {
-  const a = raw("auth-F001", "auth", { provisional_severity: "Moyenne", confidence: "probable", auth: "authenticated" });
-  const b = raw("api-F003", "api", { provisional_severity: "Haute", confidence: "preuve statique forte", auth: "unauthenticated", evidence: [{ file: "db.php", line: 21 }] });
+  const a = raw("auth-F001", "auth", { provisional_severity: "Medium", confidence: "likely", auth: "authenticated" });
+  const b = raw("api-F003", "api", { provisional_severity: "High", confidence: "strong static proof", auth: "unauthenticated", evidence: [{ file: "db.php", line: 21 }] });
   const r = aggregateFindings([a, b]);
   assert.equal(r.findings.length, 1);
   const f = r.findings[0];
-  assert.equal(f.provisional_severity, "Haute");          // max severity (worst impact)
-  assert.equal(f.confidence, "probable");                 // MIN confidence (conservative)
+  assert.equal(f.provisional_severity, "High");          // max severity (worst impact)
+  assert.equal(f.confidence, "likely");                 // MIN confidence (conservative)
   assert.equal(f.auth, "unauthenticated");                // most-exposed
   assert.deepEqual(f.partitions, ["api", "auth"]);        // sorted unique
   assert.deepEqual(f.source_finding_ids, ["api-F003", "auth-F001"]);

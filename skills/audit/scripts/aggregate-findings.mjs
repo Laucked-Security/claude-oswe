@@ -5,8 +5,8 @@
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const SEV = ["Info", "Basse", "Moyenne", "Haute"];                 // analyzer never emits Critique
-const CONF = ["à vérifier", "probable", "preuve statique forte"];
+const SEV = ["Info", "Low", "Medium", "High"];                 // analyzer never emits Critical
+const CONF = ["to verify", "likely", "strong static proof"];
 const AUTH = ["unauthenticated", "authenticated", "admin"];        // index 0 = most exposed
 
 // Canonical serialization (recursively key-sorted) so equivalent objects with differently-ordered
@@ -58,7 +58,7 @@ export function aggregateFindings(rawFindings) {
       evidence: union("evidence"),
       provisional_severity: SEV[Math.max(...group.map((f) => SEV.indexOf(f.provisional_severity)))],
       // Confidence = MINIMUM over the group (conservative): when analyzers disagree, the least-sure
-      // wins rather than letting "preuve statique forte" mask an "à vérifier".
+      // wins rather than letting "strong static proof" mask an "to verify".
       confidence: CONF[Math.min(...group.map((f) => CONF.indexOf(f.confidence)))],
       verification_status: "not-requested",
       partitions: uniqSortedStrings(group.map((f) => f.partition_id)),

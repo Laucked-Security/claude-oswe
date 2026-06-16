@@ -18,12 +18,12 @@
 
 | Severity (final) | Count |
 |---|---|
-| **Critique** | **1 chain** (CHAIN-1 — unauthenticated RCE) |
-| Haute | 2 findings (OSWE-1, OSWE-2) |
-| Moyenne / Basse / Info | 0 |
+| **Critical** | **1 chain** (CHAIN-1 — unauthenticated RCE) |
+| High | 2 findings (OSWE-1, OSWE-2) |
+| Medium / Low / Info | 0 |
 
 **Verdict: an unauthenticated remote-code-execution path was found and verified.**
-Proof level: **preuve statique forte** end-to-end (verifier-accepted, every chain transition accepted).
+Proof level: **strong static proof** end-to-end (verifier-accepted, every chain transition accepted).
 
 A remote, unauthenticated attacker sets a forgeable `admin=1` cookie to pass the only authorization
 check, then supplies shell metacharacters in the `host` query parameter of `/admin/ping`, which are
@@ -34,7 +34,7 @@ credentials.
 
 ## Exploit chains
 
-### CHAIN-1 — Unauthenticated RCE — **Critique** (accepted, `preuve statique forte`)
+### CHAIN-1 — Unauthenticated RCE — **Critical** (accepted, `strong static proof`)
 
 - **Entry point:** `GET /admin/ping` (`Program.cs:10`), **auth: unauthenticated**
 - **Final impact:** `unauth-rce`
@@ -45,14 +45,14 @@ credentials.
 | 1 | `entry` → **OSWE-1** | Unauthenticated `GET /admin/ping` with header `Cookie: admin=1`. `IsAdmin` (`Program.cs:8`) trusts the raw, unsigned cookie, so the gate at line 12 passes with no credentials. | `Program.cs:8`, `:12` — **accepted** |
 | 2 | **OSWE-1** → **OSWE-2** | Past the gate, the attacker-controlled `host` (`?host=127.0.0.1; id`) is concatenated into the `/bin/sh -c "ping -c 1 …"` argument string (`Program.cs:21`) and executed via `Process.Start` (line 25); shell metacharacters run arbitrary commands. | `Program.cs:15`, `:21`, `:25` — **accepted** |
 
-All transitions **accepted**; both member findings **accepted**; entry unauthenticated; final impact `unauth-rce` → **Critique**.
+All transitions **accepted**; both member findings **accepted**; entry unauthenticated; final impact `unauth-rce` → **Critical**.
 
 ---
 
 ## Detailed findings
 
 ### OSWE-1 — Authorization bypass via forgeable unsigned `admin` cookie
-- **Status:** `accepted` · **Final severity: Haute** · **Final confidence: preuve statique forte**
+- **Status:** `accepted` · **Final severity: High** · **Final confidence: strong static proof**
 - **Class:** Broken access control (forgeable client cookie)
 - **Auth:** unauthenticated
 - **Source:** `Program.cs:8` — `request.Cookies["admin"]` (HTTP request cookie)
@@ -67,7 +67,7 @@ All transitions **accepted**; both member findings **accepted**; entry unauthent
   `[Authorize]`/authorization policies; never derive identity/role from a raw unsigned cookie value.
 
 ### OSWE-2 — OS command injection in `GET /admin/ping` via `host` → RCE
-- **Status:** `accepted` · **Final severity: Haute** · **Final confidence: preuve statique forte**
+- **Status:** `accepted` · **Final severity: High** · **Final confidence: strong static proof**
 - **Class:** OS command injection → RCE
 - **Auth:** authenticated (gated by `IsAdmin` at line 12 — defeated by OSWE-1)
 - **Source:** `Program.cs:15` — `request.Query["host"]` (HTTP query parameter)
@@ -102,5 +102,5 @@ All transitions **accepted**; both member findings **accepted**; entry unauthent
 > "No further path to RCE" would mean *within the analyzed coverage*. Here the full in-scope program
 > surface was analyzed and the unauthenticated RCE path was confirmed.
 
-## Annexe — Findings écartés
+## Annex — Dismissed findings
 None. No finding or chain was refuted (`rejected`); all targets were `accepted`.

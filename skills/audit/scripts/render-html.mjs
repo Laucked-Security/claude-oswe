@@ -87,8 +87,8 @@ export function mdToHtml(md) {
 }
 
 // ---------- charts (inline SVG, deterministic, computed from the summary) ----------
-const SEVERITIES = ["Critique", "Haute", "Moyenne", "Basse", "Info"];
-const SEV_COLOR = { Critique: "#b00020", Haute: "#e65100", Moyenne: "#f9a825", Basse: "#1565c0", Info: "#607d8b" };
+const SEVERITIES = ["Critical", "High", "Medium", "Low", "Info"];
+const SEV_COLOR = { Critical: "#b00020", High: "#e65100", Medium: "#f9a825", Low: "#1565c0", Info: "#607d8b" };
 
 export function severityDonut(counts) {
   const total = SEVERITIES.reduce((a, s) => a + (counts[s] || 0), 0);
@@ -181,7 +181,7 @@ export function chainDiagram(chains) {
     }
     nodes.forEach((n, idx) => {
       const isRce = n === "RCE";
-      const crit = ch.severity === "Critique" || ch.final_impact === "unauth-rce";
+      const crit = ch.severity === "Critical" || ch.final_impact === "unauth-rce";
       const cls = isRce ? (crit ? "node node-rce-crit" : "node node-rce") : (n === "entry" ? "node node-entry" : "node");
       const label = n === "entry" && ch.entry_auth === "unauthenticated" ? "entry (unauth)" : n;
       g += `<rect x="${xOf(idx)}" y="${y}" width="${boxW}" height="${boxH}" rx="5" class="${cls}"></rect>`
@@ -316,7 +316,7 @@ export function graphErrors(summary) {
 
 export function renderReport({ md, summary }) {
   const m = summary.meta;
-  const verdictText = m.verdict === "unauth-rce" ? "Unauthenticated RCE found" : "No Critique chain";
+  const verdictText = m.verdict === "unauth-rce" ? "Unauthenticated RCE found" : "No Critical chain";
   const verdictClass = m.verdict === "unauth-rce" ? "verdict verdict-rce" : "verdict verdict-clear";
   const head =
     `<header class="band"><div class="band-inner">`

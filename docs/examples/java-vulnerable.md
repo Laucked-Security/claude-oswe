@@ -18,12 +18,12 @@
 
 | Severity (final) | Count |
 |---|---|
-| **Critique** | **1 chain** (CHAIN-1 — unauthenticated RCE) |
-| Haute | 2 findings (OSWE-1, OSWE-2) |
-| Moyenne / Basse / Info | 0 |
+| **Critical** | **1 chain** (CHAIN-1 — unauthenticated RCE) |
+| High | 2 findings (OSWE-1, OSWE-2) |
+| Medium / Low / Info | 0 |
 
 **Verdict: an unauthenticated remote-code-execution path was found and verified.**
-Proof level: **preuve statique forte** end-to-end (verifier-accepted, every chain transition accepted).
+Proof level: **strong static proof** end-to-end (verifier-accepted, every chain transition accepted).
 
 A remote, unauthenticated attacker sets the client-controllable `X-User-Role: admin` header to pass the
 only authorization check, then supplies a SpEL expression in the `q` parameter of `/admin/eval`, which
@@ -33,7 +33,7 @@ is parsed and evaluated server-side — yielding arbitrary OS command execution 
 
 ## Exploit chains
 
-### CHAIN-1 — Unauthenticated RCE — **Critique** (accepted, `preuve statique forte`)
+### CHAIN-1 — Unauthenticated RCE — **Critical** (accepted, `strong static proof`)
 
 - **Entry point:** `GET /admin/eval` (`VulnController.java:20`), **auth: unauthenticated**
 - **Final impact:** `unauth-rce`
@@ -44,14 +44,14 @@ is parsed and evaluated server-side — yielding arbitrary OS command execution 
 | 1 | `entry` → **OSWE-1** | Unauthenticated `GET /admin/eval` with header `X-User-Role: admin`. `isAdmin` (`VulnController.java:17`) derives the admin decision **solely** from that client header, so the gate at line 22 passes with no credentials. | `VulnController.java:17`, `:22` — **accepted** |
 | 2 | **OSWE-1** → **OSWE-2** | Past the gate, the attacker-controlled `q` is parsed and evaluated as a SpEL expression (`VulnController.java:28`); a payload like `T(java.lang.Runtime).getRuntime().exec("id")` executes arbitrary OS commands. | `VulnController.java:27`, `:28`, `:29` — **accepted** |
 
-All transitions **accepted**; both member findings **accepted**; entry unauthenticated; final impact `unauth-rce` → **Critique**.
+All transitions **accepted**; both member findings **accepted**; entry unauthenticated; final impact `unauth-rce` → **Critical**.
 
 ---
 
 ## Detailed findings
 
 ### OSWE-1 — Authorization bypass via trusted client-controllable `X-User-Role` header
-- **Status:** `accepted` · **Final severity: Haute** · **Final confidence: preuve statique forte**
+- **Status:** `accepted` · **Final severity: High** · **Final confidence: strong static proof**
 - **Class:** Broken access control (trusted client header)
 - **Auth:** unauthenticated
 - **Source:** `VulnController.java:17` — `request.getHeader("X-User-Role")` (HTTP request header)
@@ -67,7 +67,7 @@ All transitions **accepted**; both member findings **accepted**; entry unauthent
   proven to set/overwrite it.
 
 ### OSWE-2 — SpEL expression injection in `GET /admin/eval` → RCE
-- **Status:** `accepted` · **Final severity: Haute** · **Final confidence: preuve statique forte**
+- **Status:** `accepted` · **Final severity: High** · **Final confidence: strong static proof**
 - **Class:** Expression-language (SpEL) injection → RCE
 - **Auth:** authenticated (gated by `isAdmin` at line 22 — defeated by OSWE-1)
 - **Source:** `VulnController.java:21` — `@RequestParam("q") String q` (HTTP query parameter)
@@ -102,5 +102,5 @@ All transitions **accepted**; both member findings **accepted**; entry unauthent
 > "No further path to RCE" would mean *within the analyzed coverage*. Here the full in-scope controller
 > surface was analyzed and the unauthenticated RCE path was confirmed.
 
-## Annexe — Findings écartés
+## Annex — Dismissed findings
 None. No finding or chain was refuted (`rejected`); all targets were `accepted`.

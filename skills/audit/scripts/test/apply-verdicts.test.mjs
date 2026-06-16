@@ -13,7 +13,7 @@ const loc = (file, line, symbol, kind) => ({ file, line, symbol, kind });
 const ids = (...x) => new Set(x);
 
 // Findings/chains reaching applyVerdicts are POST-aggregation → canonical OSWE-* ids WITH provenance.
-const finding = (id, sev = "Haute") => ({
+const finding = (id, sev = "High") => ({
   finding_id: id,
   partition_id: "auth",
   title: id,
@@ -22,7 +22,7 @@ const finding = (id, sev = "Haute") => ({
   sink: loc("a.php", 2, "==", "comparison"),
   auth: "unauthenticated",
   provisional_severity: sev,
-  confidence: "preuve statique forte",
+  confidence: "strong static proof",
   verification_status: "not-requested",
   partitions: ["auth"],
   source_finding_ids: ["src-" + id]
@@ -49,8 +49,8 @@ const chain = (overrides = {}) => ({
     { from: "OSWE-1", to: "OSWE-2", how: "upload", evidence: [{ file: "u.php", line: 4 }] }
   ],
   final_impact: "unauth-rce",
-  severity: "Haute",
-  confidence: "probable",
+  severity: "High",
+  confidence: "likely",
   verification_status: "not-requested",
   ...overrides
 });
@@ -84,23 +84,23 @@ const acceptChain = {
   justification: "all hold"
 };
 
-test("fully accepted unauth-rce chain is promoted to Critique", () => {
+test("fully accepted unauth-rce chain is promoted to Critical", () => {
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp([...acceptBoth, acceptChain]) });
   assert.equal(r.ok, true);
-  assert.equal(r.chains[0].severity, "Critique");
+  assert.equal(r.chains[0].severity, "Critical");
   assert.equal(r.chains[0].verification_status, "accepted");
-  assert.equal(r.chains[0].confidence, "preuve statique forte");
+  assert.equal(r.chains[0].confidence, "strong static proof");
   assertResultSchemaValid(r); // results must satisfy the final schemas
 });
 
-test("accepted chain with a downgraded member is NOT Critique", () => {
+test("accepted chain with a downgraded member is NOT Critical", () => {
   const verdicts = [
     { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
-    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x" },
     acceptChain
   ];
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp(verdicts) });
-  assert.notEqual(r.chains[0].severity, "Critique");
+  assert.notEqual(r.chains[0].severity, "Critical");
   assert.equal(r.chains[0].verification_status, "accepted");
 });
 
@@ -112,7 +112,7 @@ test("chain whose member is rejected is itself rejected", () => {
   ];
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp(verdicts) });
   assert.equal(r.chains[0].verification_status, "rejected");
-  assert.notEqual(r.chains[0].severity, "Critique");
+  assert.notEqual(r.chains[0].severity, "Critical");
   const rejected = r.findings.find((f) => f.finding_id === "OSWE-1");
   assert.equal("final_severity" in rejected, false);
   const d = r.decisions.find((d) => d.target_type === "chain" && d.target_id === "CHAIN-1");
@@ -152,15 +152,15 @@ test("explicit chain verdict=rejected is honoured despite accepted transitions",
   const rejectChain = { ...acceptChain, verdict: "rejected" };
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp([...acceptBoth, rejectChain]) });
   assert.equal(r.chains[0].verification_status, "rejected");
-  assert.notEqual(r.chains[0].severity, "Critique");
+  assert.notEqual(r.chains[0].severity, "Critical");
 });
 
 test("explicit chain verdict=downgraded applies new severity/confidence", () => {
-  const dnChain = { ...acceptChain, verdict: "downgraded", new_severity: "Haute", new_confidence: "probable" };
+  const dnChain = { ...acceptChain, verdict: "downgraded", new_severity: "High", new_confidence: "likely" };
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp([...acceptBoth, dnChain]) });
   assert.equal(r.chains[0].verification_status, "downgraded");
-  assert.equal(r.chains[0].severity, "Haute");
-  assert.equal(r.chains[0].confidence, "probable");
+  assert.equal(r.chains[0].severity, "High");
+  assert.equal(r.chains[0].confidence, "likely");
 });
 
 // An accepted/downgraded chain verdict whose transition_verdicts don't exactly match the chain's
@@ -186,11 +186,11 @@ test("a rejected transition with an 'accepted' chain verdict is a verifier-outpu
   assert.match(r.error, /rejected transition but its verdict is/);
 });
 
-test("authenticated entry is not promoted to Critique", () => {
+test("authenticated entry is not promoted to Critical", () => {
   const c = chain({ entry_point: { file: "a.php", line: 1, route: "POST /x", auth: "authenticated" } });
   const r = applyVerdicts({ findings: bothFindings(), chains: [c], batches: vresp([...acceptBoth, acceptChain]) });
-  assert.notEqual(r.chains[0].severity, "Critique");
-  assert.equal(r.chains[0].verification_status, "accepted"); // accepted but capped below Critique
+  assert.notEqual(r.chains[0].severity, "Critical");
+  assert.equal(r.chains[0].verification_status, "accepted"); // accepted but capped below Critical
 });
 
 test("status=error batch yields gaps (ok:true, no verdicts applied)", () => {
@@ -296,7 +296,7 @@ test("a chain whose own batch errored is a coverage gap, left not-requested", ()
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches });
   assert.equal(r.ok, true);
   assert.equal(r.chains[0].verification_status, "not-requested"); // NOT rejected
-  assert.notEqual(r.chains[0].severity, "Critique");
+  assert.notEqual(r.chains[0].severity, "Critical");
   assert.ok(r.gaps.some((g) => g.target_type === "chain" && g.target_id === "CHAIN-1"));
   assertResultSchemaValid(r); // not-requested finding keeps final fields; chain stays schema-valid
 });
@@ -322,26 +322,26 @@ test("duplicate batch_id is an orchestrator-input error", () => {
 });
 
 test("rejecting a low-severity chain does not raise its severity", () => {
-  const c = chain({ severity: "Basse", confidence: "probable" });
+  const c = chain({ severity: "Low", confidence: "likely" });
   const rej = { ...acceptChain, verdict: "rejected" };
   const r = applyVerdicts({ findings: bothFindings(), chains: [c], batches: vresp([...acceptBoth, rej]) });
   assert.equal(r.chains[0].verification_status, "rejected");
-  assert.equal(r.chains[0].severity, "Basse"); // min(Basse, Moyenne) = Basse — never raised
+  assert.equal(r.chains[0].severity, "Low"); // min(Low, Medium) = Low — never raised
 });
 
 test("finding downgraded gets new final severity/confidence", () => {
-  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Moyenne", new_confidence: "probable", justification: "x" }];
+  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x" }];
   const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], batches: vresp(v) });
   const f = r.findings[0];
   assert.equal(f.verification_status, "downgraded");
-  assert.equal(f.final_severity, "Moyenne");
-  assert.equal(f.final_confidence, "probable");
+  assert.equal(f.final_severity, "Medium");
+  assert.equal(f.final_confidence, "likely");
 });
 
 test("a downgraded FINDING that raises severity is an error", () => {
-  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Haute", new_confidence: "preuve statique forte", justification: "x" }];
-  // provisional is Moyenne; "downgrading" to Haute is an increase -> reject the batch
-  const r = applyVerdicts({ findings: [finding("OSWE-1", "Moyenne")], chains: [], batches: vresp(v) });
+  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "High", new_confidence: "strong static proof", justification: "x" }];
+  // provisional is Medium; "downgrading" to High is an increase -> reject the batch
+  const r = applyVerdicts({ findings: [finding("OSWE-1", "Medium")], chains: [], batches: vresp(v) });
   assert.equal(r.ok, false);
   assert.match(r.error, /raises severity/);
 });
@@ -386,9 +386,9 @@ test("a malformed-topology chain is an error even when its batch errored (no ver
 });
 
 test("a chain downgrade above the CANDIDATE severity is an error", () => {
-  // Candidate claims Moyenne but is naturally Critique; downgrading to Haute exceeds c.severity.
-  const c = chain({ severity: "Moyenne", confidence: "probable" });
-  const dn = { ...acceptChain, verdict: "downgraded", new_severity: "Haute", new_confidence: "probable" };
+  // Candidate claims Medium but is naturally Critical; downgrading to High exceeds c.severity.
+  const c = chain({ severity: "Medium", confidence: "likely" });
+  const dn = { ...acceptChain, verdict: "downgraded", new_severity: "High", new_confidence: "likely" };
   const r = applyVerdicts({ findings: bothFindings(), chains: [c], batches: vresp([...acceptBoth, dn]) });
   assert.equal(r.ok, false);
   assert.match(r.error, /raises severity/);
@@ -396,24 +396,24 @@ test("a chain downgrade above the CANDIDATE severity is an error", () => {
   assert.ok(r.error_batch_id, "chain downgrade-raise must name the offending batch");
 });
 
-test("a probable member caps the accepted chain confidence (no Critique, not forte)", () => {
-  // OSWE-2 is downgraded to probable confidence; chain must not become Critique nor claim forte.
+test("a 'likely' member caps the accepted chain confidence (no Critical, not strong)", () => {
+  // OSWE-2 is downgraded to 'likely' confidence; chain must not become Critical nor claim strong proof.
   const verdicts = [
     { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
-    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Haute", new_confidence: "probable", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "High", new_confidence: "likely", justification: "x" },
     acceptChain
   ];
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp(verdicts) });
   assert.equal(r.chains[0].verification_status, "accepted");
-  assert.notEqual(r.chains[0].severity, "Critique");
-  assert.equal(r.chains[0].confidence, "probable");
+  assert.notEqual(r.chains[0].severity, "Critical");
+  assert.equal(r.chains[0].confidence, "likely");
 });
 
 test("a downgraded CHAIN that raises severity is an error", () => {
-  // authenticated entry + members Moyenne -> natural severity is Moyenne; downgrading to Haute increases.
-  const findingsM = [finding("OSWE-1", "Moyenne"), finding("OSWE-2", "Moyenne")];
+  // authenticated entry + members Medium -> natural severity is Medium; downgrading to High increases.
+  const findingsM = [finding("OSWE-1", "Medium"), finding("OSWE-2", "Medium")];
   const c = chain({ entry_point: { file: "a.php", line: 1, route: "POST /x", auth: "authenticated" } });
-  const dnChain = { ...acceptChain, verdict: "downgraded", new_severity: "Haute", new_confidence: "probable" };
+  const dnChain = { ...acceptChain, verdict: "downgraded", new_severity: "High", new_confidence: "likely" };
   const r = applyVerdicts({ findings: findingsM, chains: [c], batches: vresp([...acceptBoth, dnChain]) });
   assert.equal(r.ok, false);
   assert.match(r.error, /raises severity/);
@@ -496,9 +496,9 @@ test("validateBoundBatch: a rejected chain verdict STILL needs the exact transit
 });
 
 test("validateBoundBatch: finding downgrade-raise is caught pre-retry", () => {
-  const v = { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Haute", new_confidence: "preuve statique forte", justification: "x" };
+  const v = { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "High", new_confidence: "strong static proof", justification: "x" };
   const b = fbatch("ok", [v], [{ target_type: "finding", target_id: "OSWE-1" }]);
-  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1", "Moyenne")), chainById: cmap() });
+  const r = validateBoundBatch(b, { findingById: fmap(finding("OSWE-1", "Medium")), chainById: cmap() });
   assert.equal(r.ok, false);
   assert.match(r.error, /raises severity/);
 });

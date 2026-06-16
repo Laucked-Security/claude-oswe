@@ -16,11 +16,11 @@
 
 | Severity (final) | Count |
 |---|---|
-| Critique / Haute / Moyenne / Basse / Info | **0** |
+| Critical / High / Medium / Low / Info | **0** |
 
 **Verdict: no path to unauthenticated RCE was identified within the analyzed coverage.**
 No vulnerabilities were found. This is the **hardened counterpart** of the vulnerable Python fixture:
-the two flaws that produced a Critique unauth-RCE chain there (mass-assignment privilege escalation on
+the two flaws that produced a Critical unauth-RCE chain there (mass-assignment privilege escalation on
 `/login`, SSTI on `/render`) are both **correctly mitigated** here.
 
 > "No path to RCE found" means *no path identified within the analyzed coverage* (both routes of
@@ -68,8 +68,8 @@ These are not findings — they confirm that the expected sinks are properly gua
 
 - **Partitions:** 2 of 2 analyzed (inline path; both `analyzer-response` objects schema-validated, both `status: ok`, zero findings).
 - **Aggregation:** ran the deterministic helper on the empty finding set → `ok`, 0 canonical findings.
-- **Verification:** no targets (no chain members, no provisional-`Haute` findings) → no batches dispatched.
+- **Verification:** no targets (no chain members, no provisional-`High` findings) → no batches dispatched.
 - **No gaps, no neutralized batches, no `not-requested` targets, no analyzer/partition errors.**
 
-## Annexe — Findings écartés
+## Annex — Dismissed findings
 None. No finding or chain was produced, so nothing was refuted.

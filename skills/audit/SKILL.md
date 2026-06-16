@@ -19,7 +19,7 @@ Do not audit hostile repositories. The analyzer/verifier subagents are read-only
 
 ## Prerequisite: Node.js (hard requirement)
 This pipeline's correctness lives in three Node helpers — `confine-path.mjs` (scope confinement),
-`validate-output.mjs` (schema validation), and `apply-verdicts.mjs` (verdict application / Critique
+`validate-output.mjs` (schema validation), and `apply-verdicts.mjs` (verdict application / Critical
 gating). They have **no coherent non-Node fallback**. **Before anything else, run `node --version`.**
 If Node is absent or **older than v20** (the validators/tests target Node ≥ 20 — `node --test`,
 standalone ESM), **abort** with: "OSWE audit requires Node.js ≥ 20 (run `node --version`)." Do not
@@ -76,7 +76,7 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
   validator** (kind `analyzer-response`) before aggregating. The inline path uses the identical
   contract; it does not skip validation. (Small fixtures take this path, so it must be airtight.)
 - **Otherwise:** dispatch `oswe-analyzer` subagents in parallel, **max 4 concurrent**, **budget 12
-  partitions** total; anything beyond the budget → recorded as "non analysé" in Coverage.
+  partitions** total; anything beyond the budget → recorded as "not analyzed" in Coverage.
 - Every `analyzer-response` (inline or subagent) is **validated** (see Validation below) before aggregating.
 - **Bind each response to its assigned partition** (the schema cannot — it doesn't know what you
   dispatched). For partition `P`, **reject the response unless** `response.partition_id === P` **and**
@@ -116,8 +116,8 @@ The helper implements these rules (documented here for review; the code is the s
    `{file, symbol, line, kind}` — include `line` and `kind`), **without** `partition_id`. Group all
    findings by this key.
 2. **Merge rule per group** (deterministic):
-   - `provisional_severity` = the **maximum** over the group (`Info<Basse<Moyenne<Haute` — worst impact).
-   - `confidence` = the **minimum** over the group (`à vérifier<probable<preuve statique forte` —
+   - `provisional_severity` = the **maximum** over the group (`Info<Low<Medium<High` — worst impact).
+   - `confidence` = the **minimum** over the group (`to verify<likely<strong static proof` —
      conservative: the least-sure analyzer wins, so strong confidence can't mask a weak one).
    - `auth` = the **most exposed** reachability = **minimum** over `unauthenticated<authenticated<admin`
      (unauthenticated wins — worst case for an attacker).
@@ -139,9 +139,9 @@ Assemble exploit chains (`chain.schema.json`) toward unauthenticated RCE from th
 findings. **Validate each built chain** against `chain.schema.json`.
 
 ### 6. Verify (batched, with bound batches)
-- **Build the target set**: all findings used in a candidate chain, all provisional-`Haute` findings,
+- **Build the target set**: all findings used in a candidate chain, all provisional-`High` findings,
   and the full chain(s). **Deduplicate by `target_type:target_id`** — a finding can be both a chain
-  member and provisional-`Haute`, and several chains can share a finding; each distinct target is
+  member and provisional-`High`, and several chains can share a finding; each distinct target is
   **assigned to exactly one** batch (then dispatched once, with at most one retry per the shared budget).
 - **Partition the targets into batches** (≤ 5 findings OR 1 full chain per batch, **max 2 verifiers
   concurrent**). For each batch, record its **`batch_id`** and the exact **`expected_targets`** you
@@ -186,7 +186,7 @@ findings. **Validate each built chain** against `chain.schema.json`.
     itself is deleted by the `trap`, so rely on the captured stdout, not the file**.
 
 ### 6b. Apply verdicts → final severity (deterministic CLI)
-**Do not apply verdicts or decide Critique by hand.** This is the **same `apply-verdicts.mjs`
+**Do not apply verdicts or decide Critical by hand.** This is the **same `apply-verdicts.mjs`
 invocation** §6's preflight loop already settled — once that loop reached `ok:true`, **reuse the JSON
 it printed to stdout** (captured in Step B; the temp `--out` file is gone by then). The invocation,
 for reference and for the preflight loop: write a single JSON input
@@ -212,8 +212,8 @@ The CLI encodes the entire decision and returns `{ ok, error, error_kind, error_
   `new_*`); an `accepted` chain additionally requires **exact transition match** (no missing/extra/
   duplicate; empty never matches), **all transitions accepted**, and **every member finding accepted
   or downgraded**;
-- `Critique` **only if** the chain is accepted, **every** member is `accepted` (a `downgraded` member
-  caps it below Critique), `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
+- `Critical` **only if** the chain is accepted, **every** member is `accepted` (a `downgraded` member
+  caps it below Critical), `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
 - a chain with **no verdict** stays **`not-requested`** (not rejected) and is added to `gaps`.
 
 By the time you consume the result here, §6's preflight loop has already driven `applyVerdicts` to
@@ -295,8 +295,8 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
   - `accepted` / `downgraded` → **`final_severity`** + `final_confidence`;
   - `not-requested` → `provisional_severity` + `confidence` (unverified);
   - `rejected` → it has **no** final severity by design; show `provisional_severity` struck through /
-    labelled **« réfutée »** (do not present it as a live finding). A rejected finding also appears in
-    the annex (§ « Findings écartés ») with its reason.
+    labelled **“refuted”** (do not present it as a live finding). A rejected finding also appears in
+    the annex (§ “Dismissed findings”) with its reason.
 - **Coverage**: analyzed vs skipped + reason. This is where **everything that was NOT a clean
   refutation** is recorded with its cause, sourced from `applyVerdicts`'s **`gaps[]`** plus the
   decisions whose `outcome` is `not-requested`:
@@ -306,7 +306,7 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
     `expected_targets`, and the original failure (e.g. "transition mismatch", "unexpected target") —
     because the neutralized `{status:error, verdicts:[]}` response no longer carries it;
   - a chain left **`not-requested`** because a **member was unverified** (its `gaps[]` reason names the member).
-- **Annexe « Findings écartés »**: **only** items with **`outcome: "rejected"`** in `decisions`
+- **Annex “Dismissed findings”**: **only** items with **`outcome: "rejected"`** in `decisions`
   (a real refutation), with their `reason` — a verifier `rejected` finding/chain, or a chain implicitly
   rejected because a **member was rejected** (refuted). Items that are merely `not-requested` (unverified
   member, neutralized batch) belong in **Coverage**, not here.
@@ -320,8 +320,8 @@ SVG charts computed from a **non-sensitive `summary`** you build — counts and 
 only, **never** secrets, code excerpts, or `file:line`. The `summary` shape (validated by
 `report-summary.schema.json`; `additionalProperties:false`, so build it exactly):
 - `meta`: `{ target, stack, date, verdict ("unauth-rce"|"no-critique"), proof_level (string|null) }`.
-- `severity_counts`: `{ Critique, Haute, Moyenne, Basse, Info }` — **`Critique` = number of accepted
-  Critique chains**; the other four = findings by **reported** severity (the same selection the
+- `severity_counts`: `{ Critical, High, Medium, Low, Info }` — **`Critical` = number of accepted
+  Critical chains**; the other four = findings by **reported** severity (the same selection the
   Markdown uses: `final_severity` for accepted/downgraded, `provisional_severity` for not-requested;
   **rejected findings excluded**).
 - `finding_status_counts`: `{ accepted, downgraded, rejected, not-requested }` — findings per
@@ -339,11 +339,11 @@ only, **never** secrets, code excerpts, or `file:line`. The `summary` shape (val
   absence. State this explicitly in the report.
 
 ## Severity
-- **Critique**: unauthenticated RCE chain (or total compromise), strong static proof end to end,
+- **Critical**: unauthenticated RCE chain (or total compromise), strong static proof end to end,
   verifier-accepted (assigned in phase 6 only).
-- **Haute**: major impact needing auth or a notable precondition.
-- **Moyenne**: limited impact / notable conditions.
-- **Basse**: minor impact or doubtful exploitability.
+- **High**: major impact needing auth or a notable precondition.
+- **Medium**: limited impact / notable conditions.
+- **Low**: minor impact or doubtful exploitability.
 - **Info**: hardening note, no direct vulnerability.
 
-Confidence: `preuve statique forte` · `probable` · `à vérifier`.
+Confidence: `strong static proof` · `likely` · `to verify`.

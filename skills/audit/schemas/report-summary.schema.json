@@ -21,12 +21,12 @@
     "severity_counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["Critique", "Haute", "Moyenne", "Basse", "Info"],
+      "required": ["Critical", "High", "Medium", "Low", "Info"],
       "properties": {
-        "Critique": { "type": "integer", "minimum": 0 },
-        "Haute": { "type": "integer", "minimum": 0 },
-        "Moyenne": { "type": "integer", "minimum": 0 },
-        "Basse": { "type": "integer", "minimum": 0 },
+        "Critical": { "type": "integer", "minimum": 0 },
+        "High": { "type": "integer", "minimum": 0 },
+        "Medium": { "type": "integer", "minimum": 0 },
+        "Low": { "type": "integer", "minimum": 0 },
         "Info": { "type": "integer", "minimum": 0 }
       }
     },
@@ -58,7 +58,7 @@
         "required": ["id", "severity", "entry_auth", "final_impact", "nodes", "edges"],
         "properties": {
           "id": { "type": "string", "pattern": "^CHAIN-[0-9]+$" },
-          "severity": { "enum": ["Critique", "Haute", "Moyenne", "Basse", "Info"] },
+          "severity": { "enum": ["Critical", "High", "Medium", "Low", "Info"] },
           "entry_auth": { "enum": ["unauthenticated", "authenticated", "admin"] },
           "final_impact": { "enum": ["unauth-rce", "other"] },
           "nodes": {

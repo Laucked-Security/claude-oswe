@@ -17,13 +17,13 @@
     "sanitizers": { "type": "array", "items": { "$ref": "#/$defs/sanitizer" } },
     "prerequisites": { "type": "array", "items": { "type": "string" } },
     "evidence": { "type": "array", "items": { "$ref": "#/$defs/fileline" } },
-    "provisional_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
-    "confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] },
+    "provisional_severity": { "enum": ["High", "Medium", "Low", "Info"] },
+    "confidence": { "enum": ["strong static proof", "likely", "to verify"] },
     "verification_status": { "enum": ["not-requested", "accepted", "downgraded", "rejected"] },
     "partitions": { "type": "array", "items": { "type": "string" } },
     "source_finding_ids": { "type": "array", "items": { "type": "string" } },
-    "final_severity": { "enum": ["Haute", "Moyenne", "Basse", "Info"] },
-    "final_confidence": { "enum": ["preuve statique forte", "probable", "à vérifier"] }
+    "final_severity": { "enum": ["High", "Medium", "Low", "Info"] },
+    "final_confidence": { "enum": ["strong static proof", "likely", "to verify"] }
   },
   "$defs": {
     "fileline": {

@@ -5,11 +5,11 @@ import { reportSummary } from "../validators.mjs";
 const ok = (data) => Boolean(reportSummary(data));
 
 const validSummary = (overrides = {}) => ({
-  meta: { target: "t", stack: "s", date: "2026-06-16 10:15", verdict: "unauth-rce", proof_level: "preuve statique forte" },
-  severity_counts: { Critique: 1, Haute: 2, Moyenne: 0, Basse: 0, Info: 0 },
+  meta: { target: "t", stack: "s", date: "2026-06-16 10:15", verdict: "unauth-rce", proof_level: "strong static proof" },
+  severity_counts: { Critical: 1, High: 2, Medium: 0, Low: 0, Info: 0 },
   finding_status_counts: { accepted: 2, downgraded: 0, rejected: 0, "not-requested": 0 },
   coverage: { analyzed: 2, skipped: 0 },
-  chains: [{ id: "CHAIN-1", severity: "Critique", entry_auth: "unauthenticated", final_impact: "unauth-rce",
+  chains: [{ id: "CHAIN-1", severity: "Critical", entry_auth: "unauthenticated", final_impact: "unauth-rce",
              nodes: ["entry", "OSWE-1", "OSWE-2", "RCE"],
              edges: [{ from: "entry", to: "OSWE-1", verdict: "accepted" }, { from: "OSWE-1", to: "OSWE-2", verdict: "accepted" }] }],
   ...overrides
@@ -20,7 +20,7 @@ test("report-summary: valid summary passes", () => {
 });
 test("report-summary: empty chains + zero counts passes (safe report)", () => {
   assert.equal(ok(validSummary({
-    severity_counts: { Critique: 0, Haute: 0, Moyenne: 0, Basse: 0, Info: 0 },
+    severity_counts: { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 },
     chains: []
   })), true);
 });
