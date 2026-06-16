@@ -39,3 +39,36 @@ test("malicious MD is escaped, never live tags", () => {
   assert.equal(h.includes("&lt;script&gt;"), true);
   assert.equal(h.includes("&lt;img onerror=x&gt;"), true);
 });
+
+import { severityDonut, coverageBar, statusBar, chainDiagram } from "../render-html.mjs";
+
+const SEV = { Critique: 1, Haute: 2, Moyenne: 0, Basse: 0, Info: 0 };
+const CHAINS = [{ id: "CHAIN-1", severity: "Critique", entry_auth: "unauthenticated", final_impact: "unauth-rce",
+                  nodes: ["entry", "OSWE-1", "OSWE-2", "RCE"],
+                  edges: [{ from: "entry", to: "OSWE-1", verdict: "accepted" }, { from: "OSWE-1", to: "OSWE-2", verdict: "accepted" }] }];
+
+test("severity donut reflects counts and total, no NaN", () => {
+  const svg = severityDonut(SEV);
+  assert.equal(svg.includes("Critique: 1"), true);
+  assert.equal(svg.includes("Haute: 2"), true);
+  assert.equal(svg.includes(">3<"), true);          // total in the center
+  assert.equal(/NaN/.test(svg), false);
+});
+test("empty donut: grey ring + 'No findings', no NaN", () => {
+  const svg = severityDonut({ Critique: 0, Haute: 0, Moyenne: 0, Basse: 0, Info: 0 });
+  assert.equal(svg.includes("No findings"), true);
+  assert.equal(svg.includes("#dddddd"), true);
+  assert.equal(/NaN/.test(svg), false);
+});
+test("chain diagram: node/edge counts match; zero chains -> note", () => {
+  const svg = chainDiagram(CHAINS);
+  assert.equal((svg.match(/<rect /g) || []).length, 4);    // 4 nodes
+  assert.equal((svg.match(/<polygon /g) || []).length, 2); // 2 edge arrowheads
+  assert.equal(chainDiagram([]).includes("No exploit chains"), true);
+});
+test("coverage and status bars reflect counts, no NaN on empty", () => {
+  assert.equal(coverageBar({ analyzed: 2, skipped: 0 }).includes("analyzed 2"), true);
+  assert.equal(statusBar({ accepted: 2, downgraded: 0, rejected: 0, "not-requested": 0 }).includes("accepted 2"), true);
+  assert.equal(/NaN/.test(statusBar({ accepted: 0, downgraded: 0, rejected: 0, "not-requested": 0 })), false);
+  assert.equal(/NaN/.test(coverageBar({ analyzed: 0, skipped: 0 })), false);
+});
