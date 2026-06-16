@@ -23,7 +23,8 @@ Created:
 | Path | Responsibility |
 |------|----------------|
 | `skills/audit/schemas/report-summary.schema.json` | Strict schema for the non-sensitive summary (counts, closed-set graph labels). |
-| `skills/audit/scripts/render-html.mjs` | Zero-dep helper: escaping, MD→HTML converter, 4 SVG charts, document assembly, CLI (atomic write). |
+| `skills/audit/scripts/render-html.mjs` | Zero-dep helper: escaping, MD→HTML converter, 4 SVG charts, graph-coherence check, document assembly, CLI (atomic write). |
+| `skills/audit/scripts/test/report-summary.test.mjs` | Schema tests (import `reportSummary` from the generated `validators.mjs`). |
 | `skills/audit/scripts/test/render-html.test.mjs` | Unit + CLI tests for the helper. |
 
 Modified:
@@ -32,9 +33,11 @@ Modified:
 |------|--------|
 | `skills/audit/scripts/build-validators.mjs` | Add `report-summary.schema.json → reportSummary` to the export map. |
 | `skills/audit/scripts/validators.mjs` | **Generated** — regenerated to add the `reportSummary` export (do not hand-edit). |
-| `skills/audit/scripts/validate-output.mjs` | Add the `report-summary` kind (lets the schema be validated via `validate()` and gives an orchestrator CLI). |
-| `skills/audit/scripts/test/validate-output.test.mjs` | Add `report-summary` schema tests. |
 | `skills/audit/SKILL.md` | Phase 7: build summary + call `render-html.mjs`; never gate the audit. Report-format "HTML export" note. |
+
+> **Scope note:** the existing `validate-output.mjs` / `validate-output.test.mjs` are **not** touched
+> (consistent with "no changes to `validate-*` helpers"). `render-html.mjs` imports the generated
+> `reportSummary` validator **directly** from `validators.mjs`; schema tests do the same.
 | `README.md`, `.claude-plugin/plugin.json` | Mention the HTML report. |
 
 ---
@@ -44,9 +47,12 @@ Modified:
 **Files:**
 - Create: `skills/audit/schemas/report-summary.schema.json`
 - Modify: `skills/audit/scripts/build-validators.mjs`
-- Modify: `skills/audit/scripts/validate-output.mjs`
 - Generated: `skills/audit/scripts/validators.mjs`
-- Test: `skills/audit/scripts/test/validate-output.test.mjs`
+- Test: `skills/audit/scripts/test/report-summary.test.mjs`
+
+> **Do not modify `validate-output.mjs`** (out-of-scope: no changes to `validate-*` helpers). The new
+> schema is consumed by importing `reportSummary` directly from the generated `validators.mjs` — both
+> in the tests here and in `render-html.mjs` (Task 4).
 
 - [ ] **Step 1: Create the schema**
 
@@ -118,10 +124,13 @@ Create `skills/audit/schemas/report-summary.schema.json`:
           "final_impact": { "enum": ["unauth-rce", "other"] },
           "nodes": {
             "type": "array",
+            "minItems": 2,
+            "uniqueItems": true,
             "items": { "type": "string", "pattern": "^(entry|RCE|OSWE-[0-9]+)$" }
           },
           "edges": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -169,23 +178,7 @@ const EXPORT_NAME = {
 };
 ```
 
-- [ ] **Step 3: Add the kind to validate-output**
-
-In `skills/audit/scripts/validate-output.mjs`, find the `KIND_TO_EXPORT` map and add the `report-summary` line:
-
-```js
-const KIND_TO_EXPORT = {
-  "analyzer-response": "analyzerResponse",
-  "verifier-response": "verifierResponse",
-  "finding": "finding",
-  "final-finding": "finalFinding",
-  "chain": "chain",
-  "verdict": "verdict",
-  "report-summary": "reportSummary"
-};
-```
-
-- [ ] **Step 4: Regenerate the standalone validators**
+- [ ] **Step 3: Regenerate the standalone validators**
 
 Run (ajv is a dev dependency, already installed in `scripts/node_modules`):
 ```bash
@@ -193,11 +186,18 @@ Run (ajv is a dev dependency, already installed in `scripts/node_modules`):
 ```
 Expected: prints `validators.mjs generated (self-contained): … report-summary.schema.json` and the file now exports `reportSummary`. Confirm zero residual require/import (the script asserts this itself).
 
-- [ ] **Step 5: Write the schema tests**
+- [ ] **Step 4: Write the schema tests (dedicated file, imports the generated validator directly)**
 
-In `skills/audit/scripts/test/validate-output.test.mjs`, append (the file already imports `validate` and `test`/`assert`):
+Create `skills/audit/scripts/test/report-summary.test.mjs` (it imports `reportSummary` straight from
+`validators.mjs` — `validate-output.mjs` is intentionally untouched):
 
 ```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { reportSummary } from "../validators.mjs";
+
+const ok = (data) => Boolean(reportSummary(data));
+
 const validSummary = (overrides = {}) => ({
   meta: { target: "t", stack: "s", date: "2026-06-16 10:15", verdict: "unauth-rce", proof_level: "preuve statique forte" },
   severity_counts: { Critique: 1, Haute: 2, Moyenne: 0, Basse: 0, Info: 0 },
@@ -210,54 +210,73 @@ const validSummary = (overrides = {}) => ({
 });
 
 test("report-summary: valid summary passes", () => {
-  assert.equal(validate("report-summary", validSummary()).valid, true);
+  assert.equal(ok(validSummary()), true);
 });
 test("report-summary: empty chains + zero counts passes (safe report)", () => {
-  const r = validate("report-summary", validSummary({
+  assert.equal(ok(validSummary({
     severity_counts: { Critique: 0, Haute: 0, Moyenne: 0, Basse: 0, Info: 0 },
     chains: []
-  }));
-  assert.equal(r.valid, true, JSON.stringify(r.errors));
+  })), true);
 });
 test("report-summary: free-text node label is rejected", () => {
   const s = validSummary();
-  s.chains[0].nodes = ["<img onerror=x>"];
-  assert.equal(validate("report-summary", s).valid, false);
+  s.chains[0].nodes = ["<img onerror=x>", "RCE"];
+  assert.equal(ok(s), false);
+});
+test("report-summary: fewer than 2 nodes is rejected (minItems)", () => {
+  const s = validSummary();
+  s.chains[0].nodes = ["entry"];
+  assert.equal(ok(s), false);
+});
+test("report-summary: duplicate nodes are rejected (uniqueItems)", () => {
+  const s = validSummary();
+  s.chains[0].nodes = ["entry", "entry"];
+  assert.equal(ok(s), false);
+});
+test("report-summary: empty edges is rejected (minItems)", () => {
+  const s = validSummary();
+  s.chains[0].edges = [];
+  assert.equal(ok(s), false);
 });
 test("report-summary: final_impact outside enum is rejected", () => {
   const s = validSummary();
   s.chains[0].final_impact = "rce";
-  assert.equal(validate("report-summary", s).valid, false);
+  assert.equal(ok(s), false);
 });
 test("report-summary: additionalProperties is rejected", () => {
   const s = validSummary();
   s.extra = 1;
-  assert.equal(validate("report-summary", s).valid, false);
+  assert.equal(ok(s), false);
 });
 test("report-summary: missing a severity key is rejected", () => {
   const s = validSummary();
   delete s.severity_counts.Info;
-  assert.equal(validate("report-summary", s).valid, false);
+  assert.equal(ok(s), false);
 });
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 5: Run the tests**
 
 Run: `( cd skills/audit/scripts && node --test )`
-Expected: all existing tests still pass **plus** the 6 new `report-summary` tests; `# fail 0`.
+Expected: all existing tests still pass **plus** the 9 new `report-summary` tests; `# fail 0`.
 
-- [ ] **Step 7: Confirm the validator is still dependency-free**
+- [ ] **Step 6: Confirm the validator is still dependency-free**
 
-Run (temporarily hide node_modules and load the generated file):
+Run (temporarily hide node_modules and load the generated file). A `trap` restores `node_modules`
+**and the subshell exits with node's status**, so a load failure cannot be masked by the final `mv`:
 ```bash
-( cd skills/audit/scripts && mv node_modules .nm_hidden && node -e "import('./validators.mjs').then(v=>{if(typeof v.reportSummary!=='function')throw new Error('no reportSummary export');console.log('reportSummary loads with NO node_modules OK')}).catch(e=>{console.error(e);process.exit(1)})"; mv .nm_hidden node_modules )
+( cd skills/audit/scripts \
+  && trap 'mv .nm_hidden node_modules 2>/dev/null' EXIT \
+  && mv node_modules .nm_hidden \
+  && node -e "import('./validators.mjs').then(v=>{if(typeof v.reportSummary!=='function'){console.error('no reportSummary export');process.exit(1)}console.log('reportSummary loads with NO node_modules OK')}).catch(e=>{console.error(e);process.exit(1)})" )
+echo "exit=$?"
 ```
-Expected: `reportSummary loads with NO node_modules OK`. (The `mv` back always runs.)
+Expected: `reportSummary loads with NO node_modules OK` then `exit=0`. (On failure the line prints and `exit=1`; `node_modules` is restored either way by the trap.)
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add skills/audit/schemas/report-summary.schema.json skills/audit/scripts/build-validators.mjs skills/audit/scripts/validate-output.mjs skills/audit/scripts/validators.mjs skills/audit/scripts/test/validate-output.test.mjs
+git add skills/audit/schemas/report-summary.schema.json skills/audit/scripts/build-validators.mjs skills/audit/scripts/validators.mjs skills/audit/scripts/test/report-summary.test.mjs
 git commit -m "feat(oswe): add report-summary schema + reportSummary validator export"
 ```
 
@@ -623,7 +642,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSy
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderReport } from "../render-html.mjs";
+import { renderReport, graphErrors } from "../render-html.mjs";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "render-html.mjs");
 
@@ -665,6 +684,17 @@ test("renderReport: deterministic", () => {
   const b = renderReport({ md: "# A\n\n- x", summary: fullSummary() });
   assert.equal(a, b);
 });
+test("graphErrors: coherent graph -> no errors", () => {
+  assert.equal(graphErrors(fullSummary()).length, 0);
+  assert.equal(graphErrors({ chains: [] }).length, 0);
+});
+test("graphErrors: edge endpoint not in nodes -> error", () => {
+  const s = fullSummary();
+  s.chains[0].edges.push({ from: "OSWE-2", to: "OSWE-9", verdict: "accepted" }); // OSWE-9 not a node
+  const errs = graphErrors(s);
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].includes("OSWE-9"), true);
+});
 
 function mkdir() { return mkdtempSync(join(tmpdir(), "oswe-html-")); }
 
@@ -693,6 +723,21 @@ test("CLI: invalid summary -> exit 1, no html, no tmp leftover", () => {
   assert.equal(readdirSync(d).some((f) => f.includes(".tmp-")), false);
   rmSync(d, { recursive: true, force: true });
 });
+test("CLI: incoherent chain graph -> exit 1, no html, no tmp leftover", () => {
+  const d = mkdir();
+  const md = join(d, "r.md"), sum = join(d, "s.json"), out = join(d, "r.html");
+  writeFileSync(md, "# Report");
+  const bad = fullSummary();
+  bad.chains[0].edges.push({ from: "OSWE-2", to: "OSWE-9", verdict: "accepted" }); // schema-valid, graph-incoherent
+  writeFileSync(sum, JSON.stringify(bad));
+  let code = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--md", md, "--summary", sum, "--out", out], { stdio: "pipe" }); }
+  catch (e) { code = e.status; }
+  assert.equal(code, 1);
+  assert.equal(existsSync(out), false);
+  assert.equal(readdirSync(d).some((f) => f.includes(".tmp-")), false);
+  rmSync(d, { recursive: true, force: true });
+});
 test("CLI: missing flags / nonexistent files -> exit 2", () => {
   const d = mkdir();
   let code = 0;
@@ -704,6 +749,21 @@ test("CLI: missing flags / nonexistent files -> exit 2", () => {
   try { execFileSync(process.execPath, [SCRIPT, "--md", join(d, "x.md")], { stdio: "pipe" }); }
   catch (e) { code2 = e.status; }
   assert.equal(code2, 2);
+  rmSync(d, { recursive: true, force: true });
+});
+test("CLI: unwritable --out (parent dir missing) -> exit 2, no tmp leftover", () => {
+  const d = mkdir();
+  const md = join(d, "r.md"), sum = join(d, "s.json");
+  const out = join(d, "no-such-dir", "r.html"); // parent does not exist -> writeFileSync ENOENT
+  writeFileSync(md, "# Report");
+  writeFileSync(sum, JSON.stringify(fullSummary()));
+  let code = 0;
+  try { execFileSync(process.execPath, [SCRIPT, "--md", md, "--summary", sum, "--out", out], { stdio: "pipe" }); }
+  catch (e) { code = e.status; }
+  assert.equal(code, 2);
+  assert.equal(existsSync(out), false);
+  // the .tmp-<pid> sibling lives in the (missing) dir, so nothing can leak into d
+  assert.equal(readdirSync(d).some((f) => f.includes(".tmp-")), false);
   rmSync(d, { recursive: true, force: true });
 });
 ```
@@ -749,6 +809,22 @@ del{color:#999}
 .muted{color:#777}
 @media print{body{margin:0.6rem}.chain,h2{page-break-inside:avoid}h2{page-break-before:always}h1{page-break-before:avoid}}
 `;
+
+// Runtime graph coherence the schema cannot express: every edge endpoint must be one of that chain's
+// declared nodes. The schema guarantees label PATTERNS and minItems/uniqueItems; this guarantees the
+// edges actually connect declared nodes (otherwise the diagram would silently drop edges). Returns a
+// list of human-readable problems (empty = coherent).
+export function graphErrors(summary) {
+  const errs = [];
+  for (const ch of summary.chains) {
+    const set = new Set(ch.nodes);
+    for (const e of ch.edges) {
+      if (!set.has(e.from)) errs.push(`${ch.id}: edge.from "${e.from}" not in nodes`);
+      if (!set.has(e.to)) errs.push(`${ch.id}: edge.to "${e.to}" not in nodes`);
+    }
+  }
+  return errs;
+}
 
 export function renderReport({ md, summary }) {
   const m = summary.meta;
@@ -804,6 +880,11 @@ if (isMain()) {
   if (!validators.reportSummary(summary)) {
     process.stderr.write("render-html: invalid summary: " + JSON.stringify(validators.reportSummary.errors || []) + "\n");
     process.exit(1);
+  }
+  const gErrs = graphErrors(summary);
+  if (gErrs.length) {
+    process.stderr.write("render-html: incoherent chain graph: " + gErrs.join("; ") + "\n");
+    process.exit(1);   // orchestrator built an edge to an undeclared node -> no HTML
   }
   let html;
   try { html = renderReport({ md, summary }); } catch (e) { fail2("render failed: " + e.message); }
@@ -1002,15 +1083,20 @@ git commit -m "docs(oswe): document the visual HTML report output"
 - [ ] **Step 1: Full script regression**
 
 Run: `( cd skills/audit/scripts && node --test )`
-Expected: `# fail 0`. This is the MVP 88 + the new `report-summary` (6) + `render-html` tests.
+Expected: `# fail 0`. This is the MVP 88 + the new `report-summary` (9) + `render-html` tests.
 
-- [ ] **Step 2: Validator still dependency-free (with the new export)**
+- [ ] **Step 2: Validator + renderer still dependency-free (with the new export)**
 
-Run:
+Run (the `trap` restores `node_modules` **and** the subshell exits with node's status, so an import
+failure can never be masked by the restoring `mv`):
 ```bash
-( cd skills/audit/scripts && mv node_modules .nm_hidden && node -e "import('./render-html.mjs').then(()=>import('./validators.mjs')).then(v=>{if(typeof v.reportSummary!=='function')throw new Error('no reportSummary');console.log('render-html + validators load with NO node_modules OK')}).catch(e=>{console.error(e);process.exit(1)})"; mv .nm_hidden node_modules )
+( cd skills/audit/scripts \
+  && trap 'mv .nm_hidden node_modules 2>/dev/null' EXIT \
+  && mv node_modules .nm_hidden \
+  && node -e "import('./render-html.mjs').then(()=>import('./validators.mjs')).then(v=>{if(typeof v.reportSummary!=='function'){console.error('no reportSummary');process.exit(1)}console.log('render-html + validators load with NO node_modules OK')}).catch(e=>{console.error(e);process.exit(1)})" )
+echo "exit=$?"
 ```
-Expected: `render-html + validators load with NO node_modules OK`.
+Expected: `render-html + validators load with NO node_modules OK` then `exit=0`.
 
 - [ ] **Step 3: Plugin validates strictly**
 
@@ -1041,36 +1127,45 @@ rm -rf .oswe/tmp
 ```
 Expected: `exit=0`; the CSP line count is `1`; the active-tag count is `0`. (`.oswe/tmp` is gitignored and purged.)
 
-- [ ] **Step 5: Manual visual check (user-run, like the Phase-2 E2E gate)**
+- [ ] **Step 5: MANDATORY merge gate — real audits actually emit `.md` + `.html` (user-run)**
 
-In the user's interactive session, run `/oswe:audit test-fixtures/python/vulnerable` and
-`/oswe:audit test-fixtures/python/safe`, then open the two produced `.html` files in a browser. The
-controller confirms:
-- vulnerable: severity donut shows Critique=1/Haute=2; the chain diagram shows
-  `entry (unauth) → OSWE-1 → OSWE-2 → RCE` (RCE red), coverage/status bars populated; `Ctrl+P` preview
-  is clean (page breaks before sections).
-- safe: empty-state grey donut + "No findings", "No exploit chains", coverage bar populated.
+The CLI tests prove the renderer in isolation; they do **not** prove the SKILL phase-7 wiring (Task 5)
+actually produces both files from a real audit. That integration is this feature's main risk, so two
+real audits are a **hard merge gate** (like the Phase-2 E2E gate). In the user's interactive session
+(nested `claude -p` audits bill the separate API credit balance), run **both**:
 
-This is a convenience check, not a merge blocker (the `.md` E2E already gates correctness); record the
-two verdicts.
+| Run | Command | Must hold |
+|---|---|---|
+| Python vuln | `/oswe:audit test-fixtures/python/vulnerable` | both `oswe-report-*.md` **and** the same-basename `oswe-report-*.html` are written; the `.html` opens with a severity donut (Critique=1/Haute=2), the chain diagram `entry (unauth) → OSWE-1 → OSWE-2 → RCE` (RCE red), populated coverage/status bars; `Ctrl+P` preview is clean. |
+| Python safe | `/oswe:audit test-fixtures/python/safe` | both files written; the `.html` shows the **empty-state** grey donut + "No findings", "No exploit chains", a populated coverage bar. |
+
+The controller verifies, for each run, that the `.html` exists next to the `.md` (same basename) and
+that the charts match the audit. **Both must pass before merge.** If an audit produced the `.md` but no
+`.html`, or the HTML failure aborted the audit, that is a Task-5 bug to fix before merging. (The `.md`
+content itself is already gated by the existing Phase-2 E2E; this gate is specifically about the HTML
+emission.)
 
 - [ ] **Step 6: Finish the branch**
 
-Once Steps 1–4 are green (and Step 5 reviewed), use `superpowers:finishing-a-development-branch` to
-merge `feat/oswe-html-report` into `master` (or open a PR per user preference).
+Once Steps 1–4 are green **and** Step 5's two-audit merge gate has passed, use
+`superpowers:finishing-a-development-branch` to merge `feat/oswe-html-report` into `master` (or open a
+PR per user preference).
 
 ---
 
 ## Acceptance criteria (from spec §11)
 
 - [ ] `render-html.mjs` exists, zero runtime deps, atomic write, exit-code contract (0/1/2) per spec §3.1.
-- [ ] `report-summary.schema.json` added; `build-validators.mjs` exports `reportSummary`; `validators.mjs`
-      regenerated (7 validators) and still loads with no `node_modules`.
+- [ ] `report-summary.schema.json` added (incl. `minItems`/`uniqueItems` on chain nodes/edges);
+      `build-validators.mjs` exports `reportSummary`; `validators.mjs` regenerated (7 validators) and
+      still loads with no `node_modules`. `validate-output.mjs` is **untouched**.
+- [ ] `render-html.mjs` runs a runtime graph-coherence check (every edge endpoint is a declared node);
+      an incoherent (but schema-valid) summary → exit 1, no HTML.
 - [ ] SKILL phase 7 emits the `.html` alongside the `.md`; HTML failure never aborts the audit.
 - [ ] All `render-html`/`report-summary` tests pass; MVP regression still green; `claude plugin
       validate . --strict` passes.
-- [ ] Manual check: vulnerable-fixture `.html` (donut + chain diagram + bars; clean print) and
-      safe-fixture `.html` (empty-state donut, "No exploit chains").
+- [ ] **Mandatory merge gate:** the two real audits (Python vuln + safe) each emit `.md` **and** the
+      same-basename `.html`, with charts matching the audit (Task 7 Step 5).
 - [ ] README + manifest mention the HTML report.
 
 ## Out of scope (per spec §10)

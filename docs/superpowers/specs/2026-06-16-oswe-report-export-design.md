@@ -40,16 +40,23 @@ node render-html.mjs --md <report.md> --summary <summary.json> --out <report.htm
 ```
 
 - Reads the redaction-safe `.md` and the non-sensitive `summary.json`.
-- **Validates the summary** (kind `report-summary`, via the generated `./validators.mjs`) before
-  rendering. An invalid summary is an **orchestrator-input bug** → exit 1, **no HTML written**.
+- **Validates the summary** by importing the generated `reportSummary` validator **directly** from
+  `./validators.mjs` (the `validate-output.mjs` helper is intentionally **not** modified — staying
+  within the "no changes to `validate-*` helpers" scope). An invalid summary is an
+  **orchestrator-input bug** → exit 1, **no HTML written**.
+- **Runtime graph-coherence check** (after schema validation): the schema fixes label *patterns* plus
+  `minItems`/`uniqueItems`, but cannot assert that each `edges[].from`/`to` is one of that chain's
+  declared `nodes`. The helper checks this; any edge endpoint missing from `nodes` → exit 1, **no HTML
+  written** (otherwise the diagram would silently drop edges).
 - Renders a single self-contained HTML document:
   - **Body** = Markdown→HTML conversion of the `.md` (the converter scope is fixed; see §4).
   - **Charts** = four inline SVGs computed from the summary (see §5).
 - **Atomic write (adjustment 1).** Writes to `${out}.tmp-<pid>` then `fs.renameSync` to `${out}`.
   A crash mid-render never leaves a partial `report.html`; the `.tmp-<pid>` file is removed on any
   error path and is never renamed.
-- Exit codes: `0` success; `1` invalid `--summary` (schema-invalid → no output); `2` IO/usage
-  (missing/unreadable `--md` or `--summary`, missing flags, unwritable `--out` target dir).
+- Exit codes: `0` success; `1` invalid `--summary` (schema-invalid **or** graph-incoherent → no
+  output); `2` IO/usage (missing/unreadable `--md` or `--summary`, missing flags, unwritable `--out`
+  target dir — e.g. a missing parent directory).
 
 ### 3.2 New schema: `skills/audit/schemas/report-summary.schema.json`
 
@@ -218,9 +225,16 @@ explicitly and must mirror how the Markdown report presents the same numbers:
   labels deliberately do **not** include `vuln_class` or any title — the body MD already carries the
   human-readable class/title; keeping nodes to this closed set guarantees the summary cannot leak
   repo text through the diagram.)
+- **Graph cardinality:** `nodes` has `minItems:2` and `uniqueItems:true` (a chain has at least `entry`
+  and `RCE`, with no duplicates); `edges` has `minItems:1`. This plus the runtime coherence check
+  (§3.1 — every edge endpoint must be a declared node) rules out an empty/dangling diagram that would
+  pass pattern checks but render incoherently.
 - `additionalProperties:false` throughout, so any orchestrator mistake is caught as exit 1.
 
-## 8. Testing (`skills/audit/scripts/test/render-html.test.mjs`, added to `node --test`)
+## 8. Testing (`test/render-html.test.mjs` + `test/report-summary.test.mjs`, added to `node --test`)
+
+Schema tests live in `test/report-summary.test.mjs` (importing `reportSummary` directly from
+`validators.mjs`); renderer/CLI tests live in `test/render-html.test.mjs`. Coverage:
 
 - **MD→HTML constructs:** each supported construct (headings, table, bold, italic, inline code,
   blockquote, list, hr, strikethrough) renders to the expected tag(s). Includes a `**bold**` /
@@ -238,6 +252,10 @@ explicitly and must mirror how the Markdown report presents the same numbers:
   or `edges[].from/to` outside {`entry`,`RCE`,`^OSWE-[0-9]+$`} (e.g. `"<img onerror=x>"` or a free
   title) is **schema-rejected → exit 1, no `report.html` written**. This is the path that actually
   guards diagram labels; escaping is the second layer.
+- **Graph cardinality + coherence:** schema tests reject `<2` nodes, duplicate nodes, and empty
+  `edges`; a `graphErrors()` unit test flags an edge endpoint absent from `nodes`; and a CLI test
+  proves a **schema-valid but graph-incoherent** summary (edge to an undeclared `OSWE-9`) → **exit 1,
+  no `report.html`, no `.tmp-<pid>` leftover**.
 - **Charts from summary:** a given summary yields SVG carrying the right counts/segments; the chain
   diagram’s node/edge counts equal the summary’s; coverage/status bars reflect their counts.
 - **Empty states (adjustment 4):** all-zero `severity_counts` → grey empty-ring donut, **no NaN /
@@ -251,10 +269,11 @@ explicitly and must mirror how the Markdown report presents the same numbers:
   `Content-Security-Policy` meta with `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none';
   form-action 'none'`.
 - **CLI behaviour (adjustment 6):**
-  - invalid `--summary` (schema-invalid) → **exit 1** and **no final `report.html`** (atomic write +
-    early validation guarantee this);
-  - missing `--md`/`--summary` flag, nonexistent `--md`/`--summary` file, or unwritable `--out`
-    directory → **exit 2**;
+  - invalid `--summary` (schema-invalid **or** graph-incoherent) → **exit 1** and **no final
+    `report.html`** (atomic write + early validation guarantee this);
+  - missing `--md`/`--summary` flag, or nonexistent `--md`/`--summary` file → **exit 2**;
+  - **unwritable `--out`** (a test points `--out` at a path whose parent directory does not exist, so
+    `writeFileSync` throws ENOENT) → **exit 2**, no output;
   - on every error path, any `.tmp-<pid>` scratch file is removed (no leftover partial output).
 - **Determinism:** same `--md` + `--summary` → **byte-identical** `.html`.
 
@@ -283,6 +302,10 @@ The existing MVP regression (currently 88 tests) must still pass; this only adds
   regenerated (7 validators) and still loads with no `node_modules`.
 - SKILL phase 7 emits the `.html` alongside the `.md`; HTML failure never aborts the audit.
 - All §8 tests pass; MVP regression still green; `claude plugin validate . --strict` passes.
-- Manual check: open a vulnerable-fixture `.html` (donut + chain diagram + bars render; Ctrl+P → PDF
-  looks clean) and a safe-fixture `.html` (empty-state donut, “No exploit chains”).
+- **Mandatory merge gate (user-run):** because the CLI tests prove the renderer but not the phase-7
+  wiring, two real audits must pass before merge — `/oswe:audit test-fixtures/python/vulnerable` and
+  `/oswe:audit test-fixtures/python/safe` must **each** write the `.md` **and** the same-basename
+  `.html`, with charts matching the audit (vulnerable: donut Critique=1/Haute=2 + `entry → … → RCE`
+  diagram; safe: empty-state donut + “No exploit chains”) and a clean `Ctrl+P` preview. An audit that
+  emits the `.md` but no `.html` is a phase-7 bug to fix before merge.
 - README/manifest/SKILL updated.
