@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { computeMetrics, parseTruthCsv } from "./metrics.mjs";
+import { readFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 // truth: T1 real(cwe89), T2 not-real, T3 real(cwe78), T4 real(cwe22), T5 not-real
 const truth = parseTruthCsv(
@@ -121,4 +128,29 @@ test("cwe mismatch is non-fatal and only bumps cwe_mismatches", () => {
   const r = computeMetrics(l, truth);
   assert.equal(r.ok, true);
   assert.equal(r.cwe_mismatches, 1);
+});
+
+test("committed sample ledger + truth score consistently", () => {
+  const ledger = JSON.parse(readFileSync(join(HERE, "fixtures/sample-ledger.json"), "utf8"));
+  const truth = parseTruthCsv(readFileSync(join(HERE, "fixtures/sample-truth.csv"), "utf8"));
+  const r = computeMetrics(ledger, truth);
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual([r.hybrid.tp, r.hybrid.fp, r.hybrid.fn, r.hybrid.tn], [2, 0, 1, 2]);
+});
+
+test("CLI writes JSON to --out and a table to --md, exit 0", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "oswe-bench-"));
+  const outJson = join(tmp, "r.json"), outMd = join(tmp, "r.md");
+  const res = spawnSync(process.execPath, [join(HERE, "metrics.mjs"),
+    "--ledger", join(HERE, "fixtures/sample-ledger.json"),
+    "--truth", join(HERE, "fixtures/sample-truth.csv"),
+    "--out", outJson, "--md", outMd], { encoding: "utf8" });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(readFileSync(outJson, "utf8")).ok, true);
+  assert.match(readFileSync(outMd, "utf8"), /hybrid \| 2 \| 0 \| 1 \| 2/);
+});
+
+test("subset manifest is valid JSON with test_ids", () => {
+  const m = JSON.parse(readFileSync(join(HERE, "subset-owasp.json"), "utf8"));
+  assert.ok(Array.isArray(m.test_ids) && m.test_ids.length > 0);
 });

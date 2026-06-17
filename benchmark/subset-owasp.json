@@ -1,0 +1,5 @@
+{
+  "dataset": "owasp-benchmark-1.2",
+  "note": "Declared in-scope OWASP Benchmark test ids. Cases outside this list are recorded as coverage gaps, not scored.",
+  "test_ids": ["BenchmarkTest00001", "BenchmarkTest00002", "BenchmarkTest00003", "BenchmarkTest00004", "BenchmarkTest00005"]
+}

@@ -1,0 +1,12 @@
+{
+  "dataset": "owasp-benchmark-1.2",
+  "subset": "benchmark/subset-owasp.json",
+  "generated": "2026-06-17",
+  "entries": [
+    { "test_id": "BenchmarkTest00001", "semgrep_flagged": true, "oswe_covered": true, "oswe_adjudication": "promoted", "oswe_independent": false, "cwe": 89 },
+    { "test_id": "BenchmarkTest00002", "semgrep_flagged": true, "oswe_covered": true, "oswe_adjudication": "refuted", "oswe_independent": false, "cwe": 89 },
+    { "test_id": "BenchmarkTest00003", "semgrep_flagged": true, "oswe_covered": true, "oswe_adjudication": "refuted", "oswe_independent": false, "cwe": 78 },
+    { "test_id": "BenchmarkTest00004", "semgrep_flagged": false, "oswe_covered": true, "oswe_adjudication": "no-lead", "oswe_independent": true, "cwe": 22 },
+    { "test_id": "BenchmarkTest00005", "semgrep_flagged": false, "oswe_covered": true, "oswe_adjudication": "no-lead", "oswe_independent": false, "cwe": 79 }
+  ]
+}
