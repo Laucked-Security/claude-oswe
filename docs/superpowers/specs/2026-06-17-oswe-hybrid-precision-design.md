@@ -69,8 +69,14 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
 ```
 
 - `--file` input JSON: `{ "projectDir": "<abs>", "sarifPath": "<path under projectDir>" }`.
-- Reads & parses the SARIF 2.1.0 document. For every `runs[].results[]`:
-  - extract `ruleId`, `message.text`, `level`, and the **primary location**
+- Reads & parses the SARIF 2.1.0 document. **Iterate every `run` in `runs[]`** (a SARIF file may hold
+  several runs / several tools); for each run derive its **`tool`** once from
+  `run.tool.driver.name`, **normalized** = lowercased, non-alphanumerics collapsed to `-`, trimmed
+  (e.g. `"Semgrep OSS"` → `"semgrep-oss"`, `"Semgrep"` → `"semgrep"`); a known-alias map folds common
+  variants to a canonical key (`semgrep-oss`→`semgrep`). A run missing `tool.driver.name` → `tool` =
+  `"unknown"`. Then for every `run.results[]` (the result inherits its run's `tool`):
+  - extract `ruleId` (fall back to `rule.id`/`rule.index`→`run.tool.driver.rules[index].id` when
+    `ruleId` is absent), `message.text`, `level`, and the **primary location**
     (`locations[0].physicalLocation.artifactLocation.uri` + `region.startLine`);
   - if present, extract the first `codeFlows[0].threadFlows[0].locations[]` as an ordered
     `codeflow[]` of `{file,line}` (the taint source→…→sink path);
@@ -83,12 +89,15 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
 - Assigns each lead a stable `lead_id` = `L<NNN>` in document order (zero-padded, ≥ 3 digits).
 - Exit `0` ok / `1` malformed SARIF (not parseable / not SARIF 2.1.0) / `2` IO|usage.
 - **Unit-tested**: well-formed SARIF (single-location + codeflow), out-of-scope path dropped,
-  unknown rule → `unknown` hint, malformed JSON → exit 1, missing file → exit 2.
+  unknown rule → `unknown` hint, malformed JSON → exit 1, missing file → exit 2, **tool-name
+  normalization** (`"Semgrep OSS"`→`semgrep`), **multi-run SARIF** (two runs / two tools, each
+  result tagged with its own run's tool), and **`ruleId` absent → resolved via `rule.index`**.
 
 ### 3.2 Rule→vuln_class mapping table
 
-A small committed JSON, `skills/audit/references/sarif-rule-map.json`, keyed by tool
-(`"semgrep"`, …), mapping rule-id **prefixes/globs** to an `oswe` `vuln_class`. Curated for the
+A small committed JSON, `skills/audit/references/sarif-rule-map.json`, keyed by the **normalized
+`tool`** key from §3.1 (`"semgrep"`, …), mapping rule-id **prefixes/globs** to an `oswe` `vuln_class`.
+A tool with no entry (or `tool:"unknown"`) → every lead gets hint `"unknown"`. Curated for the
 Semgrep rule families that fire on the OWASP Benchmark CWE categories (command injection, SQLi,
 path traversal, XSS, weak crypto/hashing, LDAP/XPath injection, trust-boundary, insecure cookie,
 weak randomness). The table is **advisory only** — a wrong/`unknown` hint never forces a verdict; the
@@ -147,27 +156,63 @@ The dedupe key and merge math are **unchanged**. Add to the per-group merge (tre
 New unit tests: an LLM finding and a SAST-lead finding on the same key merge to `origin:"both"` with
 unioned `source_lead_ids`; same-origin merges keep their origin.
 
-### 3.7 Benchmark — `benchmark/metrics.mjs` (deterministic, tested, CI-able)
+### 3.7 Benchmark — `benchmark/metrics.mjs` (deterministic, tested, CI-run)
 
 ```
-node benchmark/metrics.mjs --ledger <ledger.json> --truth <expectedresults.csv> --out <report.json>
+node benchmark/metrics.mjs --ledger <ledger.json> --truth <expectedresults.csv> \
+                           --out <report.json> [--md <report.md>]
 ```
 
-- **Ledger** (produced by a run; see §3.8 for shape) lists, per OWASP Benchmark test case in the
-  declared subset: whether Semgrep flagged it (from the SARIF), and oswe's adjudication
-  (`promoted`/`refuted`/`inconclusive`/`not-analyzed`), plus oswe's independent discoveries.
-- **Truth** = the official `expectedresults-1.2.csv` (`test name, category, real vulnerability, CWE`).
+- **`--out`** always receives the machine-readable JSON result. **`--md`** is **optional**; when given,
+  the human-readable comparison table is written there (the run procedure §3.8 passes
+  `--md benchmark/BENCHMARK.md`). When omitted, no Markdown is written — there is no implicit/default MD
+  path.
+- **Ledger** = the run record consumed here; its exact contract is **§3.7.1** (no longer "see §3.8").
+- **Truth** = the official `expectedresults-1.2.csv` (`# test name, category, real vulnerability, cwe`).
+  The loader skips the leading comment/header line and maps `test name` (e.g. `BenchmarkTest00001`) →
+  `{ real: bool, cwe: int, category: str }`.
 - Computes three confusion matrices vs ground truth, each → `{ tp, fp, tn, fn, precision, recall, fpr, youden }`:
-  1. **`semgrep_raw`** — Semgrep flagged ⇔ predicted-vuln.
-  2. **`oswe_over_semgrep`** — among Semgrep leads, `promoted` ⇔ predicted-vuln, `refuted` ⇔ predicted-safe
-     (`inconclusive`/`not-analyzed` → excluded and counted separately, never silently scored).
-  3. **`hybrid`** — `oswe_over_semgrep` plus oswe's independent discoveries on cases Semgrep missed
-     (recovered false-negatives).
+  1. **`semgrep_raw`** — `semgrep_flagged===true` ⇔ predicted-vuln.
+  2. **`oswe_over_semgrep`** — restricted to test cases where `semgrep_flagged===true`: `promoted` ⇔
+     predicted-vuln, `refuted` ⇔ predicted-safe (`inconclusive`/`not-analyzed` → **excluded** from the
+     matrix and counted separately in `excluded:{inconclusive,not_analyzed}`, never silently scored).
+  3. **`hybrid`** — `oswe_over_semgrep` plus oswe's independent discoveries (`oswe_independent===true`)
+     on cases where `semgrep_flagged===false` (recovered false-negatives).
 - Headline deltas: **`fp_refuted`** (Semgrep FPs oswe correctly refuted), **`recall_cost`** (real vulns
   oswe wrongly refuted), **`fn_recovered`** (real vulns oswe found that Semgrep missed).
-- Emits a JSON result **and** a human `BENCHMARK.md` table. Fully deterministic; **unit-tested** with a
-  fixture ledger + a small synthetic truth CSV (every metric hand-checked).
-- Exit `0` ok / `1` ledger↔truth inconsistency (a ledger test-id absent from truth, etc.) / `2` IO|usage.
+- Fully deterministic; **unit-tested** with a committed fixture ledger + a small synthetic truth CSV
+  (every confusion cell, every rate, all three deltas, and `excluded` hand-checked).
+- Exit `0` ok / `1` ledger↔truth inconsistency (a ledger `test_id` absent from truth; a ledger row that
+  is schema-invalid per §3.7.1) / `2` IO|usage (unreadable/missing `--ledger`/`--truth`, unwritable out).
+
+### 3.7.1 Ledger contract (the exact JSON `metrics.mjs` consumes)
+
+A single committed JSON. `metrics.mjs` validates it against this shape before scoring (a violation →
+exit 1). One entry per OWASP Benchmark test case **in the declared subset**:
+
+```jsonc
+{
+  "dataset":  "owasp-benchmark-1.2",
+  "subset":   "benchmark/subset-owasp.json",   // provenance of the in-scope ids
+  "generated":"2026-06-17",                     // run date (informational)
+  "entries": [
+    {
+      "test_id":         "BenchmarkTest00001",  // ^BenchmarkTest[0-9]{5}$ — joins to truth
+      "semgrep_flagged": true,                   // did the pinned Semgrep SARIF flag this case?
+      "oswe_adjudication": "promoted",           // "promoted"|"refuted"|"inconclusive"|"not-analyzed"
+                                                 //   (the lead's outcome; "not-analyzed" = over budget / excluded dir)
+      "oswe_independent": false,                 // did oswe find a vuln here on its OWN (no Semgrep lead)?
+      "cwe":   78                                // CWE asserted by Semgrep/oswe for this case (informational; cross-checked vs truth)
+    }
+    // … one per in-scope test case
+  ]
+}
+```
+
+Rules `metrics.mjs` enforces: `additionalProperties:false` at both levels; `test_id` unique and
+matching the pattern; `oswe_adjudication` from the closed set; for a case with
+`semgrep_flagged:false` the `oswe_adjudication` is ignored for matrix 2 but `oswe_independent` feeds
+matrix 3. Every `test_id` MUST exist in the truth CSV (else exit 1) — guaranteeing the join is total.
 
 ### 3.8 Run orchestration (expensive, manual, documented — NOT in CI)
 
@@ -177,8 +222,8 @@ under `external/` (gitignored, Apache-2.0), run Semgrep once to produce a pinned
 (subscription quota — **not** nested `claude -p`, which bills separate API credit), and assemble the
 ledger from the audit output. The subset is a committed manifest `benchmark/subset-owasp.json` (a
 fixed list of `BenchmarkTestNNNNN` ids sampled across all CWE categories) so the result is
-reproducible and affordable. The metrics engine (§3.7) and a committed sample ledger are what CI and
-`node --test` exercise; the large LLM run is occasional and manual.
+reproducible and affordable. The metrics engine (§3.7) and a committed sample ledger are what CI
+exercises (via the new `benchmark/` `node --test` step, §5); the large LLM run is occasional and manual.
 
 ## 4. Pipeline integration (SKILL.md changes)
 
@@ -198,13 +243,16 @@ The strict order is preserved; the edits are localized:
 - **§4 Aggregate** — unchanged call; the helper now carries `origin`/`source_lead_ids` (§3.6).
 - **§5–§6b** — **unchanged.** Promoted findings flow through chain-building, verification, and
   Critical gating exactly like LLM-discovered findings.
-- **§7 Report** — additive:
+- **§7 Report** — additive **and gated on `--sarif`**. The new sections appear **only when leads were
+  ingested** (`leads.length > 0`); on the no-`--sarif` path the report is emitted exactly as today,
+  with **no** origin line and **no** leads annex (this is what makes the byte-for-byte / unchanged-
+  `EXPECTED.md` claim in §7 true):
   - Executive summary gains a one-line **origin breakdown** (LLM-only / SAST-only / both).
   - A new annex **"Refuted SAST leads"** lists each `refuted` lead (`lead_id`, `rule_id`, `file:line`,
     reason) — this is the visible precision win. `inconclusive`/`not-analyzed` leads go in **Coverage**.
-  - The HTML `summary` (and `report-summary.schema.json`) are **unchanged**; the origin breakdown and
-    refuted-leads annex render through the existing Markdown→HTML body path (no new SVG, no schema
-    change — staying inside the locked HTML contract).
+  - The HTML `summary` (and `report-summary.schema.json`) are **unchanged**; the (gated) origin
+    breakdown and refuted-leads annex render through the existing Markdown→HTML body path (no new SVG,
+    no schema change — staying inside the locked HTML contract).
 
 ## 5. Testing strategy
 
@@ -212,7 +260,14 @@ The strict order is preserved; the edits are localized:
   hint, malformed → exit 1, missing file → exit 2).
 - **`aggregate-findings.mjs`**: the §3.6 origin/lead-id merge cases, added to the existing suite.
 - **`benchmark/metrics.mjs`**: fixture ledger + synthetic truth CSV; every confusion-matrix cell,
-  every derived rate, and the three headline deltas hand-checked; ledger↔truth inconsistency → exit 1.
+  every derived rate, the three headline deltas, and `excluded` hand-checked; ledger↔truth
+  inconsistency → exit 1; schema-invalid ledger row → exit 1; malformed CSV / missing file → exit 2.
+  **`ingest-sarif.mjs` lives under `skills/audit/scripts/`** so its tests are picked up by the existing
+  CI `node --test` step automatically. **`benchmark/metrics.mjs` lives under `benchmark/`**, which the
+  current CI does **not** test — so `.github/workflows/ci.yml` gains a **new step** in the `test` job,
+  `working-directory: benchmark`, `run: node --test` (zero-dep, no install), on both Node 20 & 22. (The
+  benchmark engine is deliberately kept out of the plugin runtime tree — it is maintainer tooling, not
+  shipped plugin code.)
 - **Schema parity**: `validators.mjs` regenerated (`npm run build`) for the 8th schema + the
   `analyzer-response`/`finding`/`final-finding` extensions; `check-structure.mjs` gains the
   `sarif-lead` schema↔validator parity check and a check that `sarif-rule-map.json` is valid JSON with
@@ -238,8 +293,8 @@ The strict order is preserved; the edits are localized:
 
 - `/oswe:audit` with no `--sarif` is byte-for-byte the current behavior. Because `origin` is optional
   and **absent ⇒ `llm-discovered`** (§3.5), no existing finding JSON, fixture, or `EXPECTED.md` needs
-  to change; findings are reported exactly as today and the origin breakdown line simply reads
-  "LLM-only".
+  to change; **the report's origin breakdown and refuted-leads annex are gated on `leads.length > 0`
+  (§4), so with no `--sarif` neither appears** and the Markdown is identical to today's output.
 - Ship behind the implementation branch `feat/oswe-hybrid-precision`; merge `--no-ff` after the E2E
   non-regression + the new fixture + the metrics suite are green, mirroring prior phases.
 
@@ -250,11 +305,14 @@ The strict order is preserved; the edits are localized:
    `validators.mjs` regenerated and in sync.
 2. `/oswe:audit --sarif <file>` ingests leads, the analyzer adjudicates every assigned lead, promoted
    findings flow through the unchanged verify/verdict pipeline, and the report shows the origin
-   breakdown + refuted-leads annex.
-3. The no-`--sarif` path passes all existing E2E fixtures unchanged (zero regression).
-4. `benchmark/metrics.mjs` computes the three confusion matrices + headline deltas deterministically,
-   is unit-tested, and produces a `BENCHMARK.md` from a committed sample ledger + the OWASP truth CSV.
-5. `claude plugin validate . --strict`, `node --test`, and `check-structure.mjs` all green.
+   breakdown + refuted-leads annex (both gated on `leads.length > 0`).
+3. The no-`--sarif` path passes all existing E2E fixtures unchanged, with **no** origin line / leads
+   annex in the output (zero regression).
+4. `benchmark/metrics.mjs` consumes a ledger of the §3.7.1 shape + the OWASP truth CSV, computes the
+   three confusion matrices + headline deltas + `excluded` deterministically, is unit-tested, and
+   writes `BENCHMARK.md` when `--md` is given (from a committed sample ledger).
+5. `node --test` (both `skills/audit/scripts/` and the new `benchmark/` CI step), `check-structure.mjs`,
+   the validators-in-sync regen check, and `claude plugin validate . --strict` (local gate) all green.
 
 ## 9. Out of scope (future sub-projects)
 
@@ -266,4 +324,3 @@ The strict order is preserved; the edits are localized:
   shell-out may be added later, but the benchmark uses a pinned SARIF for reproducibility).
 - **Product surface**: CI/IDE integrations, multi-project dashboards, finding-debt tracking over time
   (these belong to the "commercial product" ambition, not chosen here).
-```
