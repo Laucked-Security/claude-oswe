@@ -23,7 +23,9 @@
     "partitions": { "type": "array", "items": { "type": "string" } },
     "source_finding_ids": { "type": "array", "items": { "type": "string" } },
     "final_severity": { "enum": ["High", "Medium", "Low", "Info"] },
-    "final_confidence": { "enum": ["strong static proof", "likely", "to verify"] }
+    "final_confidence": { "enum": ["strong static proof", "likely", "to verify"] },
+    "origin": { "enum": ["llm-discovered", "sast-lead", "both"] },
+    "source_lead_ids": { "type": "array", "items": { "type": "string", "pattern": "^L[0-9]{3,}$" } }
   },
   "$defs": {
     "fileline": {
