@@ -1546,8 +1546,13 @@ A tiny SARIF pointing at the committed Python vulnerable fixture, to demonstrate
 benign line (expected: **refuted** with a reason). This exercises both adjudication outcomes.
 ````
 
-Create `test-fixtures/sarif-demo/results.sarif` (adjust the two `uri`/`startLine` values to a real
-sink line and a benign line in `test-fixtures/python/vulnerable` after reading that fixture):
+Create `test-fixtures/sarif-demo/results.sarif` (adjust the two `startLine` values to a real
+sink line and a benign line in `test-fixtures/python/vulnerable` after reading that fixture).
+**CRITICAL — the `uri` MUST be relative to `CLAUDE_PROJECT_DIR` (the repo root), NOT to the audit
+scope sub-path.** In the real pipeline `ingest-sarif.mjs` is invoked with `projectDir = CLAUDE_PROJECT_DIR`
+(`E:/claude-oswe`), and a bare `uri` like `app.py` would resolve to `E:/claude-oswe/app.py` (which does
+not exist) → the lead is dropped as `missing` and the hybrid path never runs. A real Semgrep SARIF run
+at the repo root emits repo-root-relative paths, so use the full repo-relative path:
 
 ```json
 {
@@ -1560,12 +1565,12 @@ sink line and a benign line in `test-fixtures/python/vulnerable` after reading t
         {
           "ruleId": "python.flask.security.audit.render-template-string.render-template-string",
           "message": { "text": "Potential SSTI via render_template_string" },
-          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "app.py" }, "region": { "startLine": 1 } } }]
+          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "test-fixtures/python/vulnerable/app.py" }, "region": { "startLine": 1 } } }]
         },
         {
           "ruleId": "python.lang.security.audit.benign.placeholder",
           "message": { "text": "Heuristic match (likely benign)" },
-          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "app.py" }, "region": { "startLine": 2 } } }]
+          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "test-fixtures/python/vulnerable/app.py" }, "region": { "startLine": 2 } } }]
         }
       ]
     }
@@ -1576,21 +1581,24 @@ sink line and a benign line in `test-fixtures/python/vulnerable` after reading t
 - [ ] **Step 3: Read the Python fixture and fix the two line numbers**
 
 Run: `cat -n test-fixtures/python/vulnerable/app.py` (or whatever the single source file is named — list the dir first with `ls test-fixtures/python/vulnerable`).
-Set `L001`'s `uri`/`startLine` to the real `render_template_string` sink line, and `L002`'s to a benign line (e.g. an import). Update `results.sarif` accordingly.
+Set `L001`'s `startLine` to the real `render_template_string` sink line, and `L002`'s to a benign line (e.g. an import). Keep both `uri`s as the **repo-root-relative** `test-fixtures/python/vulnerable/app.py` (see the CRITICAL note in Step 2). Update `results.sarif` accordingly.
 
 - [ ] **Step 4: Validate the demo SARIF ingests cleanly**
 
-Run (from repo root, writing inputs to a temp dir):
+Run from repo root. **Pass `projectDir = the repo root` (`process.cwd()`), exactly as the real
+pipeline does** — NOT the scope sub-path. (An earlier version of this step passed the fixture subdir
+as `projectDir`, which masked a uri-base bug: bare `app.py` validated there but was dropped `missing`
+in the real `/oswe:audit` run where projectDir is the repo root.)
 ```bash
 node --input-type=module -e '
 const { ingestSarif } = await import("./skills/audit/scripts/ingest-sarif.mjs");
 const { readFileSync } = await import("node:fs");
-const r = ingestSarif(process.cwd()+"/test-fixtures/python/vulnerable", readFileSync("test-fixtures/sarif-demo/results.sarif","utf8"));
+const r = ingestSarif(process.cwd(), readFileSync("test-fixtures/sarif-demo/results.sarif","utf8"));
 console.log(JSON.stringify(r.stats), r.leads.map(l=>l.lead_id+":"+l.location.file+":"+l.location.line+":"+l.vuln_class_hint));
-if(!r.ok || r.leads.length!==2) throw new Error("demo SARIF did not yield 2 leads: "+r.error);
+if(!r.ok || r.leads.length!==2 || r.stats.dropped_missing!==0) throw new Error("demo SARIF did not yield 2 kept leads: "+JSON.stringify(r.stats));
 '
 ```
-Expected: `ok`, 2 leads, both files repo-relative under the fixture. (If a path drops, fix the `uri`.)
+Expected: `ok`, `kept:2`, `dropped_missing:0`, both `location.file` = `test-fixtures/python/vulnerable/app.py`. (If a lead drops, the `uri` is wrong — it must be repo-root-relative.)
 
 - [ ] **Step 5: Commit**
 

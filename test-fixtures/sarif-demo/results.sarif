@@ -8,12 +8,12 @@
         {
           "ruleId": "python.flask.security.audit.render-template-string.render-template-string",
           "message": { "text": "Potential SSTI via render_template_string" },
-          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "app.py" }, "region": { "startLine": 29 } } }]
+          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "test-fixtures/python/vulnerable/app.py" }, "region": { "startLine": 29 } } }]
         },
         {
           "ruleId": "python.lang.security.audit.benign.placeholder",
           "message": { "text": "Heuristic match (likely benign)" },
-          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "app.py" }, "region": { "startLine": 4 } } }]
+          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "test-fixtures/python/vulnerable/app.py" }, "region": { "startLine": 4 } } }]
         }
       ]
     }
