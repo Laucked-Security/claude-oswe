@@ -84,16 +84,28 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
   - extract `ruleId` (fall back to `rule.id`/`rule.index`→`run.tool.driver.rules[index].id` when
     `ruleId` is absent), `message.text`, `level`, and the **primary location**
     (`locations[0].physicalLocation.artifactLocation.uri` + `region.startLine`);
+  - **line resolution** — `region.startLine` is **optional** in valid SARIF, but `sarif-lead.line`
+    requires `>= 1`. If a location has a `physicalLocation` but **no `region.startLine`** (or it is
+    `< 1`/non-integer), the location is **dropped and counted in `dropped_bad_location`** — we do
+    **not** silently default to line 1 (a wrong line would mislead the analyzer and corrupt the
+    benchmark join). For the **primary** location this drops the whole lead; for a **codeflow** step it
+    omits that step (codeflow is advisory).
   - if present, extract the first `codeFlows[0].threadFlows[0].locations[]` as an ordered
-    `codeflow[]` of `{file,line}` (the taint source→…→sink path);
+    `codeflow[]` of `{file,line}` (the taint source→…→sink path), each subject to the same line/URI
+    rules;
   - **truncate** `rule_id`/`vuln_class_hint`/`message` to the schema `maxLength` (UTF-8-safe, §2)
     before storing;
   - **normalize then confine every path** (the primary `uri`, each codeflow file `uri`). The
     `artifactLocation.uri` is a SARIF URI, **not** a filesystem path, so `ingest-sarif.mjs` first
     derives a path before reusing `confinePath()`:
-    1. **scheme** — strip a leading `file://` (and `file:` with no authority); reject any other scheme
-       (`http(s):`, `git:`, …) → the location is dropped, counted in `dropped_bad_uri`;
-    2. **percent-decode** the URI (`decodeURIComponent`); a malformed escape → dropped (`dropped_bad_uri`);
+    1. **scheme** — a `file:` URI is converted with `node:url` **`fileURLToPath()`** (it handles
+       `file:///path`, `file:///C:/...` drive letters, and percent-decoding portably); a `file:` URI
+       whose **authority is a non-local host** (UNC `file://server/share`) is **rejected** →
+       `dropped_bad_uri` (authority must be empty or `localhost`). Any **other scheme**
+       (`http(s):`, `git:`, …) → `dropped_bad_uri`. A `uri` with **no scheme** is treated as a plain
+       (relative or absolute) path and skips `fileURLToPath`.
+    2. **percent-decode** — only for the no-scheme path case (`decodeURIComponent`; `fileURLToPath`
+       already decoded the `file:` case); a malformed escape → `dropped_bad_uri`.
     3. **uriBaseId** — if the location carries `uriBaseId` and the run declares
        `originalUriBaseIds[<id>].uri`, resolve against that base (itself confined); otherwise a
        **relative** uri resolves against `projectDir`, and an **absolute** uri is taken as-is (it will
@@ -111,7 +123,7 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
     from `codeflow[]` (it is advisory — the lead survives on its primary location).
   - map `ruleId` → `vuln_class_hint` via a **per-tool mapping table** (§3.2). Unknown rule → hint
     `"unknown"` (still a valid lead; the analyzer decides from the code).
-- Emits `{ ok, error, leads: [ <sarif-lead> ], stats: { total, kept, dropped_out_of_scope, dropped_missing, dropped_bad_uri, unmapped_rules } }`.
+- Emits `{ ok, error, leads: [ <sarif-lead> ], stats: { total, kept, dropped_out_of_scope, dropped_missing, dropped_bad_uri, dropped_bad_location, unmapped_rules } }`.
 - Assigns each lead a stable `lead_id` = `L<NNN>` in document order (zero-padded, ≥ 3 digits).
 - **Self-validates each emitted lead** against the `sarif-lead` schema before writing, by importing
   the generated `sarifLead` validator **directly from `./validators.mjs`** — the **same pattern
@@ -127,9 +139,11 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
   `--file` → exit 2, **tool-name normalization** (`"Semgrep OSS"`→`semgrep`), **multi-run SARIF** (two
   runs / two tools, each result tagged with its own run's tool), **`ruleId` absent → resolved via
   `rule.index`**, and the URI cases: **`file://` scheme stripped**, **percent-encoded uri decoded**,
-  **`uriBaseId` resolved**, **non-file scheme dropped** (`dropped_bad_uri`), **missing artifact path
-  dropped not aborted** (`dropped_missing`), and an **over-long `message`/`rule_id` truncated** to
-  `maxLength`.
+  **`uriBaseId` resolved**, **non-file scheme dropped** (`dropped_bad_uri`), **UNC `file://host/share`
+  rejected** (`dropped_bad_uri`), **`file:///C:/…` drive-letter path** handled via `fileURLToPath`,
+  **missing artifact path dropped not aborted** (`dropped_missing`), **location with no
+  `region.startLine` dropped** (`dropped_bad_location`), and an **over-long `message`/`rule_id`
+  truncated** to `maxLength`.
 
 ### 3.2 Rule→vuln_class mapping table
 
@@ -175,6 +189,12 @@ exactly once** in that partition's `adjudicated_leads`; a `promoted` lead's `fin
 `finding` in the same response and that finding must carry the lead in `source_lead_ids`. A lead
 assigned but not adjudicated → the partition is treated like any other binding mismatch (retry once,
 else coverage gap) — leads must never silently vanish, or the precision count is wrong.
+**A raw analyzer finding's `origin` may only be absent, `"llm-discovered"`, or `"sast-lead"` — never
+`"both"`.** `"both"` is a *derived* value computed **only by the aggregator** when an `llm-discovered`
+and a `sast-lead` finding dedupe to the same key (§3.6); the binding step rejects an analyzer response
+that emits `origin:"both"` directly (orchestrator-built inline) or treats it as a subagent binding
+mismatch (retry once, else gap). (The `finding` schema still *permits* `"both"` because the same schema
+validates post-aggregation findings; the constraint on raw analyzer output is enforced at binding.)
 
 ### 3.5 Extended schemas: `finding` and `final-finding`
 
@@ -182,7 +202,8 @@ Add:
 - `origin`: `"llm-discovered" | "sast-lead" | "both"` (**optional**; **absent ⇒ treated as
   `"llm-discovered"`** by the aggregator and report). Making it optional-with-default is deliberate:
   every existing finding JSON / fixture stays valid unchanged, preserving the zero-regression promise
-  (§7). New SAST-promoted findings set `"sast-lead"`; the aggregator computes `"both"` on merge (§3.6).
+  (§7). A **raw analyzer** finding sets only absent / `"llm-discovered"` / `"sast-lead"`; **`"both"` is
+  produced solely by the aggregator on merge** (§3.6, enforced at binding §3.4).
 - `source_lead_ids`: `[ "^L[0-9]{3,}$" ]` (optional; present iff the finding was promoted from / merged
   with ≥ 1 lead).
 
@@ -216,10 +237,24 @@ node benchmark/metrics.mjs --ledger <ledger.json> --truth <expectedresults.csv> 
   2. **`oswe_over_semgrep`** — restricted to test cases where `semgrep_flagged===true`: `promoted` ⇔
      predicted-vuln, `refuted` ⇔ predicted-safe (`inconclusive`/`not-analyzed` → **excluded** from the
      matrix and counted separately in `excluded:{inconclusive,not_analyzed}`, never silently scored).
-  3. **`hybrid`** — `oswe_over_semgrep` plus oswe's independent discoveries (`oswe_independent===true`)
-     on cases where `semgrep_flagged===false` (recovered false-negatives).
-- Headline deltas: **`fp_refuted`** (Semgrep FPs oswe correctly refuted), **`recall_cost`** (real vulns
-  oswe wrongly refuted), **`fn_recovered`** (real vulns oswe found that Semgrep missed).
+  3. **`hybrid`** — scored over **two disjoint groups**, predicted-label then compared to `real`:
+     - **(a) Semgrep-flagged** cases — identical to matrix 2: `promoted`→predicted-vuln,
+       `refuted`→predicted-safe; `inconclusive`/`not-analyzed`→**excluded**.
+     - **(b) Semgrep-missed** cases (`semgrep_flagged===false`) **that oswe covered**
+       (`oswe_covered===true`): `oswe_independent===true`→predicted-vuln, else→predicted-safe. A
+       Semgrep-missed case **oswe did not cover** (`oswe_covered===false`) is **excluded** (a coverage
+       gap, not a prediction) and counted in `excluded.not_covered`.
+
+     Cells over **a∪b**: `tp`=predicted-vuln∧`real`, `fp`=predicted-vuln∧¬`real`, `fn`=predicted-safe∧`real`,
+     `tn`=predicted-safe∧¬`real`. Note the two consequences the reviewer flagged: a **Semgrep-missed real
+     vuln that oswe covered but did not find** (`oswe_independent:false`) is an honest **`fn`**; the same
+     case **uncovered** is **excluded** (never an `fn`). A Semgrep lead that is `inconclusive`/`not-analyzed`
+     is **excluded** (never scored either way). **Denominator** of each rate = `tp+fp+fn+tn` =
+     `total_entries − excluded.(inconclusive + not_analyzed + not_covered)`; all `excluded` counts are
+     emitted alongside the matrix so the denominator is auditable.
+- Headline deltas: **`fp_refuted`** (Semgrep FPs oswe correctly refuted = matrix-2 cases `semgrep_flagged ∧ ¬real ∧ refuted`),
+  **`recall_cost`** (real vulns oswe wrongly refuted = `semgrep_flagged ∧ real ∧ refuted`),
+  **`fn_recovered`** (real vulns oswe found that Semgrep missed = `¬semgrep_flagged ∧ real ∧ oswe_covered ∧ oswe_independent`).
 - Fully deterministic; **unit-tested** with a committed fixture ledger + a small synthetic truth CSV
   (every confusion cell, every rate, all three deltas, and `excluded` hand-checked).
 - Exit `0` ok / `1` ledger↔truth inconsistency (a ledger `test_id` absent from truth; a ledger row that
@@ -239,9 +274,11 @@ exit 1). One entry per OWASP Benchmark test case **in the declared subset**:
     {
       "test_id":         "BenchmarkTest00001",  // ^BenchmarkTest[0-9]{5}$ — joins to truth
       "semgrep_flagged": true,                   // did the pinned Semgrep SARIF flag this case?
+      "oswe_covered":    true,                   // did oswe analyze the partition containing this case?
       "oswe_adjudication": "promoted",           // "promoted"|"refuted"|"inconclusive"|"not-analyzed"
-                                                 //   (the lead's outcome; "not-analyzed" = over budget / excluded dir)
-      "oswe_independent": false,                 // did oswe find a vuln here on its OWN (no Semgrep lead)?
+                                                 //   (the flagged lead's outcome; "not-analyzed" = over budget / excluded dir;
+                                                 //    when semgrep_flagged=false there is no lead → MUST be "not-analyzed")
+      "oswe_independent": false,                 // did oswe find a vuln here on its OWN (no Semgrep lead)? (only meaningful when oswe_covered)
       "cwe":   78                                // CWE asserted by Semgrep/oswe for this case (informational; cross-checked vs truth)
     }
     // … one per in-scope test case
@@ -249,10 +286,14 @@ exit 1). One entry per OWASP Benchmark test case **in the declared subset**:
 }
 ```
 
-Rules `metrics.mjs` enforces: `additionalProperties:false` at both levels; `test_id` unique and
-matching the pattern; `oswe_adjudication` from the closed set; for a case with
-`semgrep_flagged:false` the `oswe_adjudication` is ignored for matrix 2 but `oswe_independent` feeds
-matrix 3. Every `test_id` MUST exist in the truth CSV (else exit 1) — guaranteeing the join is total.
+Rules `metrics.mjs` enforces (any violation → exit 1): `additionalProperties:false` at both levels;
+`test_id` unique and matching the pattern; `oswe_adjudication` from the closed set; `oswe_covered` and
+`oswe_independent` boolean. **Coherence:** `oswe_adjudication==="not-analyzed"` ⟺ `oswe_covered===false`
+(a not-analyzed case is by definition uncovered, and vice-versa); when `semgrep_flagged===false` the
+`oswe_adjudication` **must** be `"not-analyzed"` (there is no Semgrep lead to adjudicate — coverage is
+carried by `oswe_covered`, the vuln signal by `oswe_independent`). For a `semgrep_flagged:false` case the
+`oswe_adjudication` is ignored by matrix 2; matrix 3 uses `oswe_covered`+`oswe_independent` (§3.7). Every
+`test_id` MUST exist in the truth CSV (else exit 1) — guaranteeing the join is total.
 
 ### 3.8 Run orchestration (expensive, manual, documented — NOT in CI)
 
@@ -302,9 +343,13 @@ The strict order is preserved; the edits are localized:
   truncation; malformed document → exit 1; missing input `--file` → exit 2). Every emitted lead is
   asserted valid against the `sarifLead` validator.
 - **`aggregate-findings.mjs`**: the §3.6 origin/lead-id merge cases, added to the existing suite.
-- **`benchmark/metrics.mjs`**: fixture ledger + synthetic truth CSV; every confusion-matrix cell,
-  every derived rate, the three headline deltas, and `excluded` hand-checked; ledger↔truth
-  inconsistency → exit 1; schema-invalid ledger row → exit 1; malformed CSV / missing file → exit 2.
+- **`benchmark/metrics.mjs`**: fixture ledger + synthetic truth CSV; every confusion-matrix cell (all
+  three matrices), every derived rate, the three headline deltas, and `excluded.{inconclusive,
+  not_analyzed,not_covered}` hand-checked — **including** a Semgrep-missed real vuln that is *covered
+  but not found* (counts as hybrid `fn`) vs *uncovered* (excluded, not `fn`), and the denominator
+  identity `tp+fp+fn+tn == total − excluded`; the coherence rules (`not-analyzed ⟺ ¬covered`;
+  `¬semgrep_flagged ⇒ adjudication=="not-analyzed"`) → exit 1; ledger↔truth inconsistency → exit 1;
+  schema-invalid ledger row → exit 1; malformed CSV / missing file → exit 2.
   **`ingest-sarif.mjs` lives under `skills/audit/scripts/`** so its tests are picked up by the existing
   CI `node --test` step automatically. **`benchmark/metrics.mjs` lives under `benchmark/`**, which the
   current CI does **not** test — so `.github/workflows/ci.yml` gains a **new step** in the `test` job,
