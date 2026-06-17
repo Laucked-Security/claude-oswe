@@ -275,11 +275,11 @@ exit 1). One entry per OWASP Benchmark test case **in the declared subset**:
       "test_id":         "BenchmarkTest00001",  // ^BenchmarkTest[0-9]{5}$ — joins to truth
       "semgrep_flagged": true,                   // did the pinned Semgrep SARIF flag this case?
       "oswe_covered":    true,                   // did oswe analyze the partition containing this case?
-      "oswe_adjudication": "promoted",           // "promoted"|"refuted"|"inconclusive"|"not-analyzed"
-                                                 //   (the flagged lead's outcome; "not-analyzed" = over budget / excluded dir;
-                                                 //    when semgrep_flagged=false there is no lead → MUST be "not-analyzed")
+      "oswe_adjudication": "promoted",           // "promoted"|"refuted"|"inconclusive"|"not-analyzed"|"no-lead"
+                                                 //   (a Semgrep lead's outcome; "not-analyzed" = flagged lead over budget / excluded dir;
+                                                 //    "no-lead" = there was no Semgrep lead, i.e. semgrep_flagged=false)
       "oswe_independent": false,                 // did oswe find a vuln here on its OWN (no Semgrep lead)? (only meaningful when oswe_covered)
-      "cwe":   78                                // CWE asserted by Semgrep/oswe for this case (informational; cross-checked vs truth)
+      "cwe":   78                                // CWE asserted by Semgrep/oswe for this case (informational only; see rules below)
     }
     // … one per in-scope test case
   ]
@@ -287,13 +287,25 @@ exit 1). One entry per OWASP Benchmark test case **in the declared subset**:
 ```
 
 Rules `metrics.mjs` enforces (any violation → exit 1): `additionalProperties:false` at both levels;
-`test_id` unique and matching the pattern; `oswe_adjudication` from the closed set; `oswe_covered` and
-`oswe_independent` boolean. **Coherence:** `oswe_adjudication==="not-analyzed"` ⟺ `oswe_covered===false`
-(a not-analyzed case is by definition uncovered, and vice-versa); when `semgrep_flagged===false` the
-`oswe_adjudication` **must** be `"not-analyzed"` (there is no Semgrep lead to adjudicate — coverage is
-carried by `oswe_covered`, the vuln signal by `oswe_independent`). For a `semgrep_flagged:false` case the
-`oswe_adjudication` is ignored by matrix 2; matrix 3 uses `oswe_covered`+`oswe_independent` (§3.7). Every
-`test_id` MUST exist in the truth CSV (else exit 1) — guaranteeing the join is total.
+`test_id` unique and matching the pattern; `oswe_adjudication` from the closed set
+(`promoted|refuted|inconclusive|not-analyzed|no-lead`); `oswe_covered`/`oswe_independent` boolean.
+**Coherence — keyed on `semgrep_flagged` so the two notions never collide:**
+- **`semgrep_flagged===true`** → there IS a lead, so `oswe_adjudication ∈ {promoted, refuted,
+  inconclusive, not-analyzed}` (**never `no-lead`**), and the coverage rule applies **only here**:
+  `oswe_adjudication==="not-analyzed"` ⟺ `oswe_covered===false`.
+- **`semgrep_flagged===false`** → there is NO lead, so `oswe_adjudication` **must be `"no-lead"`**;
+  coverage is carried **independently** by `oswe_covered` (true **or** false — a missed case oswe *did*
+  analyze has `oswe_covered:true`, which is exactly the group-(b) hybrid input), and the vuln signal by
+  `oswe_independent` (only meaningful when `oswe_covered`).
+
+This separation is what makes the covered-Semgrep-missed group (b) representable: it is precisely
+`semgrep_flagged:false ∧ oswe_covered:true`. Matrix 2 ignores `no-lead` cases (it is restricted to
+flagged leads); matrix 3 group (b) uses `oswe_covered`+`oswe_independent` (§3.7).
+
+**`cwe` is informational only** — it is **not** used in any matrix and a mismatch with the truth CSV
+**never** changes a verdict or exit code. `metrics.mjs` reports a non-fatal `cwe_mismatches` count
+(ledger `cwe` ≠ truth `cwe` among real-vuln cases) purely as a diagnostic. Every `test_id` MUST exist
+in the truth CSV (else exit 1) — guaranteeing the join is total.
 
 ### 3.8 Run orchestration (expensive, manual, documented — NOT in CI)
 
@@ -347,9 +359,12 @@ The strict order is preserved; the edits are localized:
   three matrices), every derived rate, the three headline deltas, and `excluded.{inconclusive,
   not_analyzed,not_covered}` hand-checked — **including** a Semgrep-missed real vuln that is *covered
   but not found* (counts as hybrid `fn`) vs *uncovered* (excluded, not `fn`), and the denominator
-  identity `tp+fp+fn+tn == total − excluded`; the coherence rules (`not-analyzed ⟺ ¬covered`;
-  `¬semgrep_flagged ⇒ adjudication=="not-analyzed"`) → exit 1; ledger↔truth inconsistency → exit 1;
-  schema-invalid ledger row → exit 1; malformed CSV / missing file → exit 2.
+  identity `tp+fp+fn+tn == total − excluded`; the coherence rules (`semgrep_flagged ⇒
+  adjudication≠"no-lead"`; `¬semgrep_flagged ⇒ adjudication=="no-lead"`; and **for flagged leads only**
+  `not-analyzed ⟺ ¬covered`) → exit 1; a **covered Semgrep-missed real vuln**
+  (`semgrep_flagged:false, oswe_covered:true`) is asserted present in group (b) — the regression guard for
+  this very contradiction; a `cwe` mismatch is **non-fatal** (only bumps `cwe_mismatches`, exit 0);
+  ledger↔truth inconsistency → exit 1; schema-invalid ledger row → exit 1; malformed CSV / missing file → exit 2.
   **`ingest-sarif.mjs` lives under `skills/audit/scripts/`** so its tests are picked up by the existing
   CI `node --test` step automatically. **`benchmark/metrics.mjs` lives under `benchmark/`**, which the
   current CI does **not** test — so `.github/workflows/ci.yml` gains a **new step** in the `test` job,
