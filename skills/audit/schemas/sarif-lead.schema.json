@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sarif-lead.schema.json",
+  "title": "OSWE SARIF Lead",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lead_id", "tool", "rule_id", "vuln_class_hint", "location", "message"],
+  "properties": {
+    "lead_id": { "type": "string", "pattern": "^L[0-9]{3,}$" },
+    "tool": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "rule_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "vuln_class_hint": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "location": { "$ref": "#/$defs/loc" },
+    "codeflow": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/loc" } },
+    "message": { "type": "string", "maxLength": 512 }
+  },
+  "$defs": {
+    "loc": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "line"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "line": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}
