@@ -51,11 +51,17 @@ benchmark datasets) — see §9.
 - **Node ≥ 20**, ESM, the same `--file`/`--out` CLI discipline and exit-code contract as the existing
   helpers (`0` ok / `1` invalid input / `2` IO|usage).
 - **Security-tool posture.** The audited repo **and the ingested SARIF** are **untrusted data**.
-  SARIF-supplied paths are confined to the project root with the exact `confine-path` logic; SARIF
-  strings (rule ids, messages) are data, never instructions, and are never written into a report
-  except as already-bounded, escaped text.
-- **Secrets never leave.** Redaction (`[REDACTED]`, `file:line` only) is unchanged; leads and ledgers
-  live under `.oswe/tmp/` and are purged like all other intermediate data.
+  SARIF-supplied paths are normalized then confined to the project root (§3.1 — URI decoding +
+  `confine-path` reuse); SARIF strings (`rule_id`, `message`, `vuln_class_hint`) are data, never
+  instructions, and are **length-bounded at ingestion** so they can never balloon a report or a temp
+  file: the `sarif-lead` schema fixes `maxLength` (`rule_id` ≤ 256, `vuln_class_hint` ≤ 64, `message`
+  ≤ 512), and `ingest-sarif.mjs` **truncates** any longer value (UTF-8-safe, ellipsis `…`) **before**
+  it is ever written. The report annex prints only the (already-truncated, HTML-escaped) `rule_id`.
+- **Secrets never leave.** Redaction (`[REDACTED]`, `file:line` only) is unchanged. Two distinct
+  artifacts must not be conflated (see §6): the **raw `leads[]`** (and analyzer intermediates) carry
+  `file:line` + rule messages → they live under `.oswe/tmp/` and are purged like all other intermediate
+  data; the **benchmark ledger** (§3.7.1) is a *sanitized* record — `test_id` + booleans + `cwe` only,
+  **no messages, no paths, no secrets** — which is why a sample ledger is safe to commit.
 - **The deterministic core is sacred.** No changes to `apply-verdicts.mjs`, `validate-batch.mjs`,
   `confine-path.mjs`, `validate-output.mjs`, the `chain`/`verifier-response`/`report-summary` schemas,
   or the Critical-gating logic. The hybrid grafts onto the **ends** of the pipeline only.
@@ -80,18 +86,50 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
     (`locations[0].physicalLocation.artifactLocation.uri` + `region.startLine`);
   - if present, extract the first `codeFlows[0].threadFlows[0].locations[]` as an ordered
     `codeflow[]` of `{file,line}` (the taint source→…→sink path);
-  - **confine every path** (uri, codeflow files) to `projectDir` using the same normalization
-    `confine-path.mjs` uses (reject `../`, symlink/junction, sibling-prefix escapes). A result whose
-    primary location escapes the root is **dropped** and counted in `dropped_out_of_scope`.
+  - **truncate** `rule_id`/`vuln_class_hint`/`message` to the schema `maxLength` (UTF-8-safe, §2)
+    before storing;
+  - **normalize then confine every path** (the primary `uri`, each codeflow file `uri`). The
+    `artifactLocation.uri` is a SARIF URI, **not** a filesystem path, so `ingest-sarif.mjs` first
+    derives a path before reusing `confinePath()`:
+    1. **scheme** — strip a leading `file://` (and `file:` with no authority); reject any other scheme
+       (`http(s):`, `git:`, …) → the location is dropped, counted in `dropped_bad_uri`;
+    2. **percent-decode** the URI (`decodeURIComponent`); a malformed escape → dropped (`dropped_bad_uri`);
+    3. **uriBaseId** — if the location carries `uriBaseId` and the run declares
+       `originalUriBaseIds[<id>].uri`, resolve against that base (itself confined); otherwise a
+       **relative** uri resolves against `projectDir`, and an **absolute** uri is taken as-is (it will
+       still have to pass confinement);
+    4. **confine** the resulting path with `confinePath(projectDir, path)` (reuses the exact
+       `confine-path.mjs` logic: `realpathSync` canonicalization, reject `../`, symlink/junction,
+       sibling-prefix). Because `confinePath` resolves the **real** path and **throws `ENOENT` on a
+       missing file**, `ingest-sarif.mjs` catches: an **escape** → drop, count in
+       `dropped_out_of_scope`; a **missing file** (`ENOENT`, e.g. a stale or generated path) → drop,
+       count in `dropped_missing` — neither aborts the run;
+    5. **store repo-relative** — convert the returned absolute real path back via
+       `path.relative(realRoot, realPath)` with POSIX separators, so `location.file` matches the
+       repo-relative form the analyzer and the schema expect.
+    A **dropped primary location drops the whole lead**; a dropped **codeflow** step is simply omitted
+    from `codeflow[]` (it is advisory — the lead survives on its primary location).
   - map `ruleId` → `vuln_class_hint` via a **per-tool mapping table** (§3.2). Unknown rule → hint
     `"unknown"` (still a valid lead; the analyzer decides from the code).
-- Emits `{ ok, error, leads: [ <sarif-lead> ], stats: { total, kept, dropped_out_of_scope, unmapped_rules } }`.
+- Emits `{ ok, error, leads: [ <sarif-lead> ], stats: { total, kept, dropped_out_of_scope, dropped_missing, dropped_bad_uri, unmapped_rules } }`.
 - Assigns each lead a stable `lead_id` = `L<NNN>` in document order (zero-padded, ≥ 3 digits).
-- Exit `0` ok / `1` malformed SARIF (not parseable / not SARIF 2.1.0) / `2` IO|usage.
-- **Unit-tested**: well-formed SARIF (single-location + codeflow), out-of-scope path dropped,
-  unknown rule → `unknown` hint, malformed JSON → exit 1, missing file → exit 2, **tool-name
-  normalization** (`"Semgrep OSS"`→`semgrep`), **multi-run SARIF** (two runs / two tools, each
-  result tagged with its own run's tool), and **`ruleId` absent → resolved via `rule.index`**.
+- **Self-validates each emitted lead** against the `sarif-lead` schema before writing, by importing
+  the generated `sarifLead` validator **directly from `./validators.mjs`** — the **same pattern
+  `render-html.mjs` uses for `reportSummary`**, so `validate-output.mjs` stays **frozen** (its fixed
+  `KIND_TO_EXPORT` is not touched; no `sarif-lead` kind is added there). `build-validators.mjs` gains
+  `sarif-lead` in its schema list so `sarifLead` is exported from the regenerated `validators.mjs`. A
+  lead the helper builds that fails its own schema is an **ingestion bug** → exit 1 (we never emit an
+  invalid lead).
+- Exit `0` ok / `1` malformed SARIF (not parseable / not SARIF 2.1.0) **or a self-built lead that
+  fails the `sarif-lead` schema** / `2` IO|usage.
+- **Unit-tested**: well-formed SARIF (single-location + codeflow), out-of-scope path dropped
+  (`dropped_out_of_scope`), unknown rule → `unknown` hint, malformed JSON → exit 1, missing **input**
+  `--file` → exit 2, **tool-name normalization** (`"Semgrep OSS"`→`semgrep`), **multi-run SARIF** (two
+  runs / two tools, each result tagged with its own run's tool), **`ruleId` absent → resolved via
+  `rule.index`**, and the URI cases: **`file://` scheme stripped**, **percent-encoded uri decoded**,
+  **`uriBaseId` resolved**, **non-file scheme dropped** (`dropped_bad_uri`), **missing artifact path
+  dropped not aborted** (`dropped_missing`), and an **over-long `message`/`rule_id` truncated** to
+  `maxLength`.
 
 ### 3.2 Rule→vuln_class mapping table
 
@@ -109,15 +147,17 @@ conclusion is allowed and recorded.
 ```jsonc
 {
   "lead_id":        "^L[0-9]{3,}$",
-  "tool":           "string",            // e.g. "semgrep"
-  "rule_id":        "string",
-  "vuln_class_hint":"string",            // an oswe vuln_class or "unknown"
-  "location":       { "file": "string", "line": "integer>=1" },
-  "codeflow":       [ { "file": "string", "line": "integer>=1" } ],   // optional
-  "message":        "string"
+  "tool":           "string, maxLength 64",   // normalized driver name, e.g. "semgrep"
+  "rule_id":        "string, maxLength 256",
+  "vuln_class_hint":"string, maxLength 64",    // an oswe vuln_class or "unknown"
+  "location":       { "file": "string maxLength 1024", "line": "integer>=1" },
+  "codeflow":       [ { "file": "string maxLength 1024", "line": "integer>=1" } ],   // optional, maxItems 64
+  "message":        "string, maxLength 512"
 }
 ```
-`additionalProperties:false`. Paths are repo-relative (already confined by §3.1).
+`additionalProperties:false`. Every string field carries a `maxLength` (above); `ingest-sarif.mjs`
+**truncates at ingestion** so an over-long SARIF value is bounded *before* it reaches the schema, the
+report, or a temp file (§2). `file` paths are repo-relative POSIX (normalized + confined by §3.1).
 
 ### 3.4 Extended schema: `analyzer-response`
 
@@ -256,8 +296,11 @@ The strict order is preserved; the edits are localized:
 
 ## 5. Testing strategy
 
-- **`ingest-sarif.mjs`**: the §3.1 cases (well-formed incl. codeflow, out-of-scope drop, unknown-rule
-  hint, malformed → exit 1, missing file → exit 2).
+- **`ingest-sarif.mjs`**: the full §3.1 case list (well-formed incl. codeflow; the URI cases —
+  `file://`, percent-encoding, `uriBaseId`, non-file scheme dropped, missing artifact dropped not
+  aborted; out-of-scope drop; tool normalization + multi-run; `ruleId`-via-index; over-long string
+  truncation; malformed document → exit 1; missing input `--file` → exit 2). Every emitted lead is
+  asserted valid against the `sarifLead` validator.
 - **`aggregate-findings.mjs`**: the §3.6 origin/lead-id merge cases, added to the existing suite.
 - **`benchmark/metrics.mjs`**: fixture ledger + synthetic truth CSV; every confusion-matrix cell,
   every derived rate, the three headline deltas, and `excluded` hand-checked; ledger↔truth
@@ -281,11 +324,18 @@ The strict order is preserved; the edits are localized:
 
 ## 6. Security considerations
 
-- The SARIF file is **untrusted input**: paths confined (§3.1), strings treated as data. A SARIF that
-  points outside the repo, contains traversal, or is malformed must never read or write outside the
-  root, never crash the audit into an unsafe state (exit 1, audit aborts the ingestion cleanly).
-- Leads and the ledger contain raw `file:line` and rule messages → they live under `.oswe/tmp/` and are
-  purged at start/end/abort like all intermediate data. The **report** stays redaction-safe.
+- The SARIF file is **untrusted input**: URIs decoded + confined (§3.1), strings length-bounded and
+  treated as data (§2). A SARIF that points outside the repo, uses a non-file scheme, contains
+  traversal, references a missing file, or is malformed must never read or write outside the root and
+  never crash the audit into an unsafe state — a bad *location* is dropped-and-counted (ingestion
+  continues), a malformed *document* aborts ingestion cleanly (exit 1).
+- **Two artifacts, two security postures** (do not conflate — §2):
+  - the **raw `leads[]`** and analyzer intermediates carry `file:line` + (bounded) rule messages →
+    they live under `.oswe/tmp/` and are purged at start/end/abort like all intermediate data; the
+    **report** stays redaction-safe;
+  - the **benchmark ledger** (§3.7.1) is **sanitized by construction** — `test_id` + booleans + `cwe`
+    only, no messages/paths/secrets — so a *sample* ledger is committed safely and `BENCHMARK.md`
+    (aggregate rates only) carries nothing sensitive.
 - A malicious SARIF cannot inflate severity: leads only ever become findings via the analyzer reading
   real code, and Critical gating is unchanged and deterministic.
 
