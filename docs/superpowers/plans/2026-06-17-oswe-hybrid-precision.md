@@ -159,13 +159,14 @@ git commit -m "feat(schema): add sarif-lead schema (8th) + sarifLead validator e
 
 ---
 
-## Task 2: `finding` + `final-finding` gain `origin` / `source_lead_ids`
+## Task 2: `finding` gains `origin` / `source_lead_ids` (inherited by `final-finding`)
 
 **Files:**
-- Modify: `skills/audit/schemas/finding.schema.json` (properties block)
-- Modify: `skills/audit/schemas/final-finding.schema.json` (properties block)
+- Modify: `skills/audit/schemas/finding.schema.json` (properties block) — the ONLY schema edit.
 - Modify (regenerate): `skills/audit/scripts/validators.mjs`
 - Test: `skills/audit/scripts/test/finding-origin.test.mjs` (create)
+
+**Why only `finding.schema.json`:** `final-finding.schema.json` is `allOf: [ { "$ref": "finding.schema.json" }, …overrides ]` — it does **not** restate `finding`'s property set, it inherits it through the `$ref`. So adding `origin`/`source_lead_ids` to `finding.schema.json` is sufficient; the `final-finding` validator picks them up automatically. Do **not** edit `final-finding.schema.json`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -200,12 +201,17 @@ test("origin outside the enum is rejected", () => {
 test("source_lead_ids must match ^L[0-9]{3,}$", () => {
   assert.equal(validate("finding", { ...base, source_lead_ids: ["nope"] }).valid, false);
 });
+
+test("final-finding inherits origin via its $ref to finding (no separate edit needed)", () => {
+  const ff = { ...base, verification_status: "accepted", final_severity: "High", final_confidence: "likely", origin: "sast-lead", source_lead_ids: ["L001"] };
+  assert.equal(validate("final-finding", ff).valid, true, JSON.stringify(validate("final-finding", ff).errors));
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd skills/audit/scripts && node --test test/finding-origin.test.mjs`
-Expected: FAIL — `origin`/`source_lead_ids` rejected by `additionalProperties:false`.
+Expected: FAIL — `origin`/`source_lead_ids` rejected by `additionalProperties:false` (both the `finding` and the inherited `final-finding` cases).
 
 - [ ] **Step 3: Add the properties to both schemas**
 
@@ -217,7 +223,7 @@ In `skills/audit/schemas/finding.schema.json`, inside `properties` (after `"fina
     "source_lead_ids": { "type": "array", "items": { "type": "string", "pattern": "^L[0-9]{3,}$" } }
 ```
 
-Apply the **identical** two-property addition to `skills/audit/schemas/final-finding.schema.json` inside its `properties` block (it already mirrors `finding`'s property set). Neither field is added to `required` — both are optional.
+Neither field is added to `required` — both are optional. **Do not touch `final-finding.schema.json`** — it inherits these properties through its `$ref` to `finding.schema.json` (the Step-1 `final-finding` test proves it).
 
 - [ ] **Step 4: Regenerate and run the test**
 
@@ -232,8 +238,8 @@ Expected: all PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add skills/audit/schemas/finding.schema.json skills/audit/schemas/final-finding.schema.json skills/audit/scripts/validators.mjs skills/audit/scripts/test/finding-origin.test.mjs
-git commit -m "feat(schema): finding/final-finding gain optional origin + source_lead_ids"
+git add skills/audit/schemas/finding.schema.json skills/audit/scripts/validators.mjs skills/audit/scripts/test/finding-origin.test.mjs
+git commit -m "feat(schema): finding gains optional origin + source_lead_ids (final-finding inherits)"
 ```
 
 ---
@@ -607,6 +613,12 @@ test("missing runs[] returns ok:false", () => {
   const r = ingestSarif(root, JSON.stringify({ version: "2.1.0" }));
   assert.equal(r.ok, false);
 });
+
+test("a non-2.1.0 SARIF version is rejected (ok:false)", () => {
+  const root = project([]);
+  const r = ingestSarif(root, JSON.stringify({ version: "2.0.0", runs: [] }));
+  assert.equal(r.ok, false);
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -712,6 +724,9 @@ export function ingestSarif(projectDir, sarifText, ruleMap = loadDefaultRuleMap(
   catch (e) { return { ok: false, error: "malformed SARIF: not JSON (" + e.message + ")", leads: [], stats: zeroStats() }; }
   if (!doc || typeof doc !== "object" || !Array.isArray(doc.runs)) {
     return { ok: false, error: "malformed SARIF: missing runs[]", leads: [], stats: zeroStats() };
+  }
+  if (doc.version !== "2.1.0") {
+    return { ok: false, error: "unsupported SARIF version: " + doc.version + " (expected 2.1.0)", leads: [], stats: zeroStats() };
   }
   let realRoot;
   try { realRoot = confinePath(projectDir, "."); }
@@ -834,10 +849,10 @@ test("an llm finding and a sast-lead finding on the same key merge to origin:bot
   assert.deepEqual(r.findings[0].source_lead_ids, ["L002"]);
 });
 
-test("absent origin defaults to llm-discovered", () => {
+test("absent origin defaults to llm-discovered, and source_lead_ids is OMITTED when no lead", () => {
   const r = aggregateFindings([raw("auth-F001", "auth")]);
   assert.equal(r.findings[0].origin, "llm-discovered");
-  assert.deepEqual(r.findings[0].source_lead_ids, []);
+  assert.equal(r.findings[0].source_lead_ids, undefined);   // omitted, not [] (spec §3.5)
 });
 ```
 
@@ -864,13 +879,16 @@ Then inside the `for (const group of groups.values())` loop, before `merged.push
     const leadIds = uniqSortedStrings(group.flatMap((f) => f.source_lead_ids || []));
 ```
 
-And add these two fields to the pushed object (after `source_finding_ids: …`):
+Then add `origin` to the pushed object as its **last** field (after `source_finding_ids: …`), and attach `source_lead_ids` **only when there is at least one lead** (spec §3.5 — omitted, not `[]`, for pure-LLM findings). Change the tail of the `merged.push({ … })` statement to:
 
 ```js
       source_finding_ids: uniqSortedStrings(group.map((f) => f.finding_id)),
-      origin: mergedOrigin,
-      source_lead_ids: leadIds
+      origin: mergedOrigin
+    });
+    if (leadIds.length) merged[merged.length - 1].source_lead_ids = leadIds;
 ```
+
+(That is: `origin` goes inside the object literal; the `if (leadIds.length) …` line goes immediately **after** the `merged.push(…);` call, mutating the object just pushed.)
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -1010,6 +1028,16 @@ test("a ledger test_id absent from truth is rejected", () => {
   assert.equal(computeMetrics(l, truth).ok, false);
 });
 
+test("an unknown TOP-LEVEL ledger field is rejected", () => {
+  const l = { ...ledger, bogus: 1 };
+  assert.equal(computeMetrics(l, truth).ok, false);
+});
+
+test("a missing/empty dataset (top-level metadata) is rejected", () => {
+  const { dataset, ...rest } = ledger;
+  assert.equal(computeMetrics(rest, truth).ok, false);
+});
+
 test("cwe mismatch is non-fatal and only bumps cwe_mismatches", () => {
   const l = { ...ledger, entries: [{ test_id: "BenchmarkTest00001", semgrep_flagged: true, oswe_covered: true, oswe_adjudication: "promoted", oswe_independent: false, cwe: 999 }] };
   const r = computeMetrics(l, truth);
@@ -1051,6 +1079,10 @@ export function parseTruthCsv(text) {
 
 function validateLedger(ledger, truth) {
   if (!ledger || typeof ledger !== "object" || !Array.isArray(ledger.entries)) return "ledger.entries[] missing";
+  // Top level: additionalProperties:false + required string metadata (spec §3.7.1).
+  const topAllowed = new Set(["dataset", "subset", "generated", "entries"]);
+  for (const k of Object.keys(ledger)) if (!topAllowed.has(k)) return `unknown top-level ledger field: ${k}`;
+  for (const k of ["dataset", "subset", "generated"]) if (typeof ledger[k] !== "string" || !ledger[k]) return `ledger.${k} must be a non-empty string`;
   const seen = new Set();
   const allowed = new Set(["test_id", "semgrep_flagged", "oswe_covered", "oswe_adjudication", "oswe_independent", "cwe"]);
   for (const e of ledger.entries) {
@@ -1544,13 +1576,13 @@ Set `L001`'s `uri`/`startLine` to the real `render_template_string` sink line, a
 
 Run (from repo root, writing inputs to a temp dir):
 ```bash
-node -e '
+node --input-type=module -e '
 const { ingestSarif } = await import("./skills/audit/scripts/ingest-sarif.mjs");
-const fs = require("fs");
-const r = ingestSarif(process.cwd()+"/test-fixtures/python/vulnerable", fs.readFileSync("test-fixtures/sarif-demo/results.sarif","utf8"));
+const { readFileSync } = await import("node:fs");
+const r = ingestSarif(process.cwd()+"/test-fixtures/python/vulnerable", readFileSync("test-fixtures/sarif-demo/results.sarif","utf8"));
 console.log(JSON.stringify(r.stats), r.leads.map(l=>l.lead_id+":"+l.location.file+":"+l.location.line+":"+l.vuln_class_hint));
 if(!r.ok || r.leads.length!==2) throw new Error("demo SARIF did not yield 2 leads: "+r.error);
-' --input-type=module
+'
 ```
 Expected: `ok`, 2 leads, both files repo-relative under the fixture. (If a path drops, fix the `uri`.)
 
