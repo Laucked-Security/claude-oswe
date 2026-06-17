@@ -98,7 +98,7 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
   mislabeled, or duplicate-id findings. (The aggregator in §4 also rejects a globally duplicate
   `finding_id` as a backstop.)
 - **Leads.** Pass each partition's assigned leads to its analyzer (inline or subagent). The
-  `analyzer-response` must contain **exactly one `adjudicated_leads entry per assigned lead`** (the
+  `analyzer-response` must contain **exactly one `adjudicated_leads` entry per assigned lead** (the
   schema validates the entry shape; binding checks the 1:1 coverage). A `promoted` entry's `finding_id`
   must match a `finding` in the same response, and that finding must carry the `lead_id` in
   `source_lead_ids` with `origin: "sast-lead"`. **Reject (and treat as a binding mismatch — retry once,
