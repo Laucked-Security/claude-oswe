@@ -3,7 +3,7 @@
 // CLI: node ingest-sarif.mjs --file <input.json> --out <leads.json>
 //   input.json: { "projectDir": "<abs>", "sarifPath": "<path under projectDir>" }
 //   exit 0 ok / 1 malformed SARIF or a self-built lead that fails its schema / 2 IO|usage.
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, isAbsolute, resolve, sep } from "node:path";
 import { confinePath } from "./confine-path.mjs";
