@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 const SEV = ["Info", "Low", "Medium", "High"];                 // analyzer never emits Critical
 const CONF = ["to verify", "likely", "strong static proof"];
 const AUTH = ["unauthenticated", "authenticated", "admin"];        // index 0 = most exposed
+const originOf = (f) => f.origin || "llm-discovered";
 
 // Canonical serialization (recursively key-sorted) so equivalent objects with differently-ordered
 // properties produce the SAME key — and no control bytes are used as separators.
@@ -44,6 +45,11 @@ export function aggregateFindings(rawFindings) {
   for (const group of groups.values()) {
     const rep = [...group].sort((a, b) => cmp(a.finding_id, b.finding_id))[0];
     const union = (sel) => uniqSortedObjects(group.flatMap((f) => f[sel] || []));
+    const origins = new Set(group.map(originOf));
+    const mergedOrigin = origins.size === 1 ? [...origins][0]
+      : (origins.has("llm-discovered") && origins.has("sast-lead")) ? "both"
+        : (origins.has("both") ? "both" : [...origins].sort()[0]);
+    const leadIds = uniqSortedStrings(group.flatMap((f) => f.source_lead_ids || []));
     merged.push({
       finding_id: "PENDING",
       partition_id: rep.partition_id,
@@ -62,8 +68,10 @@ export function aggregateFindings(rawFindings) {
       confidence: CONF[Math.min(...group.map((f) => CONF.indexOf(f.confidence)))],
       verification_status: "not-requested",
       partitions: uniqSortedStrings(group.map((f) => f.partition_id)),
-      source_finding_ids: uniqSortedStrings(group.map((f) => f.finding_id))
+      source_finding_ids: uniqSortedStrings(group.map((f) => f.finding_id)),
+      origin: mergedOrigin
     });
+    if (leadIds.length) merged[merged.length - 1].source_lead_ids = leadIds;
   }
 
   merged.sort((a, b) =>

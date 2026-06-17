@@ -65,3 +65,25 @@ If you cannot analyze part of the partition (too large, unreadable, out of scope
 with `file:line` evidence. **Do not emit** `partitions`, `source_finding_ids`, `final_severity`, or
 `final_confidence` — these are orchestration-only fields and are rejected by
 `analyzer-response.schema.json`.
+
+## SARIF leads (when provided)
+
+Your dispatch may include a list of **SARIF leads** for your partition: each is
+`{ lead_id, tool, rule_id, vuln_class_hint, location {file,line}, codeflow?, message }`. A lead is a
+*third-party tool's suspicion*, **not** a confirmed finding. For **every** lead assigned to you, read
+the cited code and decide:
+
+- **promoted** — it is a real source→sink you can substantiate. Emit a normal `finding` for it AND an
+  `adjudicated_leads` entry `{ lead_id, outcome: "promoted", finding_id }` whose `finding_id` matches
+  that finding. On the promoted finding set `origin: "sast-lead"` and `source_lead_ids: [<lead_id>]`.
+  (If you ALSO found it independently, still set `origin: "sast-lead"` — the aggregator upgrades it to
+  `"both"` when it merges with your independent finding. **Never emit `origin: "both"` yourself.**)
+- **refuted** — the cited code is not exploitable (constant input, effective sanitizer, unreachable,
+  wrong sink). Emit `{ lead_id, outcome: "refuted", reason: "<evidence-based, file:line>" }` and **no**
+  finding. This is the precision win — be specific about WHY.
+- **inconclusive** — you cannot decide from the available source. Emit `{ lead_id, outcome:
+  "inconclusive", reason: "<what's missing>" }`.
+
+Rules: produce **exactly one** `adjudicated_leads` entry per assigned lead (never drop one); your own
+independently-discovered findings (not tied to a lead) set `origin: "llm-discovered"` (or omit
+`origin`). The `vuln_class_hint` is advisory — trust the code, not the hint.

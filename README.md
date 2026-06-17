@@ -63,6 +63,8 @@ self-contained, zero-dependency file (AJV is a **dev-only** tool used to regener
 ```text
 /oswe:audit                # audit the whole project
 /oswe:audit src/api        # restrict to a sub-path (kept inside the project root)
+/oswe:audit --sarif results.sarif        # also adjudicate a SAST's findings (Semgrep/CodeQL SARIF)
+/oswe:audit --sarif results.sarif src/api  # ...restricted to a sub-path
 ```
 
 The audit **never auto-runs** (`disable-model-invocation: true`) — it triggers only on the explicit
@@ -101,6 +103,16 @@ Report:  .oswe/reports/oswe-report-2026-06-16-1600.md  (+ .html)
 
 Each stack has a curated source→sink reference under [`skills/audit/references/`](skills/audit/references/).
 A polyglot repo loads every relevant reference and partitions the audit by stack.
+
+---
+
+## Hybrid mode — make your SAST precise (optional)
+
+Pass a SARIF file and `oswe` treats each result as a **lead**: it reads the cited code and either
+**promotes** it into a proven finding (chained + verified like any other) or **refutes** it with a
+reason. You get your SAST's scale and rule coverage, plus `oswe`'s discovery of the logic/auth bugs
+SAST misses — and a report where every item is proven or explicitly refuted. A reproducible benchmark
+(`benchmark/`) scores the precision/recall delta vs raw Semgrep on the OWASP Benchmark.
 
 ---
 

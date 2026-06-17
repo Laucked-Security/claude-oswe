@@ -53,6 +53,14 @@ never outlive the audit. Rules:
   It prints the confined real path (exit 0), or exits non-zero on a nonexistent path or one that
   escapes `${CLAUDE_PROJECT_DIR}` (`../`, symlink/junction, sibling-prefix like `project-old`). On a
   non-zero exit, **purge `.oswe/tmp/` and abort the audit** with the printed message. `arg: null` → scope = project root.
+- **Optional `--sarif <path>` (additive to the scope arg).** If `$ARGUMENTS` contains `--sarif <path>`,
+  confine `<path>` with `confine-path.mjs` (same temp-file + `trap` discipline), then ingest it:
+  write `{ "projectDir": "<CLAUDE_PROJECT_DIR>", "sarifPath": "<confined path>" }` to a literal temp
+  file and run
+  `( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/sarif-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/leads-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/ingest-sarif.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/sarif-in-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/leads-<token>.json" )`.
+  Exit 1 = malformed SARIF → note it and proceed with **no leads** (the audit still runs LLM-only);
+  exit 2 = our IO/usage bug → fix the call. On exit 0, read the `leads[]` and `stats` into orchestration
+  state. **No `--sarif` → leads = `[]` and the rest of the pipeline is byte-for-byte unchanged.**
 - Detect **all stacks present** (a repo may be polyglot) via manifests (`composer.json`, `package.json`, `pyproject.toml`/
   `requirements.txt`, `pom.xml`/`build.gradle`, `*.csproj`) and file extensions; detect **framework**
   via dependencies/structure.
@@ -69,6 +77,9 @@ never outlive the audit. Rules:
 ### 2. Partition & prioritize
 Partition the surface **by module / framework / authentication boundary** (never one agent per
 route). Prioritize partitions by exposure to the **unauthenticated** surface.
+- **Assign each SARIF lead to the partition that contains its `location.file`.** A lead whose file is
+  in no analyzed partition (excluded dir, or beyond the partition budget) is recorded as a **coverage
+  gap ("lead not analyzed")** — never silently dropped (the precision ledger must account for every lead).
 
 ### 3. Analyze
 - **Small repo (≤ 2 partitions):** analyze inline yourself (no analyzer *subagents*) — but you MUST
@@ -86,6 +97,15 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
   repeat like two `P-F001` makes `source_finding_ids` ambiguous). Never aggregate cross-partition,
   mislabeled, or duplicate-id findings. (The aggregator in §4 also rejects a globally duplicate
   `finding_id` as a backstop.)
+- **Leads.** Pass each partition's assigned leads to its analyzer (inline or subagent). The
+  `analyzer-response` must contain **exactly one `adjudicated_leads` entry per assigned lead** (the
+  schema validates the entry shape; binding checks the 1:1 coverage). A `promoted` entry's `finding_id`
+  must match a `finding` in the same response, and that finding must carry the `lead_id` in
+  `source_lead_ids` with `origin: "sast-lead"`. **Reject (and treat as a binding mismatch — retry once,
+  else coverage gap) any response that:** omits a lead, references an unknown `lead_id`, promotes to a
+  missing `finding_id`, or emits a raw finding with `origin: "both"` (a `"both"` origin is produced only
+  by the aggregator). Record every `refuted` lead (with reason) for the report's "Refuted SAST leads"
+  annex, and every `inconclusive`/`not-analyzed` lead for Coverage.
 - **`status` semantics** (the field is in the envelope): `ok` → aggregate `findings`, merge `coverage`;
   `partial` → aggregate the `findings` present **and** copy `coverage.skipped` into Coverage (never
   silently dropped); `error` → **do not aggregate** (the findings may be unsound).
@@ -234,6 +254,12 @@ a gap). So in 6b you should only ever see `ok:true`. If you somehow see `ok:fals
 Write `${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md` (always relative to the
 project root) and print a chat summary. Findings are reported by **`final_severity`** (falling back
 to `provisional_severity` only for `not-requested` items). See Report format below.
+- **Hybrid sections — only when leads were ingested (`leads.length > 0`).** When SARIF leads were
+  ingested, add to the report: (a) a one-line **origin breakdown** in the executive summary
+  (counts of LLM-only / SAST-only / both findings, from each final finding's `origin`); and (b) an
+  annex **"Refuted SAST leads"** listing each refuted lead's `lead_id`, `rule_id`, `file:line`, and
+  reason. `inconclusive`/`not-analyzed` leads are listed under **Coverage**, not here. **With no
+  `--sarif` (leads empty), neither section is emitted and the Markdown is identical to today's output.**
 
 **Then emit the visual HTML report (alongside the `.md`, same basename).** Build a **non-sensitive
 `summary` object** (see "HTML export" below) from the final findings/chains/`gaps` plus the

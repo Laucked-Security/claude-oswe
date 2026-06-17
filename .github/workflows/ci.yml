@@ -31,6 +31,10 @@ jobs:
         working-directory: skills/audit/scripts
         run: node --test
 
+      - name: Run benchmark engine unit tests
+        working-directory: benchmark
+        run: node --test
+
       - name: Structure & consistency gate (stacks / references / fixtures markers)
         run: node .github/scripts/check-structure.mjs
 

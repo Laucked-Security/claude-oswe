@@ -97,3 +97,25 @@ test("CLI exits 0/1/2 (spawnSync)", () => {
   assert.equal(spawnSync(process.execPath, [CLI, "--file", inBad, "--out", out]).status, 1);
   assert.equal(spawnSync(process.execPath, [CLI, "--file", inOk]).status, 2); // missing --out
 });
+
+test("origin is carried through; same-origin merge keeps its origin", () => {
+  const a = raw("auth-F001", "auth", { origin: "sast-lead", source_lead_ids: ["L001"] });
+  const r = aggregateFindings([a]);
+  assert.equal(r.findings[0].origin, "sast-lead");
+  assert.deepEqual(r.findings[0].source_lead_ids, ["L001"]);
+});
+
+test("an llm finding and a sast-lead finding on the same key merge to origin:both", () => {
+  const a = raw("auth-F001", "auth", { origin: "llm-discovered" });
+  const b = raw("api-F003", "api", { origin: "sast-lead", source_lead_ids: ["L002"] });
+  const r = aggregateFindings([a, b]);
+  assert.equal(r.findings.length, 1);
+  assert.equal(r.findings[0].origin, "both");
+  assert.deepEqual(r.findings[0].source_lead_ids, ["L002"]);
+});
+
+test("absent origin defaults to llm-discovered, and source_lead_ids is OMITTED when no lead", () => {
+  const r = aggregateFindings([raw("auth-F001", "auth")]);
+  assert.equal(r.findings[0].origin, "llm-discovered");
+  assert.equal(r.findings[0].source_lead_ids, undefined);   // omitted, not [] (spec §3.5)
+});

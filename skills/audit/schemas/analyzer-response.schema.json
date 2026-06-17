@@ -24,6 +24,10 @@
                 { "required": ["partitions"] }
               ]
             }
+          },
+          {
+            "$comment": "origin:both is a derived value produced only by the aggregator.",
+            "not": { "properties": { "origin": { "const": "both" } }, "required": ["origin"] }
           }
         ]
       }
@@ -41,6 +45,24 @@
             "properties": { "path": { "type": "string" }, "reason": { "type": "string" } }
           }
         }
+      }
+    },
+    "adjudicated_leads": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["lead_id", "outcome"],
+        "properties": {
+          "lead_id": { "type": "string", "pattern": "^L[0-9]{3,}$" },
+          "outcome": { "enum": ["promoted", "refuted", "inconclusive"] },
+          "finding_id": { "type": "string", "pattern": "^(.+-F[0-9]{3,}|OSWE-[0-9]+)$" },
+          "reason": { "type": "string", "minLength": 1 }
+        },
+        "allOf": [
+          { "if": { "properties": { "outcome": { "const": "promoted" } } }, "then": { "required": ["finding_id"] } },
+          { "if": { "properties": { "outcome": { "const": "refuted" } } }, "then": { "required": ["reason"] } },
+          { "if": { "properties": { "outcome": { "const": "inconclusive" } } }, "then": { "required": ["reason"] } }
+        ]
       }
     }
   }

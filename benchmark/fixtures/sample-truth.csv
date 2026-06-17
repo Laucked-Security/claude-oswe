@@ -1,0 +1,6 @@
+# test name, category, real vulnerability, cwe
+BenchmarkTest00001,sqli,true,89
+BenchmarkTest00002,sqli,false,89
+BenchmarkTest00003,cmdi,true,78
+BenchmarkTest00004,pathtraver,true,22
+BenchmarkTest00005,xss,false,79
