@@ -12,10 +12,11 @@
     "vuln_class_hint": { "type": "string", "minLength": 1, "maxLength": 64 },
     "location": { "$ref": "#/$defs/loc" },
     "codeflow": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/loc" } },
-    "message": { "type": "string", "maxLength": 512 }
+    "message": { "$comment": "May be empty: ingestion sets it to '' when a SARIF result has no message.text; an absent message must not fail validation.", "type": "string", "maxLength": 512 }
   },
   "$defs": {
     "loc": {
+      "$comment": "SARIF physical location: file + 1-based startLine only. Intentionally NOT finding.schema.json#/$defs/loc (which also requires symbol/kind and allows line 0) — a SARIF location carries neither, and SARIF startLine is 1-based, so line>=1.",
       "type": "object", "additionalProperties": false,
       "required": ["file", "line"],
       "properties": {

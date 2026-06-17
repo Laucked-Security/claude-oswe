@@ -31,3 +31,12 @@ test("unknown property is rejected (additionalProperties:false)", () => {
 test("over-long rule_id is rejected (maxLength 256)", () => {
   assert.equal(Boolean(sarifLead({ ...ok, rule_id: "x".repeat(257) })), false);
 });
+
+test("a missing required field is rejected (e.g. no tool)", () => {
+  const { tool, ...noTool } = ok;
+  assert.equal(Boolean(sarifLead(noTool)), false);
+});
+
+test("a bad loc inside codeflow is rejected (exercises the $ref + minLength on file)", () => {
+  assert.equal(Boolean(sarifLead({ ...ok, codeflow: [{ file: "", line: 1 }] })), false);
+});
