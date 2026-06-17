@@ -1,0 +1,20 @@
+{
+  "semgrep": [
+    { "prefix": "java.lang.security.audit.command-injection", "vuln_class": "command-injection" },
+    { "prefix": "java.lang.security.audit.sqli", "vuln_class": "sqli" },
+    { "prefix": "java.lang.security.audit.formatted-sql-string", "vuln_class": "sqli" },
+    { "prefix": "java.lang.security.audit.tainted-sql-string", "vuln_class": "sqli" },
+    { "prefix": "java.lang.security.audit.ldap-injection", "vuln_class": "ldap-injection" },
+    { "prefix": "java.lang.security.audit.xpath-injection", "vuln_class": "xpath-injection" },
+    { "prefix": "java.lang.security.audit.tainted-path-traversal", "vuln_class": "path-traversal" },
+    { "prefix": "java.lang.security.audit.path-traversal", "vuln_class": "path-traversal" },
+    { "prefix": "java.lang.security.audit.xss", "vuln_class": "xss" },
+    { "prefix": "java.servlets.security.audit.tainted-cmd-from-http", "vuln_class": "command-injection" },
+    { "prefix": "java.lang.security.audit.crypto.weak-hash", "vuln_class": "weak-hashing" },
+    { "prefix": "java.lang.security.audit.crypto.desede-is-deprecated", "vuln_class": "weak-crypto" },
+    { "prefix": "java.lang.security.audit.crypto.ecb-cipher", "vuln_class": "weak-crypto" },
+    { "prefix": "java.lang.security.audit.crypto.weak-random", "vuln_class": "weak-randomness" },
+    { "prefix": "java.lang.security.audit.cookie-missing-secure-flag", "vuln_class": "insecure-cookie" },
+    { "prefix": "java.lang.security.audit.formatted-trust-boundary", "vuln_class": "trust-boundary" }
+  ]
+}

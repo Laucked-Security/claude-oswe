@@ -80,6 +80,21 @@ for (const f of readdirSync(join(ROOT, "skills/audit/schemas"))) {
   re.test(validators) ? ok(`${f} -> export const ${exportName}`) : bad(`${f}: no "export const ${exportName}" in validators.mjs`);
 }
 
+console.log("6) sarif-rule-map.json validity");
+try {
+  const map = JSON.parse(read("skills/audit/references/sarif-rule-map.json"));
+  const tools = Object.keys(map);
+  tools.length ? ok(`sarif-rule-map has ${tools.length} tool(s): ${tools.join(", ")}`) : bad("sarif-rule-map.json has no tools");
+  for (const t of tools) {
+    if (!Array.isArray(map[t])) { bad(`sarif-rule-map["${t}"] is not an array`); continue; }
+    for (const e of map[t]) {
+      if (typeof e.vuln_class !== "string" || !e.vuln_class) bad(`sarif-rule-map["${t}"] entry missing vuln_class`);
+      if (typeof e.prefix !== "string" && typeof e.rule !== "string") bad(`sarif-rule-map["${t}"] entry needs prefix or rule`);
+    }
+  }
+  map.semgrep ? ok("sarif-rule-map has a semgrep table") : bad("sarif-rule-map.json missing 'semgrep' tool");
+} catch (e) { bad("sarif-rule-map.json is not valid JSON: " + e.message); }
+
 console.log("");
 if (errors.length) {
   console.error(`FAIL: ${errors.length} structure violation(s).`);
