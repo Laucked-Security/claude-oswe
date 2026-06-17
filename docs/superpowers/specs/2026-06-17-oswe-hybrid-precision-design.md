@@ -82,8 +82,11 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
   variants to a canonical key (`semgrep-oss`→`semgrep`). A run missing `tool.driver.name` → `tool` =
   `"unknown"`. Then for every `run.results[]` (the result inherits its run's `tool`):
   - extract `ruleId` (fall back to `rule.id`/`rule.index`→`run.tool.driver.rules[index].id` when
-    `ruleId` is absent), `message.text`, `level`, and the **primary location**
-    (`locations[0].physicalLocation.artifactLocation.uri` + `region.startLine`);
+    `ruleId` is absent), `message.text`, and the **primary location**
+    (`locations[0].physicalLocation.artifactLocation.uri` + `region.startLine`). **`result.level` is
+    deliberately NOT extracted** — nothing in the pipeline consumes a SARIF severity (the analyzer
+    establishes severity from the code; the mapping keys on `rule_id`), so it is omitted rather than
+    stored as schema-unused data.
   - **line resolution** — `region.startLine` is **optional** in valid SARIF, but `sarif-lead.line`
     requires `>= 1`. If a location has a `physicalLocation` but **no `region.startLine`** (or it is
     `< 1`/non-integer), the location is **dropped and counted in `dropped_bad_location`** — we do
@@ -91,8 +94,11 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
     benchmark join). For the **primary** location this drops the whole lead; for a **codeflow** step it
     omits that step (codeflow is advisory).
   - if present, extract the first `codeFlows[0].threadFlows[0].locations[]` as an ordered
-    `codeflow[]` of `{file,line}` (the taint source→…→sink path), each subject to the same line/URI
-    rules;
+    `codeflow[]` of `{file,line}` (the taint source→…→sink path), each step subject to the same
+    line/URI rules (a step failing them is omitted). **Because `codeflow` is advisory, cap it at the
+    schema's `maxItems` (64): keep the first 64 valid, confined steps in order and discard the rest
+    *before* writing** — a SARIF thread flow longer than 64 steps must neither balloon memory/temp data
+    nor fail self-validation as an "ingestion bug". (The primary location is never part of this cap.)
   - **truncate** `rule_id`/`vuln_class_hint`/`message` to the schema `maxLength` (UTF-8-safe, §2)
     before storing;
   - **normalize then confine every path** (the primary `uri`, each codeflow file `uri`). The
@@ -142,8 +148,10 @@ node ingest-sarif.mjs --file <input.json> --out <leads.json>
   **`uriBaseId` resolved**, **non-file scheme dropped** (`dropped_bad_uri`), **UNC `file://host/share`
   rejected** (`dropped_bad_uri`), **`file:///C:/…` drive-letter path** handled via `fileURLToPath`,
   **missing artifact path dropped not aborted** (`dropped_missing`), **location with no
-  `region.startLine` dropped** (`dropped_bad_location`), and an **over-long `message`/`rule_id`
-  truncated** to `maxLength`.
+  `region.startLine` dropped** (`dropped_bad_location`), an **over-long `message`/`rule_id`
+  truncated** to `maxLength`, and a **thread flow with > 64 steps truncated to the first 64 valid
+  confined steps** (no ingestion failure). `result.level` present in the input is **never** carried
+  into the emitted lead.
 
 ### 3.2 Rule→vuln_class mapping table
 
