@@ -530,7 +530,13 @@ test("a UNC file authority is rejected (dropped_bad_uri)", () => {
 
 test("a path escaping the root is dropped (dropped_out_of_scope)", () => {
   const root = project(["a.java"]);
-  const r = ingestSarif(root, JSON.stringify(result("../../etc/passwd")));
+  // Use a REAL file in a sibling temp dir (mirrors confine-path.test.mjs): the file must EXIST so
+  // confinePath's realpathSync succeeds and the containment check — not ENOENT — fires. A literal
+  // "../../etc/passwd" would be dropped_missing on Windows (C:\etc\passwd doesn't exist), masking
+  // the escape path. This is cross-platform (Linux/macOS/Windows).
+  const outside = mkdtempSync(join(tmpdir(), "oswe-outside-"));
+  writeFileSync(join(outside, "evil.java"), "x\n");
+  const r = ingestSarif(root, JSON.stringify(result(pathToFileURL(join(outside, "evil.java")).href)));
   assert.equal(r.leads.length, 0);
   assert.equal(r.stats.dropped_out_of_scope, 1);
 });
