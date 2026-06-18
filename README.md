@@ -113,18 +113,20 @@ Pass a SARIF file and `oswe` treats each result as a **lead**: it reads the cite
 reason. You get your SAST's scale and rule coverage, plus `oswe`'s discovery of the logic/auth bugs
 SAST misses — and a report where every item is proven or explicitly refuted.
 
-**Measured against raw Semgrep on OWASP BenchmarkJava** (a 32-case stratified subset across
-`cmdi`/`sqli`/`xss`/`pathtraver`, CWE-matched per the OWASP methodology):
+**Measured against raw Semgrep on OWASP BenchmarkJava** (an 88-case stratified subset spanning
+**all 11 CWE categories**, CWE-matched per the OWASP methodology):
 
 | | precision | false-positive rate |
 |---|---|---|
-| Semgrep (official Java rules) | 0.615 | 0.625 |
+| Semgrep (official Java rules) | 0.732 | 0.341 |
 | **oswe-over-Semgrep** | **1.000** | **0.000** |
 
-`oswe` refuted **all 10** of Semgrep's false positives while keeping its true positives (one
-defensible recall cost, scored against us anyway). On the `xss` slice — where Semgrep was already
-precise — `oswe` correctly added **zero** false refutations. Full result, per-category breakdown, and
-honest caveats: [`benchmark/BENCHMARK.md`](benchmark/BENCHMARK.md); reproduce it via
+`oswe` refuted **all 15** of Semgrep's false positives — across every category — while keeping 40 of
+41 true positives (one defensible recall cost, scored against us anyway). On the categories where
+Semgrep was already precise (`xss`/`weakrand`/`securecookie`/`crypto`), `oswe` added **zero** false
+refutations. It also **recovered a true positive Semgrep missed** (a trust-boundary bug found by LLM
+analysis) and chained a SQLi to **unauthenticated RCE** via HSQLDB `CALL`. Full result, per-category
+breakdown, and honest caveats: [`benchmark/BENCHMARK.md`](benchmark/BENCHMARK.md); reproduce via
 [`benchmark/README.md`](benchmark/README.md).
 
 ---

@@ -10,6 +10,19 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseTruthCsv } from "./metrics.mjs";
 
+// CWE equivalence sets (OWASP Benchmark scores a category by a CWE *family*, not exact id). A Semgrep
+// flag counts as CWE-matched if its CWE is in the accepted set for the case's expected CWE. The only
+// equivalence the official Java rules actually need: weak-crypto cases are labelled CWE-327 (broken
+// algorithm) while Semgrep's `des(ede)-is-deprecated` rules tag CWE-326 (inadequate strength) — sibling
+// crypto-strength weaknesses; DES is legitimately both. Without this, a real Semgrep detection on the
+// 4 crypto cases would be scored as a MISS, which would falsely inflate oswe's recall-recovery delta.
+export const CWE_EQUIV = { 326: new Set([326, 327]), 327: new Set([326, 327]) };
+const accepts = (expectedCwe, flaggedSet) => {
+  const ok = CWE_EQUIV[expectedCwe] || new Set([expectedCwe]);
+  for (const c of flaggedSet) if (ok.has(c)) return true;
+  return false;
+};
+
 // rule id -> Set(cwe numbers), parsed from rule.properties.tags entries like "CWE-78: ...".
 export function ruleCweMap(run) {
   const m = new Map();
@@ -46,7 +59,7 @@ export function scoreRaw(ids, flagged, truth) {
   for (const id of ids) {
     const t = truth.get(id);
     if (!t) continue;
-    const pred = (flagged.get(id) || new Set()).has(t.cwe);
+    const pred = accepts(t.cwe, flagged.get(id) || new Set());
     if (pred && t.real) tp++;
     else if (pred && !t.real) fp++;
     else if (!pred && t.real) fn++;
@@ -92,7 +105,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const sub = scoreRaw(subset.test_ids, flagged, truth);
   const cases = subset.test_ids
     .filter((id) => truth.has(id))
-    .map((id) => ({ test_id: id, semgrep_flagged: (flagged.get(id) || new Set()).has(truth.get(id).cwe), cwe: truth.get(id).cwe }));
+    .map((id) => ({ test_id: id, semgrep_flagged: accepts(truth.get(id).cwe, flagged.get(id) || new Set()), cwe: truth.get(id).cwe }));
   const out = { dataset: subset.dataset || "owasp-benchmark-java-1.2", generated: new Date().toISOString().slice(0, 10), semgrep_raw: { full, subset: sub }, cases };
   try {
     writeFileSync(outPath, JSON.stringify(out, null, 2) + "\n");

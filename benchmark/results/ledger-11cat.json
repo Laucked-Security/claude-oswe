@@ -1,0 +1,711 @@
+{
+  "dataset": "owasp-benchmark-java-1.2",
+  "subset": "benchmark/subset-owasp.json",
+  "generated": "2026-06-18",
+  "entries": [
+    {
+      "test_id": "BenchmarkTest00001",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00002",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00003",
+      "semgrep_flagged": false,
+      "cwe": 328,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00004",
+      "semgrep_flagged": false,
+      "cwe": 501,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": true
+    },
+    {
+      "test_id": "BenchmarkTest00005",
+      "semgrep_flagged": true,
+      "cwe": 327,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00006",
+      "semgrep_flagged": true,
+      "cwe": 78,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00007",
+      "semgrep_flagged": true,
+      "cwe": 78,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00008",
+      "semgrep_flagged": true,
+      "cwe": 89,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00009",
+      "semgrep_flagged": false,
+      "cwe": 328,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00010",
+      "semgrep_flagged": false,
+      "cwe": 330,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00011",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00012",
+      "semgrep_flagged": true,
+      "cwe": 90,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00013",
+      "semgrep_flagged": true,
+      "cwe": 79,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00014",
+      "semgrep_flagged": true,
+      "cwe": 79,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00015",
+      "semgrep_flagged": true,
+      "cwe": 78,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00016",
+      "semgrep_flagged": false,
+      "cwe": 614,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00017",
+      "semgrep_flagged": true,
+      "cwe": 78,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00018",
+      "semgrep_flagged": true,
+      "cwe": 89,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00019",
+      "semgrep_flagged": true,
+      "cwe": 327,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00020",
+      "semgrep_flagged": true,
+      "cwe": 327,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00021",
+      "semgrep_flagged": true,
+      "cwe": 90,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00022",
+      "semgrep_flagged": false,
+      "cwe": 328,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00023",
+      "semgrep_flagged": true,
+      "cwe": 330,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00024",
+      "semgrep_flagged": true,
+      "cwe": 89,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00025",
+      "semgrep_flagged": true,
+      "cwe": 89,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00028",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00029",
+      "semgrep_flagged": false,
+      "cwe": 328,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00030",
+      "semgrep_flagged": true,
+      "cwe": 79,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00031",
+      "semgrep_flagged": true,
+      "cwe": 501,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00035",
+      "semgrep_flagged": true,
+      "cwe": 327,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00036",
+      "semgrep_flagged": true,
+      "cwe": 79,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00042",
+      "semgrep_flagged": false,
+      "cwe": 330,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00044",
+      "semgrep_flagged": true,
+      "cwe": 90,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00046",
+      "semgrep_flagged": true,
+      "cwe": 328,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00051",
+      "semgrep_flagged": true,
+      "cwe": 78,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00052",
+      "semgrep_flagged": false,
+      "cwe": 89,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00054",
+      "semgrep_flagged": false,
+      "cwe": 327,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00058",
+      "semgrep_flagged": false,
+      "cwe": 327,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00059",
+      "semgrep_flagged": false,
+      "cwe": 327,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00063",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00064",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00066",
+      "semgrep_flagged": true,
+      "cwe": 330,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00067",
+      "semgrep_flagged": true,
+      "cwe": 330,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00068",
+      "semgrep_flagged": true,
+      "cwe": 330,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00069",
+      "semgrep_flagged": false,
+      "cwe": 328,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00070",
+      "semgrep_flagged": true,
+      "cwe": 328,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00072",
+      "semgrep_flagged": false,
+      "cwe": 328,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00087",
+      "semgrep_flagged": true,
+      "cwe": 614,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00088",
+      "semgrep_flagged": false,
+      "cwe": 614,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00089",
+      "semgrep_flagged": false,
+      "cwe": 614,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00090",
+      "semgrep_flagged": true,
+      "cwe": 78,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00093",
+      "semgrep_flagged": false,
+      "cwe": 78,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00094",
+      "semgrep_flagged": false,
+      "cwe": 330,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00095",
+      "semgrep_flagged": false,
+      "cwe": 330,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00097",
+      "semgrep_flagged": false,
+      "cwe": 501,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00098",
+      "semgrep_flagged": true,
+      "cwe": 501,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00099",
+      "semgrep_flagged": false,
+      "cwe": 501,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00104",
+      "semgrep_flagged": true,
+      "cwe": 89,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00105",
+      "semgrep_flagged": true,
+      "cwe": 89,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00107",
+      "semgrep_flagged": true,
+      "cwe": 89,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00116",
+      "semgrep_flagged": false,
+      "cwe": 643,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00117",
+      "semgrep_flagged": true,
+      "cwe": 643,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00118",
+      "semgrep_flagged": true,
+      "cwe": 643,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00121",
+      "semgrep_flagged": false,
+      "cwe": 327,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00131",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00132",
+      "semgrep_flagged": true,
+      "cwe": 22,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00138",
+      "semgrep_flagged": true,
+      "cwe": 90,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00139",
+      "semgrep_flagged": false,
+      "cwe": 90,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00147",
+      "semgrep_flagged": false,
+      "cwe": 79,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00151",
+      "semgrep_flagged": false,
+      "cwe": 79,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00158",
+      "semgrep_flagged": true,
+      "cwe": 78,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00169",
+      "semgrep_flagged": true,
+      "cwe": 614,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00170",
+      "semgrep_flagged": true,
+      "cwe": 614,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00189",
+      "semgrep_flagged": false,
+      "cwe": 501,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00207",
+      "semgrep_flagged": true,
+      "cwe": 643,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00241",
+      "semgrep_flagged": true,
+      "cwe": 614,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00242",
+      "semgrep_flagged": false,
+      "cwe": 614,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00250",
+      "semgrep_flagged": false,
+      "cwe": 501,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00251",
+      "semgrep_flagged": true,
+      "cwe": 501,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00275",
+      "semgrep_flagged": false,
+      "cwe": 79,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00277",
+      "semgrep_flagged": false,
+      "cwe": 79,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00367",
+      "semgrep_flagged": false,
+      "cwe": 90,
+      "oswe_adjudication": "no-lead",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00442",
+      "semgrep_flagged": true,
+      "cwe": 643,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00520",
+      "semgrep_flagged": true,
+      "cwe": 643,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00530",
+      "semgrep_flagged": true,
+      "cwe": 90,
+      "oswe_adjudication": "refuted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00607",
+      "semgrep_flagged": true,
+      "cwe": 643,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest00630",
+      "semgrep_flagged": true,
+      "cwe": 90,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    },
+    {
+      "test_id": "BenchmarkTest01223",
+      "semgrep_flagged": true,
+      "cwe": 643,
+      "oswe_adjudication": "promoted",
+      "oswe_covered": true,
+      "oswe_independent": false
+    }
+  ]
+}

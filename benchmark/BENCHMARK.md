@@ -1,65 +1,93 @@
 # OSWE Hybrid Benchmark — results
 
 **Dataset:** [OWASP BenchmarkJava v1.2](https://github.com/OWASP-Benchmark/BenchmarkJava) (Apache-2.0).
-**Sample:** a deterministic, balanced **32-case stratified subset** — 4 real + 4 non-vulnerable per CWE
-category — across **4 of the 11 categories** (`cmdi`, `sqli`, `xss`, `pathtraver`).
-See [`subset-owasp.json`](subset-owasp.json) (the full 88-case subset) and [`make-subset.mjs`](make-subset.mjs).
+**Sample:** a deterministic, balanced **88-case stratified subset** — up to 4 real + 4 non-vulnerable per
+CWE category — across **all 11 categories**. See [`subset-owasp.json`](subset-owasp.json) /
+[`make-subset.mjs`](make-subset.mjs).
 **Baseline tool:** Semgrep OSS 1.167 with the official `semgrep-rules/java/lang/security` ruleset,
-scored **CWE-matched** per the OWASP Benchmark methodology (a flag counts only if it carries the case's
-expected CWE). **Date:** 2026-06-18. Fully reproducible — see [`README.md`](README.md).
+scored **CWE-matched** per the OWASP methodology (a flag counts only if it carries the case's expected
+CWE, with the documented 326≡327 crypto-sibling equivalence — see [`score-semgrep.mjs`](score-semgrep.mjs)
+`CWE_EQUIV`). **Date:** 2026-06-18. Reproducible — see [`README.md`](README.md).
 
-## Headline (32 cases, 4 categories)
+## Headline (88 cases, 11 categories)
 
 | matrix | tp | fp | fn | tn | precision | recall | fpr | youden |
 |---|---|---|---|---|---|---|---|---|
-| `semgrep_raw` | 16 | 10 | 0 | 6 | **0.615** | 1.000 | **0.625** | 0.375 |
-| `oswe_over_semgrep` | 15 | 0 | 1 | 10 | **1.000** | 0.938 | **0.000** | **0.938** |
-| `hybrid` | 15 | 0 | 1 | 16 | 1.000 | 0.938 | 0.000 | 0.938 |
+| `semgrep_raw` | 41 | 15 | 3 | 29 | **0.732** | 0.932 | **0.341** | 0.591 |
+| `oswe_over_semgrep` | 40 | 0 | 1 | 15 | **1.000** | 0.976 | **0.000** | **0.976** |
+| `hybrid` | 41 | 0 | 3 | 44 | 1.000 | 0.932 | 0.000 | 0.932 |
 
-**Deltas:** Semgrep false positives refuted = **10 / 10**; recall cost = **1**; false-negatives
-recovered = 0.
+**Deltas:** Semgrep false positives refuted = **15 / 15** (every one); recall cost = **1**;
+false-negatives recovered = **1**.
 
-oswe's adjudication layer **refuted every one of Semgrep's 10 false positives** while keeping its true
-positives — lifting precision **0.615 → 1.000** and collapsing the false-positive rate **0.625 → 0.000**.
-Balanced accuracy (Youden's J) rises **0.375 → 0.938**.
+oswe's adjudication layer **refuted all 15 of Semgrep's false positives across all 11 categories**,
+lifting precision **0.732 → 1.000** and collapsing the false-positive rate **0.341 → 0.000** — while
+**keeping 40 of 41 true positives**. Balanced accuracy (Youden's J) rises **0.591 → 0.976**.
 
 ## Per category (`semgrep_raw` → `oswe_over_semgrep`)
 
 | category | Semgrep P / FPR | oswe P / FPR | Semgrep FPs refuted |
 |---|---|---|---|
-| `cmdi` | 0.571 / 0.750 | 1.000 / 0.000 | 3 / 3 |
-| `sqli` | 0.571 / 0.750 | 1.000 / 0.000 | 3 / 3 |
-| `xss` | 1.000 / 0.000 | 1.000 / 0.000 | 0 / 0 (control) |
-| `pathtraver` | 0.500 / 1.000 | 1.000 / 0.000 | 4 / 4 |
+| `cmdi` | 0.571 / 0.750 | 1.000 / 0.000 | 3 |
+| `sqli` | 0.571 / 0.750 | 1.000 / 0.000 | 3 |
+| `pathtraver` | 0.500 / 1.000 | 1.000 / 0.000 | 4 |
+| `ldapi` | 0.667 / 0.500 | 1.000 / 0.000 | 2 |
+| `xpathi` | 0.571 / 0.750 | 1.000 / 0.000 | 3 |
+| `xss` | 1.000 / 0.000 | 1.000 / 0.000 | 0 (control) |
+| `weakrand` | 1.000 / 0.000 | 1.000 / 0.000 | 0 (control) |
+| `securecookie` | 1.000 / 0.000 | 1.000 / 0.000 | 0 (control) |
+| `crypto` | 1.000 / 0.000 | 1.000 / 0.000 | 0 (control) |
+| `hash` | 1.000 / 0.000 | 1.000 / 0.000 | 0 |
+| `trustbound` | 1.000 / 0.000 | 1.000 / 0.000 | 0 (+1 FN recovered) |
 
-`xss` is the **negative control**: Semgrep was already precise there (0 FPs), and oswe correctly
-**did not over-refute** — it promoted all 4 real findings and added no false refutations. `pathtraver`
-is the most dramatic: Semgrep flagged *every* non-vulnerable case (FPR 1.000); oswe refuted all four.
+**Every category lands at oswe precision 1.000 / FPR 0.000.** The five noisy categories
+(`cmdi`/`sqli`/`pathtraver`/`ldapi`/`xpathi`) are where the refutations happen; the already-precise
+categories are **negative controls** — oswe added **zero** false refutations on any of them, so the
+precision gain never came at the cost of breaking Semgrep's correct findings.
+
+## Beyond precision
+
+- **A real SQLi→RCE chain Semgrep can't express.** On `BenchmarkTest00008` oswe promoted the SQLi *and*
+  chained it to **unauthenticated RCE** via HSQLDB's `CALL` statement invoking `java.lang.Runtime.exec`
+  — a verifier-accepted Critical. SAST rules flag the injection; only the chaining layer reaches RCE.
+- **One false-negative recovered by LLM discovery.** `trustbound/BenchmarkTest00004` stores a tainted
+  HTTP value as a session attribute **key**; Semgrep's rule models value-taint only and missed it. oswe
+  found it independently (`origin: llm-discovered`) — the hybrid edge SAST-alone can't give.
+- **Honest downgrade.** A `pathtraver` arbitrary-file-write was offered as an RCE chain (drop a JSP
+  webshell); the verifier **downgraded** the RCE pivot to `likely` because Tomcat/JSP config wasn't in
+  the staged sources. The write primitive stayed High. The auditor pushes back on its own analyzer.
 
 ## Honest caveats
 
-- **Scope.** 32 cases across 4 of 11 categories — a stratified sample, not the full 2740-case corpus.
-  The claim is precisely "on this declared subset", consistent with the audit's coverage philosophy.
 - **The 1 recall cost is a deliberate, defensible refutation, counted against oswe anyway.**
-  `BenchmarkTest00007` (cmdi) is labelled vulnerable by OWASP because tainted input reaches
-  `Runtime.exec(...)` — but it reaches the **`envp` (environment) argument**, not the command array;
-  the command itself is a static script path. Env-var *values* are not interpreted as commands, so the
-  refutation is arguably **more correct than the OWASP label** (a known Benchmark labeling weakness).
-  We score it as a false-negative under strict OWASP scoring regardless — no result-cooking.
-- **`recall 1.000` for Semgrep here** reflects that these four categories are "easy" for Semgrep's
-  interprocedural taint rules (it flagged every real vuln in-subset), so there were no false-negatives
-  for the hybrid to recover (`fn_recovered = 0`). On harder categories that gap may appear.
-- **One staging lesson** (cost a wasted run): a category's `helpers/` classes must be in audit scope —
-  `BenchmarkTest00051` was briefly false-promoted until `SeparateClassRequest.getTheValue` (a constant
-  "safe source" returning `"bar"`) was visible. `stage-cases.mjs` now always stages the full helpers tree.
+  `cmdi/BenchmarkTest00007` is labelled vulnerable because tainted input reaches `Runtime.exec(...)` —
+  but it reaches the **`envp` (environment) argument**, not the command array; the command itself is a
+  static script path. Env-var *values* aren't interpreted as commands, so the refutation is arguably
+  **more correct than the OWASP label** (a known Benchmark labeling weakness). Scored as a miss under
+  strict OWASP scoring regardless — no result-cooking.
+- **Two hash cases (`00003`, `00029`) are a staging-scope artifact, not an oswe reasoning failure**, and
+  they only affect the *hybrid* recall (they are not Semgrep-flagged, so they never touch the precision
+  headline). Both do `getInstance(getProperty("hashAlg1","SHA512"))`; the OWASP runtime config sets
+  `hashAlg1=MD5` in `benchmark.properties`. The first run didn't have that resource file in audit scope,
+  so oswe saw only the strong-looking `SHA512` default and judged them safe — exactly the same class of
+  gap as the helper-file gap below. `stage-cases.mjs` now stages `src/main/resources` too; a corrected
+  re-run is expected to flip these to recovered FNs (hybrid recall → 1.000).
+- **CWE 326≡327 equivalence** (documented in `score-semgrep.mjs`): without it, Semgrep's correct crypto
+  detections (tagged CWE-326) would be scored as misses against the CWE-327 labels, *falsely inflating*
+  oswe's recall-recovery. The equivalence makes Semgrep look better — the honest direction.
+- **Scope.** 88 cases across all 11 categories — a stratified sample (8/category), not the full 2740.
+  The claim is precisely "on this declared subset", consistent with the audit's coverage philosophy.
+- **Staging lesson** (cost one wasted run): a category's `helpers/` classes and `resources/` must be in
+  audit scope — `BenchmarkTest00051` was briefly false-promoted until `SeparateClassRequest.getTheValue`
+  (a constant "safe source" returning `"bar"`) was visible. `stage-cases.mjs` now stages both trees.
 
 ## Reproduce
 
-The sanitized ledger backing this table is [`results/ledger-4cat.json`](results/ledger-4cat.json)
+The sanitized ledger backing this table is [`results/ledger-11cat.json`](results/ledger-11cat.json)
 (test ids + booleans + CWE only — no code, paths, or secrets). Regenerate the table:
 
 ```bash
-node benchmark/metrics.mjs --ledger benchmark/results/ledger-4cat.json \
+node benchmark/metrics.mjs --ledger benchmark/results/ledger-11cat.json \
   --truth external/BenchmarkJava/expectedresults-1.2.csv --out /tmp/r.json --md benchmark/BENCHMARK.md
 ```
 

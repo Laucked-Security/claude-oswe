@@ -28,12 +28,16 @@ function subsetIdsForCategory(subset, truthCsv, category) {
   return subset.test_ids.filter((id) => cat.get(id) === category);
 }
 
+// Copy a source tree into scope. Includes the file kinds a fixture might read to decide its own
+// behaviour: .java (helpers/sources), .properties (benchmark.properties → hashAlg1/cryptoAlg1), .xml
+// (e.g. xpathi's employees.xml). Other artifacts are skipped to keep the staged scope tight.
+const STAGE_EXT = /\.(java|properties|xml)$/;
 function copyTree(srcDir, dstDir) {
   mkdirSync(dstDir, { recursive: true });
   for (const e of readdirSync(srcDir)) {
     const s = join(srcDir, e), d = join(dstDir, e);
     if (statSync(s).isDirectory()) copyTree(s, d);
-    else if (e.endsWith(".java")) copyFileSync(s, d);
+    else if (STAGE_EXT.test(e)) copyFileSync(s, d);
   }
 }
 
@@ -80,11 +84,18 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   }
   copyTree(helpersSrc, join(stageRel, "org", "owasp", "benchmark", "helpers")); // full helpers tree in scope
 
+  // Stage src/main/resources too: some cases read their algorithm/config from benchmark.properties
+  // (e.g. hash cases do getProperty("hashAlg1","SHA512") but the file sets hashAlg1=MD5). Without the
+  // properties in scope the analyzer can only see the strong-looking default and misjudges the case.
+  const resourcesSrc = join(corpus, "..", "..", "..", "..", "resources"); // src/main/java/org/owasp/benchmark -> src/main/resources
+  let stagedResources = 0;
+  try { copyTree(resourcesSrc, join(stageRel, "resources")); stagedResources = 1; } catch { /* resources optional */ }
+
   const filtered = filterSarif(sarif, ids, stageRel);
   writeFileSync(`${outBase}/${category}.sarif`, JSON.stringify(filtered, null, 2));
 
   process.stdout.write(
-    `staged ${ids.length} ${category} cases + helpers -> ${stageRel}\n` +
+    `staged ${ids.length} ${category} cases + helpers${stagedResources ? " + resources" : ""} -> ${stageRel}\n` +
     `SARIF leads: ${filtered.runs[0].results.length} -> ${outBase}/${category}.sarif\n` +
     `RUN:  /oswe:audit --sarif ${outBase}/${category}.sarif ${stageRel}\n`
   );

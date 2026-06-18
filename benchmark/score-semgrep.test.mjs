@@ -52,6 +52,21 @@ test("scoreRaw is CWE-matched: right-CWE flag counts, wrong-CWE does not", () =>
   assert.equal(m.fpr, 0.5);
 });
 
+test("crypto CWE equivalence: a CWE-326 Semgrep flag counts for a CWE-327 case", () => {
+  // a real crypto case labelled CWE-327, flagged by a rule tagged CWE-326 (des-is-deprecated)
+  const cryptoSarif = {
+    version: "2.1.0",
+    runs: [{
+      tool: { driver: { name: "Semgrep", rules: [{ id: "r.des", properties: { tags: ["CWE-326: Inadequate Encryption Strength"] } }] } },
+      results: [{ ruleId: "r.des", locations: [{ physicalLocation: { artifactLocation: { uri: "x/BenchmarkTest05000.java" } } }] }]
+    }]
+  };
+  const cryptoTruth = parseTruthCsv("# h\nBenchmarkTest05000,crypto,true,327\n");
+  const m = scoreRaw(["BenchmarkTest05000"], flaggedByCase(cryptoSarif), cryptoTruth);
+  // 326 must be accepted for the 327 case -> this is a true positive, NOT a false negative
+  assert.deepEqual([m.tp, m.fp, m.fn, m.tn], [1, 0, 0, 0]);
+});
+
 test("a flagged map entry per subset case is derivable for the ledger", () => {
   const f = flaggedByCase(sarif);
   const cases = ids.map((id) => ({ test_id: id, semgrep_flagged: (f.get(id) || new Set()).has(truth.get(id).cwe), cwe: truth.get(id).cwe }));
