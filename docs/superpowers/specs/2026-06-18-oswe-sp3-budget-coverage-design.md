@@ -113,10 +113,14 @@ node surface-scan.mjs --file <input.json> --out <vectors.json>
   ` ```surface ` fence as JSON). A partition whose `stack` has **no matching surface block**
   (unsupported/unknown stack) is marked **`scannable: false`** — this is the §1.5 distinction.
 - For each **scannable** partition, confine each file path to `projectDir` (reuse `confine-path`
-  logic), read it, and count tokens per category. The vector carries, per category, both a
-  **file-count** (number of files containing ≥1 token of that category) and a **total-hits** tally:
-  `{ partition_id, stack, scannable: true, files: <n>, sources, sinks, sanitizers, auth_markers, source_hits, sink_hits, auth_hits }`
-  (`sources`/`sinks`/… are file-counts; `*_hits` are total occurrences — §3.3 uses both).
+  logic), read it, and count tokens per category. The vector carries, per category, a **file-count**
+  (number of files containing ≥1 token of that category), a **total-hits** tally, and — critically —
+  the **source∧auth co-location count** `source_and_auth_files` (number of files containing ≥1 source
+  **AND** ≥1 auth marker, decided per file in the same single read — one `&&`, one extra integer, zero
+  added I/O):
+  `{ partition_id, stack, scannable: true, files: <n>, sources, sinks, sanitizers, auth_markers, source_and_auth_files, source_hits, sink_hits, auth_hits }`
+  (`sources`/`sinks`/… are file-counts; `*_hits` are total occurrences; `source_and_auth_files` is the
+  intersection — §3.3's fail-safe depends on it).
 - **Matching discipline mirrors §3.1's inverted curation.** `sources`/`sinks`/`sanitizers` match by
   plain case-sensitive `String.includes` (loose is safe — over-match only over-ranks; e.g. `eval(`
   matching `retrieval(` is a harmless over-rank). **`auth_markers` match on a word boundary**
@@ -124,10 +128,15 @@ node surface-scan.mjs --file <input.json> --out <vectors.json>
   match would falsely suppress the fail-safe (the one unsafe direction), so auth matching is the strict
   one.
 - **Wall-clock note ("cheap" = zero quota, not zero I/O).** The scan reads every in-scope file once —
-  on a very large monorepo that is real I/O (bounded, no LLM, no quota). Bound it: **short-circuit per
-  category per file** (stop scanning a file for a category once its first token hits, for the file-count;
-  the `*_hits` tally may cap per file at a constant). The scan is free in *quota*, linear and bounded in
-  *wall-clock* — name it so a reader doesn't read "cheap" as "instant".
+  on a very large monorepo that is real I/O (bounded, no LLM, no quota). The short-circuit applies
+  **only to the file-counts** (`sources`/`sinks`/`auth_markers`/`source_and_auth_files`: stop scanning a
+  file for a category once its first token hits — presence is binary, so this is safe and bounded).
+  **`sink_hits` stays a true, uncapped total at read time** — it is *not* per-file-capped, because
+  §3.3's size-vs-danger guard depends on seeing the full concentration (the 1-file-30-`eval()` case);
+  the only cap on `sink_hits` is at *scoring* (`min(sink_hits, DENSITY_CAP)`), never at read. Counting
+  the full `sink_hits` is trivial — the file is already read in full for the other categories. The scan
+  is free in *quota*, linear and bounded in *wall-clock* — name it so a reader doesn't read "cheap" as
+  "instant".
 - For each **unscannable** partition: `{ partition_id, stack, scannable: false, files: <n> }` (no
   counts — the surface is *unknown*, not *low*).
 - Exit `0` ok / `1` malformed input (bad partitions[] / unreadable surface block) / `2` IO|usage.
@@ -156,13 +165,17 @@ node allocate-budget.mjs --file <input.json> --out <allocation.json>
     source? a sink?) is binary, independent of how many files carry it.
   - **co-presence bonus:** if `hasSource && hasSink` add `W_COPRESENT` (source+sink together is a live
     attack surface, worth more than either alone).
-  - **auth fail-safe (ambiguity → rank up), on a RATIO not a global zero:** if
-    `hasSource && hasSink && auth_markers < sources` add `W_UNAUTH`. **Why a ratio:** `auth_markers===0`
-    only fail-safes when the partition is auth-*homogeneous*; in a **mixed** partition (one authed file
-    + one open route) a single auth file would make `auth_markers>0`, cancel the bonus for the open
-    route, and let it fall into a gap — the unsafe direction. `auth_markers < sources` (auth markers
-    don't blanket the source-bearing files) keeps the fail-safe firing on partitions that aren't
-    uniformly gated. (`auth_markers===0` is the trivial sub-case.)
+  - **auth fail-safe (ambiguity → rank up), on per-file CO-LOCATION not a global ratio:** if
+    `hasSource && hasSink && source_and_auth_files < sources` add `W_UNAUTH` — i.e. **at least one
+    source-bearing file has no auth marker of its own** → treat the partition as unauthenticated-reachable.
+    **Why co-location, not `auth_markers < sources`:** the two global file-counts are *independent
+    populations*, so auth markers living in **non-source** files (a vendored auth lib, middleware,
+    helpers, tests that merely mention `@login_required`) inflate `auth_markers` above `sources` while
+    every actual route stays open — re-suppressing the fail-safe through the back door (10 open source
+    files + 11 auth-mentioning non-source files → `11 < 10` false → bonus cancelled → the open routes get
+    gapped). Measuring the **intersection** (`source_and_auth_files`, §3.2) asks the right question —
+    *are the source files themselves gated?* — file by file. (`auth_markers===0` ⇒ `source_and_auth_files===0`
+    ⇒ fires, the trivial sub-case.)
   - **capped density term:** add `W_DENSITY * min(sink_hits, DENSITY_CAP)` — rewards a *concentration*
     of dangerous sinks (the 30-`eval()` file ranks up) **without** letting raw size grow the score
     unbounded (the cap stops a huge flat partition from winning on volume). Sinks only; source density
@@ -176,17 +189,20 @@ node allocate-budget.mjs --file <input.json> --out <allocation.json>
     wrapper/alias, invisible to `includes`). Semgrep's dataflow catches some of those, so the SARIF term
     lifts exactly the partitions the scan would under-rank. It patches the one unsafe hole; it does not
     replace the floor.
-- **The auth asymmetry is the load-bearing subtlety (stated as a contract).** Three of the four
-  categories fail safe (over-count → over-rank → over-analyze). **`auth_markers` is the sole exception**
-  — it suppresses, so its failure direction is unsafe. The fail-safe's correctness therefore *depends on
-  a partition-level auth-homogeneity assumption*: a partition should not mix an authenticated sub-surface
-  with an unauthenticated one. recon's "partition by authentication boundary" (§2) is intended to supply
-  this; the `auth_markers < sources` ratio is the deterministic hardening for when it doesn't hold
-  perfectly. **This assumption is a documented contract of the fail-safe, not an implementation detail.**
+- **The auth asymmetry is the load-bearing subtlety (still worth naming).** Three of the four categories
+  fail safe (over-count → over-rank → over-analyze). **`auth_markers` is the sole exception** — it
+  suppresses, so its failure direction is unsafe. That is *why* its curation is strict (§3.1), its match
+  is word-boundary (§3.2), and its fail-safe is keyed on per-file **co-location** (above) rather than a
+  global count. **Note (no longer a load-bearing contract):** because the fail-safe now measures gating
+  *file by file* (`source_and_auth_files`), it no longer assumes the partition is auth-*homogeneous*.
+  recon's "partition by authentication boundary" (§2) remains a *comfort* (cleaner partitions, tidier
+  reports) but is no longer required for the fail-safe to be correct — the measurement, not the
+  partitioning, carries it.
 - **Total deterministic ordering (protects the pivot property) — on a CONTENT key, not an emission-order
-  id:** sort scannable vectors by **`(score DESC, content_key ASC)`** where `content_key` is the
-  **lexicographically-sorted, joined list of the partition's repo-relative file paths** — a pure
-  function of content. Ties at the `budget`/`budget+1` frontier therefore break on *what the partition
+  id:** sort scannable vectors by **`(score DESC, content_key ASC)`** where `content_key` is a
+  **content hash** = `sha256` (via built-in `node:crypto`, zero-dep) of the partition's
+  **lexicographically-sorted, newline-joined repo-relative file paths** — a pure function of content,
+  bounded in size (a thousand-file partition yields a 64-char key, not a megabyte sort-key). Ties at the `budget`/`budget+1` frontier therefore break on *what the partition
   contains*, never on `partition_id` order. **Why not `partition_id`:** if recon assigns ids in emission
   order (`p1`, `p2`, … as it emits them) and that order varies run-to-run (recon is LLM-orchestrated —
   file→partition *content* is factual, emission *order* is not), a `partition_id`-based tie-break would
@@ -206,9 +222,11 @@ node allocate-budget.mjs --file <input.json> --out <allocation.json>
 - **Unit-tested on synthetic count vectors (no disk):** budget≥#scannable → empty `deprioritized` gaps
   (zero-regression); a source+sink+no-auth vector outranks an auth-gated one; **a small-and-deadly
   vector (sinks file-count 1, sink_hits 30) outranks a large-and-flat one (sources file-count 30)** —
-  the §3.3 size-vs-danger guard; **a mixed partition (auth_markers≥1 but `< sources`) still gets the
-  unauth fail-safe** — the ratio rule; ties break by **`content_key`** (sorted file paths), reproducible
-  at the frontier and independent of input order; an unscannable vector never lands in `analyze` and
+  the §3.3 size-vs-danger guard; **a mixed partition where auth markers live only in non-source files
+  (`auth_markers ≥ sources` but `source_and_auth_files < sources`) still gets the unauth fail-safe** —
+  the co-location rule (the back-door case the global ratio would have missed); ties break by
+  **`content_key`** (content hash), reproducible at the frontier and independent of input order; an
+  unscannable vector never lands in `analyze` and
   always surfaces as `unsupported-stack`; the SARIF term is zero when the map is absent and lifts a
   partition when present (capped); sanitizers never lower a score.
 
@@ -282,9 +300,15 @@ guards: small-deadly > large-flat, unauth > authed, mixed-still-fail-safe), not 
   SARIF term, sanitizers-never-lower.
 - **Surface-block validity** is covered by the extended `check-structure.mjs` (JSON-parses, required
   non-empty keys, fixture link) — run in CI.
-- **Zero-regression E2E:** the existing stack fixtures (≤ budget partitions each) must produce the same
-  audit result as today — the allocation step selects all of them, changing nothing downstream. The 6
-  fixtures + their `EXPECTED.md` pass unchanged.
+- **Zero-regression E2E — scoped precisely to avoid a benign CI false-red.** Zero-regression means the
+  **analyzed set and the findings** are identical (every fixture is ≤ budget and fully supported → the
+  allocator selects all of them, nothing downstream changes). It does **not** mean the report text is
+  byte-identical: the **Coverage section wording changes** (the old single "not analyzed" list becomes
+  the three classes analyzed / deprioritized / unsupported-stack). Any fixture whose `EXPECTED.md` has a
+  Coverage line will diverge on *label*. So the E2E asserts unchanged **findings + chains + analyzed
+  set**, and the `EXPECTED.md` files receive a **one-time update of their Coverage labels** to the new
+  classes — an *expected, reviewed change*, not a regression. (Stated so the E2E gate blocks for the
+  right reason and isn't mislabeled.)
 - New tests live under `skills/audit/scripts/test/` (picked up by the existing CI `node --test` step);
   target: keep the suite green and add the new helper tests on top.
 
