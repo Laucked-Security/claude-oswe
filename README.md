@@ -111,8 +111,21 @@ A polyglot repo loads every relevant reference and partitions the audit by stack
 Pass a SARIF file and `oswe` treats each result as a **lead**: it reads the cited code and either
 **promotes** it into a proven finding (chained + verified like any other) or **refutes** it with a
 reason. You get your SAST's scale and rule coverage, plus `oswe`'s discovery of the logic/auth bugs
-SAST misses — and a report where every item is proven or explicitly refuted. A reproducible benchmark
-(`benchmark/`) scores the precision/recall delta vs raw Semgrep on the OWASP Benchmark.
+SAST misses — and a report where every item is proven or explicitly refuted.
+
+**Measured against raw Semgrep on OWASP BenchmarkJava** (a 32-case stratified subset across
+`cmdi`/`sqli`/`xss`/`pathtraver`, CWE-matched per the OWASP methodology):
+
+| | precision | false-positive rate |
+|---|---|---|
+| Semgrep (official Java rules) | 0.615 | 0.625 |
+| **oswe-over-Semgrep** | **1.000** | **0.000** |
+
+`oswe` refuted **all 10** of Semgrep's false positives while keeping its true positives (one
+defensible recall cost, scored against us anyway). On the `xss` slice — where Semgrep was already
+precise — `oswe` correctly added **zero** false refutations. Full result, per-category breakdown, and
+honest caveats: [`benchmark/BENCHMARK.md`](benchmark/BENCHMARK.md); reproduce it via
+[`benchmark/README.md`](benchmark/README.md).
 
 ---
 
