@@ -242,7 +242,7 @@ Expected: all PASS (12 tests).
 - [ ] **Step 5: Full suite green**
 
 Run: `cd skills/audit/scripts && node --test`
-Expected: all PASS (existing + 11 new).
+Expected: all PASS (existing + 12 new).
 
 - [ ] **Step 6: Commit**
 
@@ -417,7 +417,11 @@ export function loadSurfaceBlock(stack, referencesDir) {
   return parseSurfaceBlock(md);
 }
 
-// content hash of a partition's file list: pure-content, order-independent, bounded (64 hex chars).
+// Tie-break key = sha256 of the partition's sorted FILE-PATH SET — NOT the file bytes. This is
+// deliberate: the tie-break must stay stable when the code inside the files changes (only "which files
+// are in this partition" may move it). DO NOT "fix" this to hash file contents — that would make the
+// coverage selection flip on any edit, destroying the reproducibility this key exists to guarantee.
+// Order-independent (sorted) and bounded (64 hex chars).
 export function contentKey(files) {
   return createHash("sha256").update([...files].sort().join("\n")).digest("hex");
 }
@@ -535,6 +539,12 @@ git commit -m "feat(sp3): surface-scan.mjs — files + surface block -> determin
 
 The token lists below are derived from each reference's existing `## Sources` / `## Dangerous sinks` / `## Auth boundaries` prose. **Auth discipline is strict (enforcement only):** a forgeable input that the reference lists as an *anti-pattern* (e.g. Java's `X-User-Role` header, .NET's `admin` cookie) is a **source**, never an `auth_marker`.
 
+**Expected behavioral consequence (by design, not a defect):** broad source tokens like `req.body` /
+`request.body` match almost every handler file, so on a large Express/Flask repo `hasSource` is nearly
+constant across partitions — the real discriminant becomes `hasSink` + sink-density + source∧auth
+co-location, exactly as §3.3 intends (a source alone was never the strong signal). Don't be surprised
+that `hasSource` looks uniform on Node; that's the loose-source-is-safe trade working as specified.
+
 - [ ] **Step 1: Append the `surface` block to `skills/audit/references/python.md`**
 
 Append (the leading blank line keeps it separated from the prose):
@@ -573,7 +583,7 @@ Append (the leading blank line keeps it separated from the prose):
 {
   "sources": ["req.query", "req.body", "req.params", "req.headers", "req.cookies", "req.files", "@Query(", "@Body(", "@Param(", "@Headers(", "@Req("],
   "sinks": ["child_process.exec", "execSync", ".spawn(", "execFile", "eval(", "new Function", "vm.runInNewContext", "$where", "$ne", "$gt", "$regex", "child_process", "require(", ".query(", "sequelize.query", "res.sendFile"],
-  "sanitizers": ["mongo-sanitize", "escape(", "parameterized", "?"],
+  "sanitizers": ["mongo-sanitize", "escape("],
   "auth_markers": ["passport.authenticate", "@UseGuards", "ensureAuthenticated", "req.isAuthenticated(", "requireAuth", "@Roles("]
 }
 ```
