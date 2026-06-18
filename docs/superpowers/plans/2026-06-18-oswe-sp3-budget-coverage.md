@@ -127,6 +127,16 @@ test("deprioritized gaps carry score + counts; over-budget partitions land there
   assert.ok(dep.counts && typeof dep.counts.sinks === "number");
 });
 
+test("allocate threads the SARIF map by partition_id and the lift can change the selection", () => {
+  // two equal-structure gated partitions (no unauth bonus); the one with SARIF leads must win the slot.
+  const a = vec("a", { sources: 1, sinks: 1, auth_markers: 1, source_and_auth_files: 1, content_key: "aaa" });
+  const b = vec("b", { sources: 1, sinks: 1, auth_markers: 1, source_and_auth_files: 1, content_key: "bbb" });
+  // without SARIF, content_key tie-break picks "a" for the single slot:
+  assert.deepEqual(allocate([a, b], 1).analyze.map((x) => x.partition_id), ["a"]);
+  // with leads on "b", b outranks a and takes the slot — proves the map→partition_id join is wired:
+  assert.deepEqual(allocate([a, b], 1, { b: { count: 5 } }).analyze.map((x) => x.partition_id), ["b"]);
+});
+
 test("invalid budget and non-array vectors are rejected (ok:false)", () => {
   assert.equal(allocate([], 0).ok, false);
   assert.equal(allocate("nope", 12).ok, false);
@@ -227,7 +237,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd skills/audit/scripts && node --test test/allocate-budget.test.mjs`
-Expected: all PASS (11 tests).
+Expected: all PASS (12 tests).
 
 - [ ] **Step 5: Full suite green**
 
@@ -267,7 +277,9 @@ const BLOCK = {
   sources: ["request.args", "request.get_json"],
   sinks: ["render_template_string", "eval(", "os.system"],
   sanitizers: ["shlex.quote"],
-  auth_markers: ["@login_required", "login_required("]
+  // includes a BARE word-token ("permission_required") so both-side boundary matching is exercised —
+  // every token ending in "(" or starting with "@" would mask the left-boundary check.
+  auth_markers: ["@login_required", "login_required(", "permission_required"]
 };
 
 function project(filesByName) {
@@ -323,10 +335,24 @@ test("sink_hits is a TRUE total (not per-file capped) so density survives", () =
   assert.equal(v.sink_hits, 5);    // true total occurrences
 });
 
-test("auth matching is strict (word-boundary): a longer identifier does not match", () => {
-  const root = project({ "x.py": "login_required_NOT_a_decorator = 1\n" });
+test("auth matching is strict on the RIGHT boundary: a longer identifier does not match", () => {
+  const root = project({ "x.py": "permission_required_NOT = 1\n" }); // bare token + trailing word char
   const v = scanPartition({ partition_id: "p", stack: "python", files: ["x.py"] }, BLOCK, root);
-  assert.equal(v.auth_markers, 0); // "login_required(" needs the "(", bare token not matched mid-identifier
+  assert.equal(v.auth_markers, 0); // "permission_required" embedded in a longer identifier → no match
+});
+
+test("auth matching is strict on the LEFT boundary too (suppressor must not over-match)", () => {
+  // a word char BEFORE the token must reject it — otherwise a fake auth marker suppresses the fail-safe
+  const root = project({ "y.py": "xx@login_required\nz = request.args\nrender_template_string(z)\n" });
+  const v = scanPartition({ partition_id: "p", stack: "python", files: ["y.py"] }, BLOCK, root);
+  assert.equal(v.auth_markers, 0);        // "@login_required" preceded by word-char "x" is not a decorator
+  assert.equal(v.source_and_auth_files, 0); // so the source file is correctly seen as ungated
+});
+
+test("a real decorator at line start (non-word before) DOES match", () => {
+  const root = project({ "ok.py": "@login_required\ndef f(): return request.args\n" });
+  const v = scanPartition({ partition_id: "p", stack: "python", files: ["ok.py"] }, BLOCK, root);
+  assert.equal(v.auth_markers, 1); // boundary check doesn't break the legitimate case
 });
 
 test("an unreadable/escaping file is skipped, not fatal (cannot raise risk by skipping)", () => {
@@ -378,7 +404,13 @@ export function parseSurfaceBlock(md) {
   return JSON.parse(m[1]);
 }
 
+// `stack` is recon-derived (LLM read of the audited repo) → UNTRUSTED as a lookup key. references/ is
+// trusted in CONTENT, not as a join target: a stack like "../../../etc/x" must never escape referencesDir.
+// Validate the name before the join (path-traversal guard distinct from the partition-file confinement);
+// a non-matching name → null → the partition is reported unscannable (surface unknown), which is fail-safe.
+const STACK_RE = /^[a-z0-9_-]+$/;
 export function loadSurfaceBlock(stack, referencesDir) {
+  if (typeof stack !== "string" || !STACK_RE.test(stack)) return null;
   let md;
   try { md = readFileSync(join(referencesDir, `${stack}.md`), "utf8"); }
   catch { return null; } // no reference page -> unsupported stack
@@ -398,15 +430,21 @@ const countSub = (text, token) => {
   while ((i = text.indexOf(token, i)) !== -1) { n++; i += token.length; }
   return n;
 };
-// strict (auth_markers): the token must not be the prefix of a longer identifier. If the token ends in
-// a word char, require the following char to be non-word (or end of file). Avoids the `\b@...` pitfall
-// (a leading `@` breaks \b), and prevents a loose auth match from falsely suppressing the fail-safe.
+// strict (auth_markers): the token must be bounded on BOTH sides — not embedded in a longer identifier
+// on either end. A loose auth match falsely SUPPRESSES the fail-safe (the one unsafe direction), so this
+// is the strict category. Both-side boundary, not the right side only: `xx@login_required` (left
+// word-char) and `login_requiredX` (right word-char) must BOTH be rejected. Avoids the `\b@...` pitfall
+// (a leading `@` breaks a naive `\b`). Erring strict is safe here: a missed auth marker just means no
+// suppression → the partition ranks UP → over-analyzed → safe.
 const hasAuth = (text, token) => {
-  let i = 0;
   const lastIsWord = /\w/.test(token[token.length - 1]);
+  let i = 0;
   while ((i = text.indexOf(token, i)) !== -1) {
+    const before = text[i - 1];
     const after = text[i + token.length];
-    if (!lastIsWord || after === undefined || !/\w/.test(after)) return true;
+    const beforeOk = i === 0 || !/\w/.test(before);
+    const afterOk = !lastIsWord || after === undefined || !/\w/.test(after);
+    if (beforeOk && afterOk) return true;
     i += token.length;
   }
   return false;
@@ -473,7 +511,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd skills/audit/scripts && node --test test/surface-scan.test.mjs`
-Expected: all PASS (9 tests).
+Expected: all PASS (11 tests).
 
 - [ ] **Step 5: Full suite green**
 
@@ -583,8 +621,10 @@ for (const s of STACKS) {
   const refPath = `skills/audit/references/${s}.md`;
   let md;
   try { md = read(refPath); } catch { bad(`${refPath}: unreadable`); continue; }
+  const fenceCount = (md.match(/```surface\b/g) || []).length;
+  if (fenceCount !== 1) { bad(`${refPath}: must contain exactly ONE \`\`\`surface block (found ${fenceCount}) — the runtime parser trusts this gate and takes the first`); continue; }
   const m = /```surface\s*\n([\s\S]*?)\n```/.exec(md);
-  if (!m) { bad(`${refPath}: missing \`\`\`surface block`); continue; }
+  if (!m) { bad(`${refPath}: \`\`\`surface block is malformed (fence present but no JSON body)`); continue; }
   let block;
   try { block = JSON.parse(m[1]); } catch (e) { bad(`${refPath}: surface block is not valid JSON: ${e.message}`); continue; }
   for (const key of ["sources", "sinks", "auth_markers"]) {
@@ -705,7 +745,7 @@ Run:
 ```bash
 ( cd skills/audit/scripts && node --test ) && node .github/scripts/check-structure.mjs && ( cd benchmark && node --test )
 ```
-Expected: scripts suite green (existing + the 20 new SP3 tests), structure gate `PASS` (incl. section 7), benchmark suite green. Report the `pass N / fail N` lines.
+Expected: scripts suite green (existing + the 23 new SP3 tests), structure gate `PASS` (incl. section 7), benchmark suite green. Report the `pass N / fail N` lines.
 
 - [ ] **Step 2: Confirm no `EXPECTED.md` Coverage divergence on the existing fixtures**
 
@@ -725,7 +765,7 @@ Expected: `validators.mjs untouched`.
 
 - [ ] **Step 4: Update the test-count badge + Development section in README**
 
-In `README.md`, bump the test count (the SP3 helpers add 20 tests: 11 allocate + 9 surface-scan). Update the badge `![Tests: N passing]` and the `**N unit tests** (… pipeline + … benchmark)` line and the `# … pipeline tests` comment to the new pipeline total (run `( cd skills/audit/scripts && node --test )` and read the `pass N` line for the exact number).
+In `README.md`, bump the test count (the SP3 helpers add 23 tests: 12 allocate + 11 surface-scan). Update the badge `![Tests: N passing]` and the `**N unit tests** (… pipeline + … benchmark)` line and the `# … pipeline tests` comment to the new pipeline total (run `( cd skills/audit/scripts && node --test )` and read the `pass N` line for the exact number).
 
 - [ ] **Step 5: Commit**
 
