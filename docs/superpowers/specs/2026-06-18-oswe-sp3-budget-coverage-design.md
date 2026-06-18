@@ -1,6 +1,6 @@
 # OSWE Plugin — SP3: Budget-Allocated Coverage Design
 
-**Status:** approved-design (pending written-spec review)
+**Status:** approved (review converged)
 **Date:** 2026-06-18
 **Depends on:** merged MVP + Phase 2 + HTML report + Hybrid Precision (the `oswe` plugin on `master`).
 **Branch (implementation):** `feat/oswe-sp3-budget-coverage` (off `master`).
@@ -221,8 +221,12 @@ node allocate-budget.mjs --file <input.json> --out <allocation.json>
 - Exit `0` ok / `1` malformed input (bad budget/vectors) / `2` IO|usage.
 - **Unit-tested on synthetic count vectors (no disk):** budget≥#scannable → empty `deprioritized` gaps
   (zero-regression); a source+sink+no-auth vector outranks an auth-gated one; **a small-and-deadly
-  vector (sinks file-count 1, sink_hits 30) outranks a large-and-flat one (sources file-count 30)** —
-  the §3.3 size-vs-danger guard; **a mixed partition where auth markers live only in non-source files
+  vector (sinks file-count 1, sink_hits 30) is NEVER ranked below a large-and-flat one (sources
+  file-count 30)** — assert `score(deadly) >= score(flat)` **and** a deterministic order, *not* a strict
+  `>` (the capped density term lets a flat partition reaching `sink_hits ≥ DENSITY_CAP` tie the
+  concentrate's density bonus; the design guarantees the concentrate is never *under*-ranked, and ties
+  resolve on `content_key` — asserting strict `>` would make the test fragile to the §4 tunable
+  weights); **a mixed partition where auth markers live only in non-source files
   (`auth_markers ≥ sources` but `source_and_auth_files < sources`) still gets the unauth fail-safe** —
   the co-location rule (the back-door case the global ratio would have missed); ties break by
   **`content_key`** (content hash), reproducible at the frontier and independent of input order; an
@@ -263,6 +267,13 @@ Coverage now distinguishes three things instead of one opaque "not analyzed" lis
 - **Unsupported stack (surface NOT assessed)** — a distinct, prominent class. This is the dangerous
   "unseen surface" direction and must never read like a low score. e.g. *"`legacy-perl/`: unsupported
   stack — surface not assessed; not covered by this audit."*
+
+**Coverage-honesty caveat (no-SARIF runs).** The `deprioritized` line must carry the standing caveat
+that, **without a SARIF input**, the token scan's one uncovered blind spot is the false-negative by
+indirection (§3.3): a sink reached through a wrapper/alias is invisible to `includes`, so a *low*
+deprioritized score may reflect an aliased/indirected sink, **not** a genuinely thin surface. A SARIF
+input backstops this; a no-SARIF run does not. State it so a reader never reads "low score" as "proven
+safe" — the same coverage-honesty discipline the rest of the report follows.
 
 ### 3.6 `check-structure.mjs` gate — extend the contract
 
@@ -363,3 +374,10 @@ guards: small-deadly > large-flat, unauth > authed, mixed-still-fail-safe), not 
   unauth fail-safe over-ranks) — a known, *accepted* failure mode (the conservative rule fails toward
   over-coverage of low-value, the right direction for a security tool). A future "auth-gated AND no
   internal privilege boundary" proxy could demote them; noted, not built.
+- **Per-token block↔fixture coverage matrix** — the floor's last residual unsafe leak. §3.6's
+  fixture-link is a *total-drift* tripwire (one token matches), so a contributor who adds a sink to the
+  prose **and** the vulnerable fixture but forgets the `surface` block leaves that sink uncounted →
+  partitions whose only sink is the forgotten one are silently under-ranked (the unsafe direction),
+  while the gate stays green (another block token still matches the fixture). Closing it needs a
+  token-by-token block↔fixture coverage check (every documented sink in a fixture must appear in the
+  block). Deferred from SP3, but named here so the last floor leak isn't lost.
