@@ -60,10 +60,20 @@ rapport sans refaire les étapes validées*. This is the contract every design d
     caches; the dispatch is expensive but recoverable.
   Net effect: bad infrastructure (a broken manifest) fails loud; bad payload (a corrupted single
   cache entry) is silently recovered. §6 Security elaborates with examples.
-- **The deterministic core is sacred.** No changes to `apply-verdicts.mjs` logic,
-  `validate-batch.mjs`, `confine-path.mjs`, `validate-output.mjs`, any schema, the Critical-gating
-  rule, or the JSON-out report. SP5 v1 wraps each helper with a cache-check seam but does NOT
-  modify their logic — the seam is purely additive (an early-return when the cache key matches).
+- **The deterministic core is sacred.** No changes to `apply-verdicts.mjs` verdict logic,
+  `validate-batch.mjs`, `confine-path.mjs`, any existing schema
+  (analyzer-response, verifier-response, chain, finding, report-summary, sarif-lead,
+  verdict-application), the Critical-gating rule, or the JSON-out report. SP5 v1 wraps each
+  helper with a cache-check seam but does NOT modify their logic — the seam is purely additive
+  (an early-return when the cache key matches).
+
+  **Additive surface (allowed in SP5 v1, Fix #3 from review):** `validate-output.mjs` gains
+  exactly one new `--kind`: `checkpoint-manifest`, dispatching to one new schema
+  `checkpoint-manifest.schema.json` registered in `build-validators.mjs`'s EXPORT_NAME map.
+  This is the same additive pattern every prior schema addition has used (the 7 existing kinds
+  were all added the same way). It does not touch any existing kind, schema, or the verdict
+  logic. **It also does not affect agent caching** — agent-response-cache (§3.5) re-uses the
+  **existing** `analyzer-response` / `verifier-response` kinds for its in-helper re-validation.
 - **Reproducibility on the resume path.** Same scope + same args + same FS state + same helper
   versions ⇒ same final report. The cache key MUST cover all four dimensions; missing any one is a
   staleness bug (the spec's central failure mode).
@@ -294,9 +304,21 @@ finding and chain object the batch operates on. If any finding/chain has been re
 different shape, the batch cache is invalidated.
 
 **Lookup mode — Output:** `{ ok, hit: bool, cached_response?: {...} }`. On hit, the SKILL uses
-`cached_response` and **skips the dispatch + skips re-validation** (the cached entry was stored
-post-validate-output; double-validating wastes I/O and the cache is in a gitignored owner-only
-short-lived dir, same trust as `.oswe/tmp/`). On miss, the SKILL dispatches the agent as today.
+`cached_response` and **skips the dispatch** (re-validation is **not** skipped — see next paragraph).
+On miss, the SKILL dispatches the agent as today.
+
+**CRITICAL — `--lookup` re-validates `cached_response` against the kind's schema before reporting a
+hit (Fix #1 from review).** A cache JSON file may have the correct `input_digest` and parse fine,
+but a tampered or accidentally-corrupted `validated_response` field would otherwise bypass
+schema-gating — the discipline that has founded this project since MVP. So inside the helper:
+after the input_digest matches, the helper imports `validate(kind, cached_response)` from
+`./validate-output.mjs` (which already exports it for in-process reuse — that's how
+`aggregate-findings.test.mjs` and `render-html.mjs` use it). If the validation fails: log
+`"agent-cache: stored response invalid for kind <kind>, treating as miss"` on stderr, return
+`{ ok: true, hit: false }`. The SKILL re-dispatches and the fresh response goes through the normal
+validate-output gate before being re-stored. **This means the schema-gate discipline is preserved
+end-to-end, including the cache path** — a cached response is never trusted past the same gate a
+live response must pass.
 
 **Store mode — Input:** `{ "checkpoint_dir": "<abs>", "kind": "...", "target_id": "...",
 "dispatch_input": {...}, "validated_response": {...} }`.
@@ -314,10 +336,15 @@ actual dispatch, plus calls the cache helper with that payload. So the LLM does 
 way — the only LLM-side change is calling the cache helper twice (lookup, store) per dispatch.
 Digest computation, file I/O, and atomic write are all in Node.
 
-**Unit-tested** (≥ 6 cases): store-then-lookup hits; lookup with no prior store misses;
+**Unit-tested** (≥ 7 cases): store-then-lookup hits; lookup with no prior store misses;
 lookup with different `dispatch_input` (e.g. flipped one file) misses; lookup with different `kind`
 or `target_id` misses; store is idempotent (rewriting same key with same value is a no-op);
-malformed cache file on disk → treated as miss (recompute), see §6.
+malformed cache file on disk → treated as miss (recompute), see §6;
+**`right input_digest, invalid cached_response shape` → miss (Fix #1 from review)** — craft a
+cache file where the wrapper's `input_digest` matches the live input but `cached_response` violates
+the kind's schema (e.g. analyzer-response with `findings` removed); assert exit 0, `hit: false`,
+and the helper's stderr names the kind. Together with a parallel test using a tampered finding
+field, this confirms the cache cannot bypass schema-gating.
 
 **Agent response caching — a dedicated helper, NOT SKILL prose.** Computing a sha256 inside the SKILL
 prose would put digest-matching in the LLM, contradicting §2's "No LLM in the lifecycle." So caching
@@ -330,16 +357,31 @@ The order matters — the user's review caught that lifecycle MUST run after con
 it depends on canonical post-confine paths.
 
 ### Edit 1 — new §0 (very top, before existing §1 Entry & recon)
+
+**Bootstrap-ordering fix (Fix #2 from review).** The current SKILL §1's first action is
+`rm -rf .oswe/tmp && mkdir -p .oswe/tmp`. The new §0 below uses temp files itself
+(parse-audit-args input/output), so §0 MUST own the bootstrap purge — otherwise it writes into a
+non-existent dir. So Edit 1 (a) prepends the temp-purge to §0 and (b) deletes the redundant purge
+line from §1 (it's covered by §0 now). The trust model is unchanged — `.oswe/tmp/` is still
+purged at audit start, still purged on any abort.
+
 ```markdown
-### 0. Parse invocation args (deterministic)
-First, normalize `$ARGUMENTS` into a structured form via the tested helper. Do NOT parse arg
+### 0. Bootstrap & parse invocation args (deterministic)
+First, purge and re-create the temp dir (this used to be the first action of §1; it moved up so
+later §0 helpers can use it):
+`rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp" && mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"`.
+
+Then normalize `$ARGUMENTS` into a structured form via the tested helper. Do NOT parse arg
 strings by hand:
 `( trap 'rm -f ".../parse-args-<token>.json" ".../parse-args-out-<token>.json"' EXIT;
   node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/parse-audit-args.mjs"
     --file "<token>.json" --out "<token>-out.json" )`
 The input file is `{"raw_args": "${ARGUMENTS}"}`. On exit 0, read `{scope, sarifPath, concurrency}`.
 On exit 1, abort the audit with the printed message (invalid args, e.g. concurrency out of range).
+On any abort here or later, `.oswe/tmp/` is purged as today.
 ```
+
+(In §1 Entry & recon, the existing `**First, purge temp:**` bullet is removed since §0 now owns it.)
 
 ### Edit 2 — extend §1 Entry & recon (after existing confine-path step)
 After scope and sarifPath are confined (existing confine-path calls), add:
@@ -365,7 +407,9 @@ It is purged at clean exit (§7 Report) and only persists between a kill and the
   `<concurrency>` is the value resolved in §0).
 - Before each analyzer dispatch (§3) and each verifier batch dispatch (§6), call
   `agent-response-cache.mjs --lookup` (§3.5) with the dispatch input. On `hit: true`, USE the
-  `cached_response` and skip the dispatch + skip re-validation. On miss, dispatch as today.
+  `cached_response` and skip the dispatch (re-validation was already done **inside the helper**
+  against the kind's schema — see §3.5 Fix #1). On miss (including the helper's own "stored
+  response failed re-validation" miss), dispatch as today.
 - After each successful `validate-output` of a freshly-dispatched analyzer-response or
   verifier-response, call `agent-response-cache.mjs --store` with the same dispatch input and the
   validated response. This populates the cache for any subsequent resume.
@@ -397,7 +441,7 @@ earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on dis
 - **3 JSON-in/JSON-out cached helpers** + **render-html special contract** — for each, 2 new tests:
   cache miss writes the artifact + cache hit short-circuits with same `--out` content (no recompute).
   8 tests total (2 × 4 helpers).
-- **`agent-response-cache.mjs`** — 6+ unit tests per §3.5 (store-then-lookup hit, lookup with no
+- **`agent-response-cache.mjs`** — 7+ unit tests per §3.5 (store-then-lookup hit, lookup with no
   store misses, different dispatch_input misses, different kind/target_id misses, idempotent store,
   corrupted cache file → miss).
 - **E2E replay** — extend the existing `e2e-replay.test.mjs` (or a new sibling
