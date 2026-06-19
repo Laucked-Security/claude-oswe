@@ -40,7 +40,7 @@ export function contentKey(files) {
 }
 
 // loose substring (sources/sinks/sanitizers): over-match only over-ranks -> safe.
-const hasSub = (text, token) => text.includes(token);
+const hasSub = (text, token) => Boolean(token) && text.includes(token);
 const countSub = (text, token) => {
   if (!token) return 0;
   let n = 0, i = 0;
@@ -54,6 +54,10 @@ const countSub = (text, token) => {
 // (a leading `@` breaks a naive `\b`). Erring strict is safe here: a missed auth marker just means no
 // suppression → the partition ranks UP → over-analyzed → safe.
 const hasAuth = (text, token) => {
+  // Empty-token guard: indexOf("",0)===0 with i += 0 would infinite-loop. Mirror countSub/hasSub —
+  // a hung scan on a typo'd block is the worst failure mode for a security tool. Defensive even
+  // though check-structure section 7 also rejects empty per-token strings.
+  if (!token) return false;
   const lastIsWord = /\w/.test(token[token.length - 1]);
   let i = 0;
   while ((i = text.indexOf(token, i)) !== -1) {

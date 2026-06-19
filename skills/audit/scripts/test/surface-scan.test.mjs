@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSurfaceBlock, scanPartition, contentKey } from "../surface-scan.mjs";
+import { parseSurfaceBlock, loadSurfaceBlock, scanPartition, contentKey } from "../surface-scan.mjs";
 
 const BLOCK = {
   sources: ["request.args", "request.get_json"],
@@ -104,4 +104,32 @@ test("no surface block (unsupported stack) -> scannable:false, no counts", () =>
 test("contentKey is order-independent and stable", () => {
   assert.equal(contentKey(["b.py", "a.py"]), contentKey(["a.py", "b.py"]));
   assert.equal(contentKey(["a.py"]).length, 64);
+});
+
+test("an empty-string auth_marker token does NOT hang the scan (regression: indexOf('',0)===0)", () => {
+  const root = project({ "x.py": "x = 1\nrequest.args\nos.system(x)\n" });
+  const bad = { ...BLOCK, auth_markers: ["@login_required", ""] }; // typo: trailing empty token
+  const v = scanPartition({ partition_id: "p", stack: "python", files: ["x.py"] }, bad, root);
+  // hang would timeout the whole node --test process; reaching this assertion proves no infinite loop.
+  assert.equal(v.scannable, true);
+  assert.equal(v.auth_markers, 0); // the empty token contributes nothing
+});
+
+test("an empty-string source/sink token is also a no-op (defensive)", () => {
+  const root = project({ "x.py": "request.args\nos.system(1)\n" });
+  const bad = { ...BLOCK, sinks: ["os.system", ""], sources: ["request.args", ""] };
+  const v = scanPartition({ partition_id: "p", stack: "python", files: ["x.py"] }, bad, root);
+  assert.equal(v.sinks, 1);    // os.system counted once, empty token contributes nothing
+  assert.equal(v.sources, 1);
+});
+
+test("loadSurfaceBlock rejects a traversal-attempt stack name (path-traversal guard)", () => {
+  // STACK_RE = /^[a-z0-9_-]+$/ — anything containing /, ., or path separators must return null
+  // BEFORE join(referencesDir, ...) — the FS is never touched.
+  assert.equal(loadSurfaceBlock("../../../etc/passwd", "/anywhere"), null);
+  assert.equal(loadSurfaceBlock("../x", "/anywhere"), null);
+  assert.equal(loadSurfaceBlock("python/extra", "/anywhere"), null);
+  assert.equal(loadSurfaceBlock(".", "/anywhere"), null);
+  assert.equal(loadSurfaceBlock("", "/anywhere"), null);
+  assert.equal(loadSurfaceBlock(null, "/anywhere"), null);
 });
