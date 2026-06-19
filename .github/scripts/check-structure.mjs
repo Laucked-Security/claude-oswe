@@ -112,9 +112,13 @@ for (const s of STACKS) {
     if (!v.every((t) => typeof t === "string" && t.length > 0)) { bad(`${refPath}: surface.${key} contains an empty/non-string token`); continue; }
     ok(`${s}.md surface.${key} (${v.length})`);
   }
-  // sanitizers may be empty, but if present every token must be a non-empty string
-  if (Array.isArray(block.sanitizers) && !block.sanitizers.every((t) => typeof t === "string" && t.length > 0)) {
-    bad(`${refPath}: surface.sanitizers contains an empty/non-string token`);
+  // sanitizers is OPTIONAL: must be absent, or an array (possibly empty) of non-empty strings.
+  // A present-but-non-array sanitizers (e.g. "sanitizers": "x") would pass a weak Array.isArray check
+  // and then crash surface-scan.mjs at N.some(...) — reject it at the gate so the runtime parser can
+  // trust the shape.
+  if (block.sanitizers !== undefined) {
+    if (!Array.isArray(block.sanitizers)) bad(`${refPath}: surface.sanitizers must be an array if present (got ${typeof block.sanitizers})`);
+    else if (!block.sanitizers.every((t) => typeof t === "string" && t.length > 0)) bad(`${refPath}: surface.sanitizers contains an empty/non-string token`);
   }
   // fixture link (total-drift tripwire): at least one sinks token appears in the vulnerable fixture tree.
   const fixDir = join(ROOT, `test-fixtures/${s}/vulnerable`);

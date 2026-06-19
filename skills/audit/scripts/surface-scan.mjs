@@ -78,10 +78,19 @@ export function scanPartition(partition, block, projectDir) {
   const S = block.sources || [], K = block.sinks || [], N = block.sanitizers || [], A = block.auth_markers || [];
   let sources = 0, sinks = 0, sanitizers = 0, auth_markers = 0, source_and_auth_files = 0;
   let source_hits = 0, sink_hits = 0, auth_hits = 0;
+  let skipped_missing = 0, skipped_out_of_scope = 0;
   for (const rel of partition.files) {
     let text;
     try { text = readFileSync(confinePath(projectDir, rel), "utf8"); }
-    catch { continue; } // unreadable / escaping / missing: skip (skipping a file we can't read cannot raise risk)
+    catch (e) {
+      // Classify the skip by reason (mirrors ingest-sarif's drop-stat pattern). Skipping a file we
+      // can't read cannot raise risk per-file, but a partition where EVERY file was skipped has no
+      // signal at all — it must not be reported as "low surface" (= deprioritized) when its surface
+      // is actually UNKNOWN. The all-skipped check below flips it to scannable:false in that case.
+      if (e && e.code === "ENOENT") skipped_missing++;
+      else skipped_out_of_scope++; // path escape (confinePath threw a non-ENOENT) or unreadable
+      continue;
+    }
     const fSource = S.some((t) => hasSub(text, t));   // .some short-circuits -> presence is bounded
     const fSink = K.some((t) => hasSub(text, t));
     const fSan = N.some((t) => hasSub(text, t));
@@ -95,10 +104,22 @@ export function scanPartition(partition, block, projectDir) {
     if (fSink) sink_hits += K.reduce((a, t) => a + countSub(text, t), 0); // TRUE total, never per-file capped
     if (fAuth) auth_hits += A.reduce((a, t) => a + countSub(text, t), 0);
   }
+  // All-skipped guard: if EVERY listed file was skipped (escape/missing/unreadable), the partition
+  // has no readable surface — emit scannable:false so it lands in the prominent "surface unknown"
+  // class instead of being deprioritized as "low surface" (which would be a lie about coverage).
+  const totalSkipped = skipped_missing + skipped_out_of_scope;
+  if (partition.files.length > 0 && totalSkipped === partition.files.length) {
+    return {
+      partition_id: partition.partition_id, stack: partition.stack, scannable: false,
+      files: partition.files.length, skipped_missing, skipped_out_of_scope,
+      reason: "all files unreadable (missing/escape) — surface not assessed"
+    };
+  }
   return {
     partition_id: partition.partition_id, stack: partition.stack, scannable: true,
     files: partition.files.length, sources, sinks, sanitizers, auth_markers,
     source_and_auth_files, source_hits, sink_hits, auth_hits,
+    skipped_missing, skipped_out_of_scope,
     content_key: contentKey(partition.files)
   };
 }

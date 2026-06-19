@@ -123,6 +123,34 @@ test("an empty-string source/sink token is also a no-op (defensive)", () => {
   assert.equal(v.sources, 1);
 });
 
+test("skipped files are CLASSIFIED in the vector (missing vs out_of_scope), not silently zero", () => {
+  // Cross-platform escape test: the escape target must EXIST so confinePath's realpathSync succeeds
+  // and the containment check (not ENOENT) fires. A literal "../escape.py" with no file would land
+  // as ENOENT on Windows (C:\path doesn't exist), masking the out_of_scope classification.
+  const root = project({ "real.py": "render_template_string(request.args)\n" });
+  const outsideDir = mkdtempSync(join(tmpdir(), "oswe-outside-"));
+  writeFileSync(join(outsideDir, "evil.py"), "x\n");
+  const escapeRel = join(outsideDir, "evil.py"); // absolute path -> confinePath rejects with containment error
+  const v = scanPartition({ partition_id: "p", stack: "python", files: ["real.py", "missing.py", escapeRel] }, BLOCK, root);
+  assert.equal(v.scannable, true);          // 1 file readable -> still has signal
+  assert.equal(v.sinks, 1);                  // real.py counted
+  assert.equal(v.skipped_missing, 1);        // missing.py: ENOENT
+  assert.equal(v.skipped_out_of_scope, 1);   // evil.py (real file outside root): confinePath escape
+});
+
+test("a partition whose EVERY file is unreadable returns scannable:false (surface UNKNOWN, not LOW)", () => {
+  // Pathological case: partition is full of escape attempts / missing files. Without this guard the
+  // vector would emit scannable:true with all-zero counts and land in "deprioritized" — a lie about
+  // coverage. The all-skipped guard reclassifies it as unsupported-stack-equivalent.
+  const root = project({}); // empty project — no files exist
+  const v = scanPartition({ partition_id: "p", stack: "python", files: ["a.py", "b.py", "../escape.py"] }, BLOCK, root);
+  assert.equal(v.scannable, false);
+  assert.equal(v.files, 3);
+  assert.equal(v.skipped_missing + v.skipped_out_of_scope, 3);
+  assert.equal(v.sources, undefined);        // no counts on an unscannable vector
+  assert.match(v.reason || "", /all files unreadable/i);
+});
+
 test("loadSurfaceBlock rejects a traversal-attempt stack name (path-traversal guard)", () => {
   // STACK_RE = /^[a-z0-9_-]+$/ — anything containing /, ., or path separators must return null
   // BEFORE join(referencesDir, ...) — the FS is never touched.
