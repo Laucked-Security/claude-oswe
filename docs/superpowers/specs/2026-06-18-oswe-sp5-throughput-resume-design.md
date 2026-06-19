@@ -294,14 +294,35 @@ node agent-response-cache.mjs --store --file <input.json>
 "target_id": "<partition-id-or-batch-id>", "dispatch_input": { ...the canonical dispatch payload... } }`.
 
 For analyzer dispatches, `dispatch_input` MUST include `{partition_id, files: [...sorted],
-file_content_digest, references_loaded: [...sorted]}` — the `file_content_digest` from §3.3 is
-crucial here: a file edit between kill and resume invalidates every affected analyzer cache (the
-staleness fix from review #2 propagated to the agent cache, not just the helper caches).
+file_content_digest, references_loaded: [...sorted], agent_contract_files: [...sorted abs paths]}`.
+The `file_content_digest` from §3.3 covers user-code staleness (kill→edit→resume on the same files
+invalidates the cache). The new `agent_contract_files` (Fix #1 from round 4 review) closes the
+**plugin-side staleness gap**: `references_loaded` only listed *which* reference files were loaded
+(paths), not their contents — so editing `references/php.md` to add a new sink pattern would have
+returned a stale analyzer response. The contract files for the analyzer MUST include:
+
+- The analyzer subagent definition file (`agents/oswe-analyzer.md`).
+- Every `skills/audit/references/<lang>.md` actually loaded for the partition.
+- `skills/audit/SKILL.md` itself (the orchestration prose dictates how the analyzer is invoked
+  and what shape of response is expected).
 
 For verifier batches, `dispatch_input` MUST include `{batch_id, expected_targets: [...sorted by
-target_type then target_id], finding_or_chain_canonical: {...}}` — the canonical form of every
-finding and chain object the batch operates on. If any finding/chain has been re-aggregated with a
-different shape, the batch cache is invalidated.
+target_type then target_id], finding_or_chain_canonical: {...}, agent_contract_files: [...sorted
+abs paths]}`. The canonical form covers per-batch input. The new `agent_contract_files` covers
+the verifier-side plugin staleness — same rationale as analyzer:
+
+- The verifier subagent definition file (`agents/oswe-verifier.md`).
+- `skills/audit/SKILL.md` (§6 of SKILL.md is the verifier's invocation contract).
+- Any reference files the verifier consults at adjudication time (today: none directly, but the
+  SKILL author lists them if/when that changes — fail-closed: include if in doubt).
+
+**How the helper uses these:** for both kinds, the helper reads each path in
+`agent_contract_files` (sorted), computes `agent_context_digest = sha256(byte-concat of
+sha256(file_i) || NUL, in sorted order)`, and includes that digest in `input_digest`'s preimage
+alongside the rest of `dispatch_input`. **Editing any plugin-side contract file therefore
+invalidates every cache that referenced it — deterministically, with no LLM involvement.** Paths
+must be under `CLAUDE_PLUGIN_ROOT` (the helper rejects any path that escapes — same posture as
+`confine-path.mjs`'s realpath check); they're plugin-trusted code, never untrusted repo content.
 
 **Lookup mode — Output:** `{ ok, hit: bool, cached_response?: {...} }`. On hit, the SKILL uses
 `cached_response` and **skips the dispatch** (re-validation is **not** skipped — see next paragraph).
@@ -336,15 +357,19 @@ actual dispatch, plus calls the cache helper with that payload. So the LLM does 
 way — the only LLM-side change is calling the cache helper twice (lookup, store) per dispatch.
 Digest computation, file I/O, and atomic write are all in Node.
 
-**Unit-tested** (≥ 7 cases): store-then-lookup hits; lookup with no prior store misses;
+**Unit-tested** (≥ 9 cases): store-then-lookup hits; lookup with no prior store misses;
 lookup with different `dispatch_input` (e.g. flipped one file) misses; lookup with different `kind`
 or `target_id` misses; store is idempotent (rewriting same key with same value is a no-op);
 malformed cache file on disk → treated as miss (recompute), see §6;
-**`right input_digest, invalid cached_response shape` → miss (Fix #1 from review)** — craft a
-cache file where the wrapper's `input_digest` matches the live input but `cached_response` violates
-the kind's schema (e.g. analyzer-response with `findings` removed); assert exit 0, `hit: false`,
-and the helper's stderr names the kind. Together with a parallel test using a tampered finding
-field, this confirms the cache cannot bypass schema-gating.
+**`right input_digest, invalid cached_response shape` → miss (Fix #1 from round 3 review)** —
+craft a cache file where the wrapper's `input_digest` matches the live input but `cached_response`
+violates the kind's schema (e.g. analyzer-response with `findings` removed); assert exit 0,
+`hit: false`, and the helper's stderr names the kind. Together with a parallel test using a
+tampered finding field, this confirms the cache cannot bypass schema-gating.
+**Plus two `agent_contract_files` staleness tests (Fix #1 from round 4 review):**
+(a) edit a `references/<lang>.md` file listed in `agent_contract_files` between store and lookup
+→ miss (different `agent_context_digest`); (b) edit `SKILL.md` between store and lookup → miss.
+Both confirm plugin-side contract changes invalidate the cache automatically.
 
 **Agent response caching — a dedicated helper, NOT SKILL prose.** Computing a sha256 inside the SKILL
 prose would put digest-matching in the LLM, contradicting §2's "No LLM in the lifecycle." So caching
@@ -416,8 +441,11 @@ It is purged at clean exit (§7 Report) and only persists between a kill and the
 
 ### Edit 4 — Pass `--checkpoint-dir` to the 4 cacheable helpers
 Wherever the SKILL invokes `allocate-budget`, `aggregate-findings`, `apply-verdicts`, or
-`render-html`, append `--checkpoint-dir "${checkpoint_dir}"` to the existing `--file`/`--out` args.
-Helpers without `--checkpoint-dir` behave exactly as today.
+`render-html`, append `--checkpoint-dir "${checkpoint_dir}"` to the existing invocation. The
+existing positional/named args are unchanged (Fix #2 from round 4 review — earlier wording
+incorrectly said "`--file`/`--out` args" for all four, but **render-html uses
+`--md --summary --out`**, not `--file --out`, per §3.4.1). Helpers without `--checkpoint-dir`
+behave exactly as today.
 
 ### Edit 5 — §7 Report (very end, after render-html succeeds)
 Add as the last orchestration step, on the **clean exit path only**:
@@ -441,7 +469,7 @@ earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on dis
 - **3 JSON-in/JSON-out cached helpers** + **render-html special contract** — for each, 2 new tests:
   cache miss writes the artifact + cache hit short-circuits with same `--out` content (no recompute).
   8 tests total (2 × 4 helpers).
-- **`agent-response-cache.mjs`** — 7+ unit tests per §3.5 (store-then-lookup hit, lookup with no
+- **`agent-response-cache.mjs`** — 9+ unit tests per §3.5 (store-then-lookup hit, lookup with no
   store misses, different dispatch_input misses, different kind/target_id misses, idempotent store,
   corrupted cache file → miss).
 - **E2E replay** — extend the existing `e2e-replay.test.mjs` (or a new sibling
@@ -471,11 +499,16 @@ earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on dis
   not user input). `parse-audit-args` does not touch the FS.
 - **Cache poisoning — two distinct behaviors by artifact type (consistent with §2 Fix #5):**
   - *Per-helper cache file* (`.json` under `<helper-name>/`) or *agent response cache file* (under
-    `agent-responses/`) tampered/corrupted: detected by re-computing `input_digest` from the live
-    input and comparing to the cached file's internal `input_digest`, OR by `JSON.parse` failing.
-    Either way → **silent miss + recompute + overwrite**. The audit proceeds; the corrupted file
-    is replaced with a fresh valid one. Resilient against partial-write corruption (atomic
-    `.tmp-<pid>` then rename mitigates this in practice but the silent-miss is the belt + suspenders).
+    `agent-responses/`) tampered/corrupted: detected by **any** of three independent gates —
+    (a) `JSON.parse` failing on the cache wrapper,
+    (b) re-computing `input_digest` from the live input and comparing to the cached file's
+    internal `input_digest` (mismatch),
+    (c) **for agent-response caches only:** `validate(kind, cached_response)` failing (the
+    payload's shape no longer satisfies the kind's JSON schema — Fix #3 from round 4 review;
+    matches the in-helper check from §3.5 Fix #1). Any gate firing → **silent miss + recompute
+    + overwrite**. The audit proceeds; the corrupted file is replaced with a fresh valid one.
+    Resilient against partial-write corruption (atomic `.tmp-<pid>` then rename mitigates this
+    in practice but the silent-miss is the belt + suspenders).
   - *Manifest* (`<run-id>/manifest.json`) tampered (missing required field, `additionalProperties`,
     unparseable JSON): **exit 1** via `validate-output`'s `checkpoint-manifest` kind. The manifest
     is the directory-level structural artifact; if it's broken, the run lifecycle is broken — no
