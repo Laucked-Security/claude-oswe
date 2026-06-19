@@ -36,3 +36,12 @@
 - `express-mongo-sanitize` strips `$`/`.` keys; if not applied to a given route, operators pass.
 - Allow-list extension checks that run on `req.files[].originalname` but then write with the same
   attacker name into a served dir → still RCE.
+
+```surface
+{
+  "sources": ["req.query", "req.body", "req.params", "req.headers", "req.cookies", "req.files", "@Query(", "@Body(", "@Param(", "@Headers(", "@Req("],
+  "sinks": ["child_process.exec", "execSync", ".spawn(", "execFile", "eval(", "new Function", "vm.runInNewContext", "$where", "$ne", "$gt", "$regex", "child_process", "require(", ".query(", "sequelize.query", "res.sendFile"],
+  "sanitizers": ["mongo-sanitize", "escape("],
+  "auth_markers": ["passport.authenticate", "@UseGuards", "ensureAuthenticated", "req.isAuthenticated(", "requireAuth", "@Roles("]
+}
+```

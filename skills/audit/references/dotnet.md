@@ -32,3 +32,12 @@
 - Parameterized `SqlParameter` is the SQLi fix; concatenation/interpolation is the smell.
 - `TypeNameHandling.None` (the default in modern Json.NET) is required; `All`/`Auto` reintroduces the
   gadget surface.
+
+```surface
+{
+  "sources": ["Request.Query", "Request.Form", "Request.Body", "Request.Cookies", "Request.Headers", "Request.RouteValues", "Request.QueryString", "Request.Params", "[FromBody]", "[FromQuery]", "[FromForm]", "[FromRoute]"],
+  "sinks": ["BinaryFormatter", "NetDataContractSerializer", "LosFormatter", "ObjectStateFormatter", "TypeNameHandling", "JavaScriptSerializer", "Process.Start", "ProcessStartInfo", "UseShellExecute", "SqlCommand", "ExecuteReader", "ExecuteNonQuery", "FromSqlRaw", "ExecuteSqlRaw", "XmlDocument", "XmlReader", "Path.Combine"],
+  "sanitizers": ["SqlParameter", "Parameters.Add", "HttpUtility.HtmlEncode", "AntiXss"],
+  "auth_markers": ["[Authorize]", "User.IsInRole", "RequireAuthorization", "[Authorize("]
+}
+```
