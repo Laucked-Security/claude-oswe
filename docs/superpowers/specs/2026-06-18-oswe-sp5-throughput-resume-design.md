@@ -45,8 +45,9 @@ rapport sans refaire les étapes validées*. This is the contract every design d
 
 ## 2. Hard constraints (inherited from the project)
 
-- **Zero runtime dependency.** Both new helpers run with **no `node_modules`** (`sha256` via
-  `node:crypto`; `JSON.parse`; `fs`/`path`/`url`).
+- **Zero runtime dependency.** All new helpers (`parse-audit-args`, `checkpoint-lifecycle`,
+  `agent-response-cache`) run with **no `node_modules`** (`sha256` via `node:crypto`; `JSON.parse`;
+  `fs`/`path`/`url`).
 - **No LLM in the lifecycle.** Args parsing, run-id resolution, digest matching, finalize — all
   deterministic Node code. The LLM never "interprets" an arg string or a checkpoint state.
 - **Fail-loud differs by artifact type** (resolved per Fix #5 from review):
@@ -290,8 +291,19 @@ node agent-response-cache.mjs --lookup --file <input.json> --out <out.json>
 node agent-response-cache.mjs --store --file <input.json>
 ```
 
-**Lookup mode — Input:** `{ "checkpoint_dir": "<abs>", "kind": "analyzer-response"|"verifier-response",
-"target_id": "<partition-id-or-batch-id>", "dispatch_input": { ...the canonical dispatch payload... } }`.
+**Lookup mode — Input:** `{ "checkpoint_dir": "<abs>", "plugin_root": "<abs>",
+"kind": "analyzer-response"|"verifier-response", "target_id": "<partition-id-or-batch-id>",
+"dispatch_input": { ...the canonical dispatch payload... } }`.
+
+**`plugin_root` is the SKILL-supplied source of truth (Fix #1 from round 5 review).** The SKILL
+sets `plugin_root: "${CLAUDE_PLUGIN_ROOT}"` (the env var Claude Code exports for the plugin's own
+root) in every helper invocation. The helper then computes `realpath(plugin_root)` once and rejects
+any `agent_contract_files` entry whose `realpath()` doesn't have it as a prefix — same fail-closed
+posture as `confine-path.mjs`. Why explicit in input rather than `process.env` or
+`import.meta.url`: (a) explicit input is testable without env-mocking (the existing helper test
+pattern); (b) it matches every other helper in the repo (confine-path takes `projectDir`
+explicitly, never reads env); (c) `import.meta.url` would silently rebind if the helper file ever
+moved, masking the bug. Same field is required in **store** mode for the same reason.
 
 For analyzer dispatches, `dispatch_input` MUST include `{partition_id, files: [...sorted],
 file_content_digest, references_loaded: [...sorted], agent_contract_files: [...sorted abs paths]}`.
@@ -341,8 +353,9 @@ validate-output gate before being re-stored. **This means the schema-gate discip
 end-to-end, including the cache path** — a cached response is never trusted past the same gate a
 live response must pass.
 
-**Store mode — Input:** `{ "checkpoint_dir": "<abs>", "kind": "...", "target_id": "...",
-"dispatch_input": {...}, "validated_response": {...} }`.
+**Store mode — Input:** `{ "checkpoint_dir": "<abs>", "plugin_root": "<abs>", "kind": "...",
+"target_id": "...", "dispatch_input": {...}, "validated_response": {...} }`. Store mode also
+requires `plugin_root` (same confinement check on `agent_contract_files` paths).
 
 Computes `input_digest = sha256(canonical(dispatch_input))`, writes
 `<checkpoint_dir>/agent-responses/<kind>-<target_id>-<input_digest>.json` atomically with
@@ -370,6 +383,10 @@ tampered finding field, this confirms the cache cannot bypass schema-gating.
 (a) edit a `references/<lang>.md` file listed in `agent_contract_files` between store and lookup
 → miss (different `agent_context_digest`); (b) edit `SKILL.md` between store and lookup → miss.
 Both confirm plugin-side contract changes invalidate the cache automatically.
+**Plus one `plugin_root` confinement test (Fix #1 from round 5 review):** an
+`agent_contract_files` entry pointing outside `plugin_root` (e.g. `/tmp/evil.md`) → exit 2 with
+the rejected path quoted on stderr. This matches the same fail-closed posture as `confine-path.mjs`
+and proves the SKILL-supplied `plugin_root` is actually enforced. (Test count: ≥ 10.)
 
 **Agent response caching — a dedicated helper, NOT SKILL prose.** Computing a sha256 inside the SKILL
 prose would put digest-matching in the LLM, contradicting §2's "No LLM in the lifecycle." So caching
@@ -431,10 +448,12 @@ It is purged at clean exit (§7 Report) and only persists between a kill and the
 - Replace the literal `max 4 concurrent` in §3 with `max <concurrency> concurrent` (where
   `<concurrency>` is the value resolved in §0).
 - Before each analyzer dispatch (§3) and each verifier batch dispatch (§6), call
-  `agent-response-cache.mjs --lookup` (§3.5) with the dispatch input. On `hit: true`, USE the
-  `cached_response` and skip the dispatch (re-validation was already done **inside the helper**
-  against the kind's schema — see §3.5 Fix #1). On miss (including the helper's own "stored
-  response failed re-validation" miss), dispatch as today.
+  `agent-response-cache.mjs --lookup` (§3.5) with the dispatch input. The input JSON MUST include
+  `"plugin_root": "${CLAUDE_PLUGIN_ROOT}"` alongside `checkpoint_dir`, `kind`, `target_id`, and
+  `dispatch_input` (see §3.5 round-5 Fix #1 — the helper rejects `agent_contract_files` that escape
+  `plugin_root`). On `hit: true`, USE the `cached_response` and skip the dispatch (re-validation
+  was already done **inside the helper** against the kind's schema — see §3.5 Fix #1). On miss
+  (including the helper's own "stored response failed re-validation" miss), dispatch as today.
 - After each successful `validate-output` of a freshly-dispatched analyzer-response or
   verifier-response, call `agent-response-cache.mjs --store` with the same dispatch input and the
   validated response. This populates the cache for any subsequent resume.
@@ -469,7 +488,7 @@ earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on dis
 - **3 JSON-in/JSON-out cached helpers** + **render-html special contract** — for each, 2 new tests:
   cache miss writes the artifact + cache hit short-circuits with same `--out` content (no recompute).
   8 tests total (2 × 4 helpers).
-- **`agent-response-cache.mjs`** — 9+ unit tests per §3.5 (store-then-lookup hit, lookup with no
+- **`agent-response-cache.mjs`** — 10+ unit tests per §3.5 (store-then-lookup hit, lookup with no
   store misses, different dispatch_input misses, different kind/target_id misses, idempotent store,
   corrupted cache file → miss).
 - **E2E replay** — extend the existing `e2e-replay.test.mjs` (or a new sibling
