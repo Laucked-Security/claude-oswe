@@ -1,6 +1,6 @@
 # OSWE E2E Replay Smoke Test Design
 
-**Status:** approved (review converged)
+**Status:** approved (review converged — 4 rounds)
 **Date:** 2026-06-18
 **Depends on:** merged MVP + Phase 2 + HTML report + Hybrid Precision (SP1+SP2) + Budget-Allocated Coverage (SP3) — the `oswe` plugin on `master`.
 **Branch (implementation):** `feat/oswe-e2e-replay-smoke` (off `master`).
@@ -103,16 +103,22 @@ and the SP3 skip-classification test). Every file skipped → `scannable:false` 
 ### 3.5 Pre-baked agent responses (literals in the test file)
 
 - **Analyzer response for `partA`**: status `ok`, one raw finding with `source` on the `request.args`
-  line and `sink` on the `render_template_string` line, `provisional_severity: High`, `auth:
-  unauthenticated`, `verification_status: not-requested`. Schema-valid (passes
-  `validate-output analyzer-response`).
+  line and `sink` on the `render_template_string` line, `provisional_severity: High`, **`confidence:
+  "strong static proof"`** (required field per `finding.schema.json`; the post-apply assertion
+  `final_confidence === "strong static proof"` is downstream of this — the verifier-accepted finding
+  carries its provisional confidence forward), `auth: unauthenticated`, `verification_status:
+  not-requested`. Schema-valid (passes `validate-output analyzer-response`).
 - **Chain** (built by the test as the SKILL would): single transition `entry → OSWE-1` (the canonical
   ID `aggregate-findings` assigns to the merged finding); `entry_point.auth: unauthenticated`,
-  `final_impact: unauth-rce`; **`severity: "High"`** with **`verification_status: "not-requested"`**
-  pre-apply. NOT `"Critical"` — `chain.schema.json:36` makes Critical mutually exclusive with
-  `not-requested` (the schema's `if/then` clause says a Critical chain MUST also be `verification_
-  status:"accepted"`, `confidence:"strong static proof"`, etc., which the candidate can't be). Only
-  `apply-verdicts` elevates the chain to Critical after the verifier accepts it.
+  `final_impact: unauth-rce`; **`severity: "High"`** with **`confidence: "strong static proof"`**
+  (required by `chain.schema.json:7`; we pick strong proof so the post-apply assertion
+  `chain.confidence === "strong static proof"` is reachable — Critical gating requires every member
+  at strong proof AND the chain's natural confidence to be strong proof) and
+  **`verification_status: "not-requested"`** pre-apply. NOT `"Critical"` — `chain.schema.json:36`
+  makes Critical mutually exclusive with `not-requested` (the schema's `if/then` clause says a
+  Critical chain MUST also be `verification_status:"accepted"`, `confidence:"strong static proof"`,
+  etc., which the candidate can't be). Only `apply-verdicts` elevates the chain to Critical after
+  the verifier accepts it.
 - **Verifier responses — TWO separate batches** (required by `apply-verdicts.mjs:105`, which enforces
   *1-5 findings XOR exactly 1 chain per batch*):
   - **Batch `b-find`**: `expected_targets: [{ target_type:"finding", target_id:"OSWE-1" }]`,
