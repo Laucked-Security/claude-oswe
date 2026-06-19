@@ -34,10 +34,14 @@ const countsOf = (v) => ({
   sink_hits: v.sink_hits || 0
 });
 
+// An empty `vectors` array with a valid budget legitimately returns { ok:true, analyze:[], gaps:[] }
+// (no scannable partitions to dispatch). Matches the house pattern (aggregateFindings([]) does the same).
 export function allocate(vectors, budget, sarifLeadsByPartition = {}) {
   if (!Array.isArray(vectors)) return { ok: false, error: "vectors must be an array", analyze: [], gaps: [] };
   if (!Number.isInteger(budget) || budget < 1) return { ok: false, error: "budget must be a positive integer", analyze: [], gaps: [] };
 
+  // `!== false` (not `=== true`): a vector without an explicit `scannable` field defaults to scannable.
+  // Do NOT "tighten" this to `=== true` — that would silently flip undefined-scannable vectors to gaps.
   const scannable = vectors.filter((v) => v.scannable !== false);
   const unscannable = vectors.filter((v) => v.scannable === false);
 
