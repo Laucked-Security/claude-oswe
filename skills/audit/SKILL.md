@@ -81,6 +81,30 @@ route). Prioritize partitions by exposure to the **unauthenticated** surface.
   in no analyzed partition (excluded dir, or beyond the partition budget) is recorded as a **coverage
   gap ("lead not analyzed")** — never silently dropped (the precision ledger must account for every lead).
 
+### 2.5 Prioritize & allocate the analyzer budget (deterministic)
+The analyzer pass is the expensive step, capped at a **budget of 12 partitions**. Do **not** raise the
+cap; **allocate** it deterministically so the budget lands on the highest-attack-surface partitions and
+the rest become ranked, justified gaps (never an opaque wall).
+
+- Build the **file→partition map** from §2 (factual: `{ partition_id, stack, files: [repo-rel paths] }`
+  per partition) and write `{ "projectDir": "<CLAUDE_PROJECT_DIR>", "referencesDir":
+  "<CLAUDE_PLUGIN_ROOT>/skills/audit/references", "partitions": [...] }` to a literal temp file. Run,
+  under the usual `trap`:
+  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/surface-scan.mjs" --file <in> --out <vectors>` →
+  per-partition deterministic count vectors (exit 1 = malformed input/surface block → fix; 2 = IO).
+- Then allocate. Write `{ "budget": 12, "vectors": [...from surface-scan...], "sarifLeadsByPartition":
+  { "<pid>": { "count": <n> } } }` (the `sarifLeadsByPartition` map only when SARIF leads were ingested
+  — §1; omit otherwise so the SARIF term is zero) to a temp file and run
+  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/allocate-budget.mjs" --file <in> --out <alloc>` →
+  `{ analyze: [ { partition_id, score } ], gaps: [ { partition_id, gap_class, ... } ] }`.
+- §3 dispatches `oswe-analyzer` subagents **only for the partitions in `analyze[]`**, still **max 4
+  concurrent** (the budget is the *coverage* limit; max-4 is the orthogonal *throughput* limit — both
+  apply). Everything in `gaps[]` is recorded for Coverage (§7) — never analyzed, never silently dropped.
+- **Leads on a deprioritized partition** (hybrid mode) are reported as `lead not analyzed
+  (deprioritized)` — the precision ledger still accounts for every lead.
+- **Zero-regression:** when the number of supported partitions ≤ budget, `analyze[]` contains all of
+  them and the run is behaviorally identical to today (empty `deprioritized` list).
+
 ### 3. Analyze
 - **Small repo (≤ 2 partitions):** analyze inline yourself (no analyzer *subagents*) — but you MUST
   still produce **one `analyzer-response` object per partition** and **run it through the same
@@ -332,6 +356,19 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
     `expected_targets`, and the original failure (e.g. "transition mismatch", "unexpected target") —
     because the neutralized `{status:error, verdicts:[]}` response no longer carries it;
   - a chain left **`not-requested`** because a **member was unverified** (its `gaps[]` reason names the member).
+- **Coverage is now reported in three classes from the §2.5 allocation, not one opaque "not analyzed"
+  list:**
+  - **Analyzed** — the partitions in `analyze[]` (top-N by attack-surface score).
+  - **Deprioritized (surface assessed low)** — each `gaps[]` entry with `gap_class:"deprioritized"`,
+    ranked by `score`, **with its proxy counts** (e.g. *"`admin-tools`: score 3 — 1 source, 1 sink, 3
+    auth-markers, all source files gated → low predicted unauth surface"*) so the deferral is auditable
+    and a reader can decide whether to re-run with a larger budget.
+  - **Unsupported stack (surface NOT assessed)** — each `gap_class:"unsupported-stack"` entry, a
+    **distinct, prominent** line: the surface is *unknown*, not *low*. Never present it as a low score.
+- **Coverage-honesty caveat (no-SARIF runs):** state that without a SARIF input the token scan's one
+  blind spot is the false-negative by indirection (a sink reached via a wrapper/alias is invisible to
+  substring matching), so a **low `deprioritized` score is not proof of a thin surface** — a SARIF
+  input backstops this; a no-SARIF run does not.
 - **Annex “Dismissed findings”**: **only** items with **`outcome: "rejected"`** in `decisions`
   (a real refutation), with their `reason` — a verifier `rejected` finding/chain, or a chain implicitly
   rejected because a **member was rejected** (refuted). Items that are merely `not-requested` (unverified
