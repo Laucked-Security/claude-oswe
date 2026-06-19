@@ -362,9 +362,17 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
   - **Deprioritized (surface assessed low)** — each `gaps[]` entry with `gap_class:"deprioritized"`,
     ranked by `score`, **with its proxy counts** (e.g. *"`admin-tools`: score 3 — 1 source, 1 sink, 3
     auth-markers, all source files gated → low predicted unauth surface"*) so the deferral is auditable
-    and a reader can decide whether to re-run with a larger budget.
-  - **Unsupported stack (surface NOT assessed)** — each `gap_class:"unsupported-stack"` entry, a
-    **distinct, prominent** line: the surface is *unknown*, not *low*. Never present it as a low score.
+    and a reader can decide whether to re-run with a larger budget. **If `counts.skipped_missing` or
+    `counts.skipped_out_of_scope` is > 0, surface them in the line** — a low score on a partition with
+    unreadable files is *partly a coverage gap*, not a clean "low surface" assessment.
+  - **Unreadable partition (surface NOT assessed — files unreadable)** — each `gap_class:"unreadable-partition"`
+    entry: the stack IS supported but every listed file was missing/escaping/unreadable. Report it as
+    **surface unknown** with the file count and the `skipped_missing`/`skipped_out_of_scope` split —
+    never as "unsupported stack" (the stack supports analysis; the partition map referenced files we
+    couldn't read).
+  - **Unsupported stack (surface NOT assessed — no reference)** — each `gap_class:"unsupported-stack"`
+    entry, a **distinct, prominent** line: no surface block exists for this stack, so its surface is
+    *unknown*, not *low*. Never present it as a low score.
 - **Coverage-honesty caveat (no-SARIF runs):** state that without a SARIF input the token scan's one
   blind spot is the false-negative by indirection (a sink reached via a wrapper/alias is invisible to
   substring matching), so a **low `deprioritized` score is not proof of a thin surface** — a SARIF

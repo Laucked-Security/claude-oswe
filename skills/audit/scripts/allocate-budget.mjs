@@ -28,10 +28,14 @@ export function scoreVector(v, sarif) {
 }
 
 const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+// Counts carried into a deprioritized gap's justification so a reader can audit the deferral. Includes
+// skip stats so a partition deprioritized with several unreadable files reveals the gap in coverage —
+// without them, the gap would read as "low surface" while the scanner actually missed files.
 const countsOf = (v) => ({
   sources: v.sources || 0, sinks: v.sinks || 0, sanitizers: v.sanitizers || 0,
   auth_markers: v.auth_markers || 0, source_and_auth_files: v.source_and_auth_files || 0,
-  sink_hits: v.sink_hits || 0
+  sink_hits: v.sink_hits || 0,
+  skipped_missing: v.skipped_missing || 0, skipped_out_of_scope: v.skipped_out_of_scope || 0
 });
 
 // An empty `vectors` array with a valid budget legitimately returns { ok:true, analyze:[], gaps:[] }
@@ -58,11 +62,26 @@ export function allocate(vectors, budget, sarifLeadsByPartition = {}) {
       reason: "deprioritized: analyzer budget exhausted; lower predicted attack surface"
     });
   });
-  // Unscannable partitions do NOT compete for budget (no reference -> the analyzer can't help) and are
-  // reported as a DISTINCT prominent class: surface UNKNOWN, never folded into "low surface".
+  // Unscannable partitions do NOT compete for budget (no signal to score) and are reported as a
+  // DISTINCT prominent class — surface UNKNOWN, never folded into "low surface". Two SUB-CLASSES,
+  // distinguished by the surface-scan vector shape: an all-skipped partition carries skip stats +
+  // a precise `reason` (the supported stack's files just couldn't be read); a vector with neither
+  // is an unsupported-stack case (no reference page exists for this stack). Lumping both under
+  // "unsupported-stack" would lie about the stack's support status in the all-skipped sub-case.
   for (const v of unscannable) {
-    gaps.push({ partition_id: v.partition_id, gap_class: "unsupported-stack", stack: v.stack || "unknown",
-      reason: `unsupported stack "${v.stack || "unknown"}" — surface not assessed; not covered by this audit` });
+    const isUnreadable = (v.skipped_missing !== undefined) || (v.skipped_out_of_scope !== undefined);
+    if (isUnreadable) {
+      gaps.push({
+        partition_id: v.partition_id, gap_class: "unreadable-partition", stack: v.stack || "unknown",
+        counts: { files: v.files || 0, skipped_missing: v.skipped_missing || 0, skipped_out_of_scope: v.skipped_out_of_scope || 0 },
+        reason: v.reason || `all ${v.files || 0} files unreadable (missing/escape) — surface not assessed`
+      });
+    } else {
+      gaps.push({
+        partition_id: v.partition_id, gap_class: "unsupported-stack", stack: v.stack || "unknown",
+        reason: `unsupported stack "${v.stack || "unknown"}" — surface not assessed; not covered by this audit`
+      });
+    }
   }
   return { ok: true, error: null, analyze, gaps };
 }

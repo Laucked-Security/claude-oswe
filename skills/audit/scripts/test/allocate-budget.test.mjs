@@ -91,6 +91,39 @@ test("allocate threads the SARIF map by partition_id and the lift can change the
   assert.deepEqual(allocate([a, b], 1, { b: { count: 5 } }).analyze.map((x) => x.partition_id), ["b"]);
 });
 
+test("deprioritized gap's counts carries skip stats so unread files surface in the report", () => {
+  // Without this, a deprioritized partition with several unreadable files would read as 'low surface'
+  // when the scanner actually missed coverage — the lie about coverage the spec specifically forbids.
+  const v = vec("p", { sources: 0, sinks: 0, content_key: "p", skipped_missing: 3, skipped_out_of_scope: 1 });
+  const r = allocate([vec("hi", { sources: 1, sinks: 1, content_key: "z" }), v], 1);
+  const dep = r.gaps.find((g) => g.partition_id === "p");
+  assert.equal(dep.gap_class, "deprioritized");
+  assert.equal(dep.counts.skipped_missing, 3);
+  assert.equal(dep.counts.skipped_out_of_scope, 1);
+});
+
+test("an unscannable vector with skip stats becomes 'unreadable-partition' (not 'unsupported-stack')", () => {
+  // The all-skipped sub-case: stack IS supported, files just unreadable — labelling it 'unsupported-stack'
+  // would lie about the stack's support status. Distinct class, distinct reason, carries skip stats.
+  const v = { partition_id: "u", stack: "python", scannable: false, files: 5, skipped_missing: 2, skipped_out_of_scope: 3, reason: "all 5 files unreadable (missing/escape) — surface not assessed" };
+  const r = allocate([v], 12);
+  const g = r.gaps[0];
+  assert.equal(g.gap_class, "unreadable-partition");
+  assert.equal(g.stack, "python");
+  assert.equal(g.counts.skipped_missing, 2);
+  assert.equal(g.counts.skipped_out_of_scope, 3);
+  assert.match(g.reason, /unreadable/i);
+});
+
+test("an unscannable vector WITHOUT skip stats remains 'unsupported-stack' (no reference page)", () => {
+  const v = { partition_id: "u", stack: "perl", scannable: false, files: 3 };
+  const r = allocate([v], 12);
+  const g = r.gaps[0];
+  assert.equal(g.gap_class, "unsupported-stack");
+  assert.equal(g.stack, "perl");
+  assert.match(g.reason, /unsupported stack/i);
+});
+
 test("invalid budget and non-array vectors are rejected (ok:false)", () => {
   assert.equal(allocate([], 0).ok, false);
   assert.equal(allocate("nope", 12).ok, false);
