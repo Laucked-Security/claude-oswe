@@ -8,7 +8,7 @@
 
 [![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Tests: 216 passing](https://img.shields.io/badge/tests-216%20passing-brightgreen)
+![Tests: 218 passing](https://img.shields.io/badge/tests-218%20passing-brightgreen)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
@@ -30,8 +30,8 @@ positives on safe code, no exploit chain, no proof, no reproducibility. That's n
 `oswe` is built to **not do that**:
 
 - **Determinism where it matters.** Severity, dedup, and the "is this a Critical unauth-RCE?" decision
-  are **not** left to the model — they run in tested, dependency-free Node helpers with **216 unit
-  tests** (184 pipeline + 32 benchmark). The model *finds*; the helpers *decide*.
+  are **not** left to the model — they run in tested, dependency-free Node helpers with **218 unit
+  tests** (186 pipeline + 32 benchmark). The model *finds*; the helpers *decide*.
 - **A verifier that pushes back.** Every candidate chain and high-severity finding is re-checked by an
   independent verifier that can **downgrade or reject** — it doesn't rubber-stamp the analyzer.
 - **Schema-gated I/O.** Each agent response is validated against a JSON Schema before it's trusted; a
@@ -206,7 +206,7 @@ The runtime validator [`skills/audit/scripts/validators.mjs`](skills/audit/scrip
 helper inlined). Run the suites (Node ≥ 20 only, no install):
 
 ```bash
-( cd skills/audit/scripts && node --test )          # 184 pipeline tests
+( cd skills/audit/scripts && node --test )          # 186 pipeline tests
 ( cd benchmark && node --test )                     # 32 benchmark-engine tests
 node .github/scripts/check-structure.mjs            # stacks / references / fixtures-markers gate
 ```
