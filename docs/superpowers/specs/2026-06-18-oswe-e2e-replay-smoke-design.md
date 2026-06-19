@@ -30,9 +30,10 @@ boundaries are stated so the test cannot be misread.
 1. A single `node --test` file under `skills/audit/scripts/test/` that exercises the **full helper
    chain** — `confine-path → surface-scan → allocate-budget → aggregate-findings → validate-output →
    validate-batch → apply-verdicts → render-html` — via each helper's **real CLI**.
-2. The fixture exercises **all four SP3 coverage classes by construction** (`analyzed`,
-   `deprioritized`, `unreadable-partition`; `unsupported-stack` covered by allocate-budget's
-   existing unit tests, omitted here to keep one fixture).
+2. The fixture exercises **three of the four SP3 coverage classes by construction** — `analyzed`,
+   `deprioritized`, `unreadable-partition`. The 4th class, `unsupported-stack`, is intentionally
+   left to `allocate-budget`'s unit tests (adding a fourth dummy partition just to populate it
+   would multiply the pipeline run without adding orchestration coverage).
 3. Assertions are **structural invariants + targeted semantic checks**, never byte-for-byte snapshots
    (a wording change in the SKILL or a helper's prose must not break this test; only a real
    orchestration regression should).
@@ -44,9 +45,13 @@ boundaries are stated so the test cannot be misread.
 
 - **Zero runtime dependency.** Test uses only `node:test`, `node:assert/strict`, `node:fs`,
   `node:os`, `node:path`, `node:child_process`. No new deps.
-- **Real CLIs everywhere.** Helpers invoked via `spawnSync(process.execPath, [helperPath, "--file",
-  in, "--out", out])`. This is exactly what SKILL.md prescribes; using imports would test
-  composition without testing the CLI contract — defeating the purpose.
+- **Real CLIs everywhere.** Each helper invoked via `spawnSync(process.execPath, [helperPath,
+  ...args])` with its **documented CLI surface** — `--file`/`--out` for the JSON-in/JSON-out helpers
+  (`surface-scan`, `allocate-budget`, `aggregate-findings`, `ingest-sarif`, `apply-verdicts`);
+  `<kind> --file <p>` for `validate-output`; `--file <p>` only for `validate-batch` (no `--out`,
+  exit code carries the verdict); `--file <p>` for `confine-path` (prints the confined path to
+  stdout); `--md <p> --summary <p> --out <p>` for `render-html`. Using imports would test composition
+  without testing the CLI contract — defeating the purpose.
 - **No persistent state.** All inputs/outputs in a per-test `mkdtempSync` directory, removed in
   `t.after()`. The repo working tree is untouched after the test runs.
 - **No agent invocation.** All analyzer/verifier outputs are pre-baked JSON literals in the test
@@ -104,8 +109,19 @@ and the SP3 skip-classification test). Every file skipped → `scannable:false` 
 - **Chain** (built by the test as the SKILL would): single transition `entry → OSWE-1` (the canonical
   ID `aggregate-findings` assigns to the merged finding); `entry_point.auth: unauthenticated`,
   `final_impact: unauth-rce`.
-- **Verifier response** for the batch covering OSWE-1 + the chain: both `accepted`, `severity_floor:
-  High`, `confidence_floor: strong static proof`. Schema-valid.
+- **Verifier responses — TWO separate batches** (required by `apply-verdicts.mjs:105`, which enforces
+  *1-5 findings XOR exactly 1 chain per batch*):
+  - **Batch `b-find`**: `expected_targets: [{ target_type:"finding", target_id:"OSWE-1" }]`,
+    `response.status:"ok"`, `response.verdicts:[{ target_type:"finding", target_id:"OSWE-1",
+    verdict:"accepted", justification:"<text>" }]`. Schema-valid per `verdict.schema.json` (which
+    requires only `target_type`, `target_id`, `verdict`, `justification`; **no `severity_floor` /
+    `confidence_floor` fields exist** — earlier draft was wrong; the schema is
+    `additionalProperties:false`).
+  - **Batch `b-chain`**: `expected_targets: [{ target_type:"chain", target_id:"CHAIN-1" }]`,
+    `response.status:"ok"`, `response.verdicts:[{ target_type:"chain", target_id:"CHAIN-1",
+    verdict:"accepted", justification:"<text>", transition_verdicts:[{ from:"entry", to:"OSWE-1",
+    verdict:"accepted", justification:"<text>" }] }]`. The `transition_verdicts` field is
+    schema-required for chain verdicts (`verdict.schema.json:30`).
 - **Report-summary** for `render-html`: minimal valid `report-summary.schema.json` instance with one
   `CHAIN-1` declared and an `entry → OSWE-1 → RCE` edge.
 - **XSS canary**: a small `<img src=x onerror=alert(1)>` payload embedded in the **Markdown body**
@@ -129,10 +145,13 @@ In order, with each step's input file written to the temp dir and output path ca
 5. `validate-output.mjs finding` — asserts the OSWE-1 object passes.
 6. **(In-test)** the test constructs the chain object (the SKILL builds chains in-text, not via a
    helper — there is no `chain-build.mjs`); validated via `validate-output.mjs chain`.
-7. `validate-batch.mjs` — given the chain + the OSWE-1 finding + the verifier batch wrapper, asserts
-   exit 0.
-8. `apply-verdicts.mjs` — input: `{ findings, chains, batches }`. Output: `{ ok: true, findings:
-   [accepted], chains: [accepted], gaps: [], decisions: [...] }`.
+7. `validate-batch.mjs` × **2** — once per batch (the SKILL's per-batch local check, §6 Step A):
+   - call A: `{ findings:[OSWE-1], chains:[CHAIN-1], batch: b-find-wrapper }` — exit 0.
+   - call B: `{ findings:[OSWE-1], chains:[CHAIN-1], batch: b-chain-wrapper }` — exit 0.
+   (Both batches always carry the FULL findings + chains arrays; the batch's `expected_targets`
+   alone declares what it covers. This matches `apply-verdicts.mjs` `applyVerdicts` semantics.)
+8. `apply-verdicts.mjs` — input: `{ findings, chains, batches: [b-find-wrapper, b-chain-wrapper] }`.
+   Output: `{ ok: true, findings:[accepted], chains:[accepted], gaps:[], decisions:[...] }`.
 9. `validate-output.mjs final-finding` — asserts the OSWE-1 final form passes.
 10. `render-html.mjs` — `--md <generated-md>` + `--summary <summary.json>` + `--out <html>`. Asserts
     exit 0 and the HTML file exists.
@@ -158,11 +177,13 @@ crashing and produces a well-formed, safe HTML.
   "unreadable-partition"])`** — the targeted semantic check that locks SP3's class taxonomy.
 - `aggregate-findings` output: `r.ok === true`; the single finding has `finding_id === "OSWE-1"`.
 - `validate-batch` exit 0.
-- `apply-verdicts` output: `r.ok === true`; the finding's `verification_status === "accepted"` with
-  `final_severity === "High"` (findings carry their own severity); the chain's
-  `verification_status === "accepted"` and `final_severity === "Critical"` (the gating rule fires:
-  every member accepted at `strong static proof`, `entry_point.auth === "unauthenticated"`,
-  `final_impact === "unauth-rce"` — see `apply-verdicts.mjs:309-314`).
+- `apply-verdicts` output: `r.ok === true`. **Finding** (carries `final_severity`/`final_confidence`):
+  `verification_status === "accepted"`, `final_severity === "High"`, `final_confidence === "strong
+  static proof"`. **Chain** (carries `severity`/`confidence`, NOT `final_severity` — see
+  `chain.schema.json:32-33`): `verification_status === "accepted"`, `severity === "Critical"`,
+  `confidence === "strong static proof"` (Critical gating rule fires: every member accepted at
+  strong proof, `entry_point.auth === "unauthenticated"`, `final_impact === "unauth-rce"` — see
+  `apply-verdicts.mjs:309-314`).
 - `render-html` exit 0; the output file exists and is non-empty.
 
 ### 5.2 Markdown invariants (on the body the test fed to render-html)
@@ -228,7 +249,9 @@ crashing and produces a well-formed, safe HTML.
    the initial scenario — `surface-scan.test.mjs` already keeps fixtures inline).
 3. `cd skills/audit/scripts && node --test` is green (190 pipeline tests = current 189 + 1 new) on
    both Node 20 & 22 in CI.
-4. The test runs in well under 5 seconds (8 short spawnSync calls; no I/O beyond a handful of small
+4. The test runs in well under 5 seconds (~11 short spawnSync calls: confine-path, surface-scan,
+   allocate-budget, aggregate-findings, validate-output ×3 [finding/chain/final-finding],
+   validate-batch ×2, apply-verdicts, render-html; no I/O beyond a handful of small
    temp files).
 5. The README test-count badge is bumped accordingly.
 
