@@ -356,7 +356,7 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
     `expected_targets`, and the original failure (e.g. "transition mismatch", "unexpected target") —
     because the neutralized `{status:error, verdicts:[]}` response no longer carries it;
   - a chain left **`not-requested`** because a **member was unverified** (its `gaps[]` reason names the member).
-- **Coverage is now reported in three classes from the §2.5 allocation, not one opaque "not analyzed"
+- **Coverage is now reported in four classes from the §2.5 allocation, not one opaque "not analyzed"
   list:**
   - **Analyzed** — the partitions in `analyze[]` (top-N by attack-surface score).
   - **Deprioritized (surface assessed low)** — each `gaps[]` entry with `gap_class:"deprioritized"`,

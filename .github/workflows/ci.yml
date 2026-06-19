@@ -68,3 +68,17 @@ jobs:
       - name: Re-run tests against the freshly generated validators
         working-directory: skills/audit/scripts
         run: node --test
+
+  plugin-validate:
+    name: claude plugin validate --strict (release gate)
+    runs-on: ubuntu-latest
+    # Static offline manifest check (no API calls, no credentials needed): catches a malformed
+    # plugin.json / skill frontmatter / agent file / hooks.json BEFORE merge, instead of relying on
+    # the maintainer's local pre-release gate. Single-OS, single Node — the binary is identical
+    # across runners.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Claude Code
+        run: curl -fsSL https://claude.ai/install.sh | bash
+      - name: Validate plugin
+        run: claude plugin validate . --strict
