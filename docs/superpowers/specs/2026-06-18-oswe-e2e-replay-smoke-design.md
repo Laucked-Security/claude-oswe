@@ -108,7 +108,11 @@ and the SP3 skip-classification test). Every file skipped → `scannable:false` 
   `validate-output analyzer-response`).
 - **Chain** (built by the test as the SKILL would): single transition `entry → OSWE-1` (the canonical
   ID `aggregate-findings` assigns to the merged finding); `entry_point.auth: unauthenticated`,
-  `final_impact: unauth-rce`.
+  `final_impact: unauth-rce`; **`severity: "High"`** with **`verification_status: "not-requested"`**
+  pre-apply. NOT `"Critical"` — `chain.schema.json:36` makes Critical mutually exclusive with
+  `not-requested` (the schema's `if/then` clause says a Critical chain MUST also be `verification_
+  status:"accepted"`, `confidence:"strong static proof"`, etc., which the candidate can't be). Only
+  `apply-verdicts` elevates the chain to Critical after the verifier accepts it.
 - **Verifier responses — TWO separate batches** (required by `apply-verdicts.mjs:105`, which enforces
   *1-5 findings XOR exactly 1 chain per batch*):
   - **Batch `b-find`**: `expected_targets: [{ target_type:"finding", target_id:"OSWE-1" }]`,
@@ -140,20 +144,36 @@ In order, with each step's input file written to the temp dir and output path ca
    false` for `partC`.
 3. `allocate-budget.mjs` — input: `{ budget: 1, vectors }`. Output: `{ ok: true, analyze: [{
    partition_id: "partA", ...}], gaps: [partB-deprioritized, partC-unreadable-partition] }`.
-4. `aggregate-findings.mjs` — input: the single raw analyzer finding (would-be partA output) wrapped
+4. `validate-output.mjs analyzer-response --file <r>` — asserts the pre-baked analyzer response
+   passes its schema (the same gate the SKILL §3 applies before aggregating). Schema-gating analyzer
+   responses is part of the contract; smoke-testing the pipeline without it would let a malformed
+   response slip through here that the live pipeline would catch.
+5. `aggregate-findings.mjs` — input: the single raw analyzer finding (would-be partA output) wrapped
    as `{ findings: [...] }`. Output: a canonical finding with `finding_id: "OSWE-1"`.
-5. `validate-output.mjs finding` — asserts the OSWE-1 object passes.
-6. **(In-test)** the test constructs the chain object (the SKILL builds chains in-text, not via a
-   helper — there is no `chain-build.mjs`); validated via `validate-output.mjs chain`.
-7. `validate-batch.mjs` × **2** — once per batch (the SKILL's per-batch local check, §6 Step A):
-   - call A: `{ findings:[OSWE-1], chains:[CHAIN-1], batch: b-find-wrapper }` — exit 0.
-   - call B: `{ findings:[OSWE-1], chains:[CHAIN-1], batch: b-chain-wrapper }` — exit 0.
-   (Both batches always carry the FULL findings + chains arrays; the batch's `expected_targets`
-   alone declares what it covers. This matches `apply-verdicts.mjs` `applyVerdicts` semantics.)
-8. `apply-verdicts.mjs` — input: `{ findings, chains, batches: [b-find-wrapper, b-chain-wrapper] }`.
-   Output: `{ ok: true, findings:[accepted], chains:[accepted], gaps:[], decisions:[...] }`.
-9. `validate-output.mjs final-finding` — asserts the OSWE-1 final form passes.
-10. `render-html.mjs` — `--md <generated-md>` + `--summary <summary.json>` + `--out <html>`. Asserts
+6. `validate-output.mjs finding` — asserts the OSWE-1 object passes.
+7. **(In-test)** the test constructs the chain object (the SKILL builds chains in-text, not via a
+   helper — there is no `chain-build.mjs`). The candidate's `severity` is **`"High"`** with
+   `verification_status:"not-requested"` (NOT `"Critical"` — `chain.schema.json:36` makes Critical
+   incompatible with `not-requested` pre-apply; only `apply-verdicts` elevates to Critical).
+   Validated via `validate-output.mjs chain`.
+8. `validate-output.mjs verifier-response --file <b-find.response>` — asserts the finding-batch
+   verifier response passes its schema.
+9. `validate-output.mjs verifier-response --file <b-chain.response>` — asserts the chain-batch
+   verifier response passes its schema (with its required `transition_verdicts`).
+10. `validate-batch.mjs` × **2** — once per batch (the SKILL's per-batch local check, §6 Step A):
+    - call A: `{ findings:[OSWE-1], chains:[CHAIN-1], batch: b-find-wrapper }` — exit 0.
+    - call B: `{ findings:[OSWE-1], chains:[CHAIN-1], batch: b-chain-wrapper }` — exit 0.
+    (Both batches always carry the FULL findings + chains arrays; the batch's `expected_targets`
+    alone declares what it covers. This matches `apply-verdicts.mjs` `applyVerdicts` semantics.)
+11. `apply-verdicts.mjs` — input: `{ findings, chains, batches: [b-find-wrapper, b-chain-wrapper] }`.
+    Output: `{ ok: true, findings:[accepted], chains:[accepted], gaps:[], decisions:[...] }`.
+12. `validate-output.mjs final-finding` — asserts the mutated OSWE-1 (post-apply) passes the
+    `final-finding` kind.
+13. `validate-output.mjs chain` — asserts the **mutated CHAIN-1** (post-apply, now Critical-accepted
+    with `verification_status:"accepted"`) re-passes the `chain` schema. SKILL §6b ligne 274 requires
+    re-validating returned chains as well as findings; pre-apply and post-apply chain states differ
+    significantly (severity, confidence, verification_status), so both validations are necessary.
+14. `render-html.mjs` — `--md <generated-md>` + `--summary <summary.json>` + `--out <html>`. Asserts
     exit 0 and the HTML file exists.
 
 The Markdown body fed to `render-html` is **constructed by the test** (a minimal canonical report
@@ -249,9 +269,11 @@ crashing and produces a well-formed, safe HTML.
    the initial scenario — `surface-scan.test.mjs` already keeps fixtures inline).
 3. `cd skills/audit/scripts && node --test` is green (190 pipeline tests = current 189 + 1 new) on
    both Node 20 & 22 in CI.
-4. The test runs in well under 5 seconds (~11 short spawnSync calls: confine-path, surface-scan,
-   allocate-budget, aggregate-findings, validate-output ×3 [finding/chain/final-finding],
-   validate-batch ×2, apply-verdicts, render-html; no I/O beyond a handful of small
+4. The test runs in well under 5 seconds (~15 short spawnSync calls: confine-path, surface-scan,
+   allocate-budget, validate-output analyzer-response, aggregate-findings, validate-output finding,
+   validate-output chain (pre-apply candidate), validate-output verifier-response ×2,
+   validate-batch ×2, apply-verdicts, validate-output final-finding, validate-output chain
+   (post-apply mutated), render-html; no I/O beyond a handful of small
    temp files).
 5. The README test-count badge is bumped accordingly.
 
