@@ -40,3 +40,12 @@
   string is the smell.
 - `os.path.basename` does not stop all traversal when the extension/path is attacker-influenced downstream.
 - Casting to `str()` neutralizes type-confusion (object-valued JSON) — its **absence** is the smell.
+
+```surface
+{
+  "sources": ["request.args", "request.form", "request.values", "request.json", "request.get_json", "request.data", "request.cookies", "request.headers", "request.files", "request.GET", "request.POST", "request.body", "request.COOKIES", "request.META", "request.FILES"],
+  "sinks": ["render_template_string", "Template(", "pickle.loads", "pickle.load", "yaml.load", "marshal.loads", "os.system", "subprocess.call", "subprocess.run", "subprocess.Popen", "os.popen", "eval(", "exec(", "cursor.execute", ".raw(", ".extra(", "RawSQL", "send_file", "send_from_directory", "lxml.etree"],
+  "sanitizers": ["shlex.quote", "yaml.safe_load", "markupsafe.escape", "os.path.basename"],
+  "auth_markers": ["@login_required", "@permission_required", "login_required(", "PermissionRequiredMixin"]
+}
+```

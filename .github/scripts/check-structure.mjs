@@ -95,6 +95,36 @@ try {
   map.semgrep ? ok("sarif-rule-map has a semgrep table") : bad("sarif-rule-map.json missing 'semgrep' tool");
 } catch (e) { bad("sarif-rule-map.json is not valid JSON: " + e.message); }
 
+console.log("7) surface blocks (SP3): present, valid JSON, non-empty sources/sinks/auth_markers, fixture-linked");
+for (const s of STACKS) {
+  const refPath = `skills/audit/references/${s}.md`;
+  let md;
+  try { md = read(refPath); } catch { bad(`${refPath}: unreadable`); continue; }
+  const fenceCount = (md.match(/```surface\b/g) || []).length;
+  if (fenceCount !== 1) { bad(`${refPath}: must contain exactly ONE \`\`\`surface block (found ${fenceCount}) — the runtime parser trusts this gate and takes the first`); continue; }
+  const m = /```surface\s*\n([\s\S]*?)\n```/.exec(md);
+  if (!m) { bad(`${refPath}: \`\`\`surface block is malformed (fence present but no JSON body)`); continue; }
+  let block;
+  try { block = JSON.parse(m[1]); } catch (e) { bad(`${refPath}: surface block is not valid JSON: ${e.message}`); continue; }
+  for (const key of ["sources", "sinks", "auth_markers"]) {
+    const v = block[key];
+    if (!Array.isArray(v) || v.length === 0) { bad(`${refPath}: surface.${key} must be a non-empty array`); continue; }
+    if (!v.every((t) => typeof t === "string" && t.length > 0)) { bad(`${refPath}: surface.${key} contains an empty/non-string token`); continue; }
+    ok(`${s}.md surface.${key} (${v.length})`);
+  }
+  // sanitizers may be empty, but if present every token must be a non-empty string
+  if (Array.isArray(block.sanitizers) && !block.sanitizers.every((t) => typeof t === "string" && t.length > 0)) {
+    bad(`${refPath}: surface.sanitizers contains an empty/non-string token`);
+  }
+  // fixture link (total-drift tripwire): at least one sinks token appears in the vulnerable fixture tree.
+  const fixDir = join(ROOT, `test-fixtures/${s}/vulnerable`);
+  if (!existsSync(fixDir)) { bad(`${refPath}: no vulnerable fixture to link against`); continue; }
+  const fixText = walk(fixDir).filter((p) => !/EXPECTED\.md$/.test(p)).map((p) => { try { return readFileSync(p, "utf8"); } catch { return ""; } }).join("\n");
+  (block.sinks || []).some((t) => fixText.includes(t))
+    ? ok(`${s}.md surface.sinks linked to a vulnerable fixture`)
+    : bad(`${refPath}: no surface.sinks token appears in test-fixtures/${s}/vulnerable (block drifted from reality?)`);
+}
+
 console.log("");
 if (errors.length) {
   console.error(`FAIL: ${errors.length} structure violation(s).`);

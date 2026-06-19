@@ -39,3 +39,12 @@
 - `addslashes`/manual escaping vs parameterized queries (insufficient against many encodings).
 - `htmlspecialchars` is output-encoding (XSS) — irrelevant to SQLi/RCE sinks.
 - `basename()` does not stop all traversal when extension/path is attacker-influenced downstream.
+
+```surface
+{
+  "sources": ["$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES", "$_SERVER", "php://input", "getallheaders(", "$request->input(", "$request->all(", "$request->query(", "$request->request->get(", "$request->query->get(", "$request->headers->get("],
+  "sinks": ["mysqli_query", "->query(", "DB::raw", "DB::select", "whereRaw", "system(", "exec(", "shell_exec", "passthru", "proc_open", "popen(", "eval(", "unserialize(", "include(", "require(", "include_once", "require_once", "move_uploaded_file", "file_put_contents", "preg_replace"],
+  "sanitizers": ["htmlspecialchars", "escapeshellarg", "escapeshellcmd", "prepare(", "bindParam", "intval("],
+  "auth_markers": ["Auth::check", "Auth::user", "->middleware('auth", "Gate::allows", "Gate::authorize", "$this->authorize(", "#[IsGranted"]
+}
+```

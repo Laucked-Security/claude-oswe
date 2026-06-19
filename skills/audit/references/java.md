@@ -36,3 +36,12 @@
 - Parameterized `PreparedStatement` is the SQLi fix; its absence around concatenation is the smell.
 - Blacklisting class names for deserialization is bypassable — only an allow-list / not deserializing
   attacker data is safe.
+
+```surface
+{
+  "sources": ["@RequestParam", "@RequestBody", "@PathVariable", "@RequestHeader", "@CookieValue", "@ModelAttribute", "getParameter", "getHeader", "getCookies", "getInputStream", "getQueryString", "getReader", "X-User-Role", "X-Forwarded-User"],
+  "sinks": ["ObjectInputStream", ".readObject(", "XMLDecoder", "XStream", "@JsonTypeInfo", "Yaml.load", "parseExpression(", ".getValue(", "MVEL.eval", "Runtime.getRuntime().exec", "ProcessBuilder", "Statement.execute", "createNativeQuery", "nativeQuery", "createQuery", "DocumentBuilder", "SAXParser"],
+  "sanitizers": ["PreparedStatement", "setString(", "ESAPI", "OWASP", "getCanonicalPath"],
+  "auth_markers": ["@PreAuthorize", "@Secured", "@RolesAllowed", "SecurityFilterChain", "@EnableWebSecurity"]
+}
+```
