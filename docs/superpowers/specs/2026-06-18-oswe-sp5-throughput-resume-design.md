@@ -49,9 +49,17 @@ rapport sans refaire les étapes validées*. This is the contract every design d
   `node:crypto`; `JSON.parse`; `fs`/`path`/`url`).
 - **No LLM in the lifecycle.** Args parsing, run-id resolution, digest matching, finalize — all
   deterministic Node code. The LLM never "interprets" an arg string or a checkpoint state.
-- **Fail-loud.** Invalid args → exit 1, no fallback. Ambiguous resume → exit 1 with cleanup
-  instructions, no heuristic. A cache match that's been tampered with (manifest missing, digest
-  mismatch within cached file) → exit 1, not silent recompute.
+- **Fail-loud differs by artifact type** (resolved per Fix #5 from review):
+  - **Manifest corruption** (manifest missing/malformed/`additionalProperties`) → **exit 1** with
+    cleanup instruction. The manifest is the directory-level structural artifact; malformation is
+    unambiguous broken state and must not be papered over.
+  - **Per-helper cache file corruption** (a `.json` cache file with mismatched-internal `input_digest`
+    or unparseable JSON) → **silent recompute + overwrite**. A single corrupted cache file should
+    not fail the audit; the work is recoverable by just doing it.
+  - **Agent response cache file corruption** → **silent miss + re-dispatch**. Same logic as helper
+    caches; the dispatch is expensive but recoverable.
+  Net effect: bad infrastructure (a broken manifest) fails loud; bad payload (a corrupted single
+  cache entry) is silently recovered. §6 Security elaborates with examples.
 - **The deterministic core is sacred.** No changes to `apply-verdicts.mjs` logic,
   `validate-batch.mjs`, `confine-path.mjs`, `validate-output.mjs`, any schema, the Critical-gating
   rule, or the JSON-out report. SP5 v1 wraps each helper with a cache-check seam but does NOT
@@ -75,7 +83,17 @@ node parse-audit-args.mjs --file <input.json> --out <out.json>
 
 **Output** (`--out`): `{ ok, error, scope, sarifPath, concurrency }`.
 
-**Parsing contract:**
+**Tokenization grammar (minimal shell-like — fixes review #3):** the `raw_args` string is
+tokenized BEFORE flag parsing. Whitespace separates tokens; **double quotes group a token** so paths
+containing spaces work via `--sarif "my project/x.sarif"` or `"src api"`. No escapes, no single
+quotes, no backslash handling — minimal grammar, easy to test, easy to document.
+- A token starts at a non-whitespace char (or `"`).
+- If the token starts with `"`, it ends at the matching `"`; the surrounding quotes are stripped.
+  An unterminated quote → **exit 1** (`"unterminated quoted token: <fragment>"`).
+- Otherwise the token ends at the next whitespace.
+- Empty `raw_args` (or whitespace-only) → all defaults (scope=null, sarifPath=null, concurrency=4).
+
+**Parsing contract** (applied to the tokenized list):
 - `--concurrency N` : integer, **strict** (`/^\d+$/`, then `parseInt`, then range check). `1 ≤ N ≤ 16`.
   Default 4. Invalid → exit 1, no fallback.
 - `--sarif <path>` : extracted as-is (path string). NOT confined here — confinement remains
@@ -83,16 +101,21 @@ node parse-audit-args.mjs --file <input.json> --out <out.json>
 - Anything else = `scope` positional. **Multiple positionals → exit 1** (`"too many positional
   arguments"`).
 - `scope` may be absent (= `null` ⇒ project root, today's behavior).
-- Exit `0` ok / `1` invalid args / `2` IO|usage.
+- Exit `0` ok / `1` invalid args (unterminated quote, bad concurrency, multiple positionals,
+  unknown flag) / `2` IO|usage.
 
 **Why a dedicated helper (not extending `confine-path`):** confine-path has a narrow contract (one
 path → one real confined path). Widening it to multi-arg parsing pollutes its role as a
 path-traversal gate, which must stay minimal. New helper, new scope.
 
-**Unit-tested** (≥ 8 cases): default concurrency 4 when omitted; `--concurrency 8` parses ok;
+**Unit-tested** (≥ 12 cases): default concurrency 4 when omitted; `--concurrency 8` parses ok;
 `--concurrency 0` and `--concurrency 17` exit 1; `--concurrency abc` and `--concurrency 4.5` exit 1
 (strict integer); `--sarif x.sarif src/api` parses both; two positionals exit 1; empty input parses
-to all-null/default.
+to all-null/default. **Plus quoting grammar (Fix #3):** `"path with spaces"` parses as a single
+positional; `--sarif "my project/x.sarif"` extracts the quoted path; unterminated `"foo` → exit 1;
+double-quote inside an unquoted token (`fo"o`) treated as part of the token (no special meaning
+mid-token, matches typical shell-like behavior); single quotes (`'foo'`) are NOT special (parsed as
+literal chars of the token).
 
 ### 3.2 New helper: `checkpoint-lifecycle.mjs`
 
@@ -200,9 +223,12 @@ don't carry `file_content_digest` (no files were readable to digest).
 
 ### 3.4 Per-helper checkpoint contract (4 idempotable helpers + agent responses)
 
-**The 4 cached helpers:** `allocate-budget`, `aggregate-findings`, `apply-verdicts`, `render-html`.
+**Cacheable helpers, by CLI shape:**
+- **3 JSON-in/JSON-out helpers** (standard `--file`/`--out` contract): `allocate-budget`,
+  `aggregate-findings`, `apply-verdicts`.
+- **1 multi-input helper** (special contract, §3.4.1): `render-html` (`--md` + `--summary` → `--out`).
 
-**Each gains one new optional flag pair:**
+**Standard contract** — each of the 3 JSON-in/JSON-out helpers gains one new optional flag:
 ```
 node <helper>.mjs --file <in> --out <out> [--checkpoint-dir <abs>]
 ```
@@ -221,23 +247,82 @@ node <helper>.mjs --file <in> --out <out> [--checkpoint-dir <abs>]
 **When `--checkpoint-dir` is absent:** behavior is identical to today (zero-regression for the
 small-repo path).
 
-**Agent response caching (not a helper — orchestrated by the SKILL):** after each successful
-`validate-output analyzer-response <r>` (or `verifier-response`), the SKILL writes the validated
-response to `<checkpoint-dir>/agent-responses/<kind>-<target_id>-<input_digest>.json`. Before
-dispatching the next analyzer/verifier, the SKILL checks if such a cached response exists for the
-target — if yes, skip the dispatch.
+#### 3.4.1 render-html — special caching contract (Fix #2 from review)
 
-**Input digest for agent responses** = sha256 of the canonical form of the **dispatch input** to the
-agent: for analyzer, `{partition_id, files: [...], file_content_digest, references_loaded: [...]}`
-(the partition assignment + the file_content_digest from §3.3 + which reference pages are loaded).
-For verifier, `{batch_id, expected_targets: [...], finding_or_chain_data}`. Crucially the
-`file_content_digest` is in the analyzer input digest, so a file edit between kill and resume
-invalidates every analyzer cache for affected partitions — the staleness fix from review #2.
+render-html's real CLI is `--md <markdown> --summary <summary.json> --out <html>` (two inputs, one
+output). The standard `--file`/`--out` flow doesn't fit. Special contract:
 
-**Why digesting the **agent dispatch input**, not the model output:** the cache exists to skip the
-*dispatch* (the expensive LLM call), so the key is whatever determines what would be re-asked. The
-model output isn't deterministic, so it can't be the key; but if we asked the model the same
-question (same input digest), we accept the cached answer.
+1. `input_digest = sha256(md_content || "\x00" || canonicalize(summary_json))` — concatenate the
+   raw Markdown bytes, a NUL separator, and the canonical JSON-stringified summary. Any change in
+   either invalidates the cache.
+2. `helper_version_digest` and lookup path are the same as standard.
+3. **Cache hit:** write the cached `html_output` bytes to `--out`, log `"render-html: cache hit"`,
+   exit 0.
+4. **Cache miss:** render as normal, then write `{ input_digest, helper_version_digest, html_output:
+   "<the rendered HTML>", generated_at: "<ISO>" }` to the cache path.
+
+The cache wrapper format is the same as the standard helpers; only the payload type differs (HTML
+string vs JSON object) and the input-digest computation is two-stream instead of one.
+
+### 3.5 New helper: `agent-response-cache.mjs`
+
+Why a dedicated helper rather than SKILL prose computing digests: §2 "No LLM in the lifecycle".
+Digest matching is deterministic Node code, not LLM interpretation. The SKILL just calls this helper
+twice per agent dispatch (lookup before, store after).
+
+**Two modes:**
+
+```
+# Before dispatching an analyzer/verifier — check for a cached validated response.
+node agent-response-cache.mjs --lookup --file <input.json> --out <out.json>
+
+# After validate-output successfully validated a fresh response — store it.
+node agent-response-cache.mjs --store --file <input.json>
+```
+
+**Lookup mode — Input:** `{ "checkpoint_dir": "<abs>", "kind": "analyzer-response"|"verifier-response",
+"target_id": "<partition-id-or-batch-id>", "dispatch_input": { ...the canonical dispatch payload... } }`.
+
+For analyzer dispatches, `dispatch_input` MUST include `{partition_id, files: [...sorted],
+file_content_digest, references_loaded: [...sorted]}` — the `file_content_digest` from §3.3 is
+crucial here: a file edit between kill and resume invalidates every affected analyzer cache (the
+staleness fix from review #2 propagated to the agent cache, not just the helper caches).
+
+For verifier batches, `dispatch_input` MUST include `{batch_id, expected_targets: [...sorted by
+target_type then target_id], finding_or_chain_canonical: {...}}` — the canonical form of every
+finding and chain object the batch operates on. If any finding/chain has been re-aggregated with a
+different shape, the batch cache is invalidated.
+
+**Lookup mode — Output:** `{ ok, hit: bool, cached_response?: {...} }`. On hit, the SKILL uses
+`cached_response` and **skips the dispatch + skips re-validation** (the cached entry was stored
+post-validate-output; double-validating wastes I/O and the cache is in a gitignored owner-only
+short-lived dir, same trust as `.oswe/tmp/`). On miss, the SKILL dispatches the agent as today.
+
+**Store mode — Input:** `{ "checkpoint_dir": "<abs>", "kind": "...", "target_id": "...",
+"dispatch_input": {...}, "validated_response": {...} }`.
+
+Computes `input_digest = sha256(canonical(dispatch_input))`, writes
+`<checkpoint_dir>/agent-responses/<kind>-<target_id>-<input_digest>.json` atomically with
+`{ input_digest, kind, target_id, validated_response, generated_at: "<ISO>" }`.
+
+**Exit codes:** lookup `0` always (hit or miss is in the output, not the exit) / `2` IO|usage; store
+`0` ok / `2` IO|usage. Both are "infrastructure" — they don't fail an audit. (If the cache breaks,
+the SKILL just re-dispatches.)
+
+**Why this contract makes sense:** the SKILL builds `dispatch_input` AS IT WOULD HAVE for the
+actual dispatch, plus calls the cache helper with that payload. So the LLM does the same work either
+way — the only LLM-side change is calling the cache helper twice (lookup, store) per dispatch.
+Digest computation, file I/O, and atomic write are all in Node.
+
+**Unit-tested** (≥ 6 cases): store-then-lookup hits; lookup with no prior store misses;
+lookup with different `dispatch_input` (e.g. flipped one file) misses; lookup with different `kind`
+or `target_id` misses; store is idempotent (rewriting same key with same value is a no-op);
+malformed cache file on disk → treated as miss (recompute), see §6.
+
+**Agent response caching — a dedicated helper, NOT SKILL prose.** Computing a sha256 inside the SKILL
+prose would put digest-matching in the LLM, contradicting §2's "No LLM in the lifecycle." So caching
+agent responses is delegated to a new helper §3.5 below. The SKILL just calls it like any other
+helper (lookup before dispatch; store after validate-output succeeds).
 
 ## 4. SKILL.md integration (5 surgical edits, with the corrected sequence)
 
@@ -275,13 +360,15 @@ it holds NOT-yet-redacted intermediates (including agent responses that may quot
 It is purged at clean exit (§7 Report) and only persists between a kill and the next resume.
 ```
 
-### Edit 3 — §3 Analyze + §6 Verify: configurable concurrency + agent response cache
+### Edit 3 — §3 Analyze + §6 Verify: configurable concurrency + agent response cache (via §3.5 helper)
 - Replace the literal `max 4 concurrent` in §3 with `max <concurrency> concurrent` (where
   `<concurrency>` is the value resolved in §0).
-- Before each analyzer dispatch (§3) and each verifier batch dispatch (§6), check
-  `<checkpoint_dir>/agent-responses/<kind>-<target_id>-<input_digest>.json`. If present, use it and
-  skip the dispatch. After each successful `validate-output` of a freshly-dispatched response, write
-  it to that path (atomic).
+- Before each analyzer dispatch (§3) and each verifier batch dispatch (§6), call
+  `agent-response-cache.mjs --lookup` (§3.5) with the dispatch input. On `hit: true`, USE the
+  `cached_response` and skip the dispatch + skip re-validation. On miss, dispatch as today.
+- After each successful `validate-output` of a freshly-dispatched analyzer-response or
+  verifier-response, call `agent-response-cache.mjs --store` with the same dispatch input and the
+  validated response. This populates the cache for any subsequent resume.
 
 ### Edit 4 — Pass `--checkpoint-dir` to the 4 cacheable helpers
 Wherever the SKILL invokes `allocate-budget`, `aggregate-findings`, `apply-verdicts`, or
@@ -302,18 +389,34 @@ earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on dis
 
 ## 5. Testing strategy
 
-- **`parse-audit-args.mjs`** — 8+ unit tests per §3.1.
+- **`parse-audit-args.mjs`** — 12+ unit tests per §3.1 (including the quoting grammar tests).
 - **`checkpoint-lifecycle.mjs`** — 10+ unit tests per §3.2.
 - **Manifest schema** — covered by validate-output's existing `<kind>` flow + the regenerate-validators
   CI gate (the new schema must regenerate `validators.mjs` in sync).
 - **`surface-scan.mjs` extension** — 4 new tests for `file_content_digest` per §3.3.
-- **4 cached helpers** — for each, 2 new tests: cache miss writes the artifact + cache hit
-  short-circuits with same `--out` content (no recompute). 8 tests total.
-- **E2E replay** — extend the existing `e2e-replay.test.mjs` with **one additional assertion path**:
-  run the full pipeline with `--checkpoint-dir <tmp>`, kill simulated mid-way by invoking only the
-  first 4 helpers, then re-invoke the full pipeline → assert that the 4 cached helpers all log
-  "cache hit" on stderr and the final report matches. (This is what proves the pivot property at
-  the assembly level, not just per-helper.)
+- **3 JSON-in/JSON-out cached helpers** + **render-html special contract** — for each, 2 new tests:
+  cache miss writes the artifact + cache hit short-circuits with same `--out` content (no recompute).
+  8 tests total (2 × 4 helpers).
+- **`agent-response-cache.mjs`** — 6+ unit tests per §3.5 (store-then-lookup hit, lookup with no
+  store misses, different dispatch_input misses, different kind/target_id misses, idempotent store,
+  corrupted cache file → miss).
+- **E2E replay** — extend the existing `e2e-replay.test.mjs` (or a new sibling
+  `e2e-replay-resume.test.mjs`) with a **second-run scenario**. The original test runs the full
+  pipeline once. The new scenario does TWO complete pipeline runs with the SAME `--checkpoint-dir`,
+  **without** calling `checkpoint-lifecycle --finalize` between them (simulates "the first run
+  reached every helper, then was killed before finalize"). Assertions on the second run:
+  - All 4 cached helpers (`allocate-budget`, `aggregate-findings`, `apply-verdicts`, `render-html`)
+    log `"cache hit"` on stderr (or equivalent cache-hit marker).
+  - The final report (MD + HTML) matches the first run's output byte-for-byte.
+  - `agent-response-cache --lookup` returns `hit: true` for the analyzer + verifier dispatch points.
+
+  This is what proves the pivot property at the assembly level. **Earlier draft incorrectly proposed
+  asserting render-html cache-hit after a "first 4 helpers" partial run — but render-html is
+  pipeline step 14, not in the first 4, so the cache wouldn't have been populated. Fix #4 from
+  review.** A real mid-way kill scenario (partial cache population, partial cache hits on resume)
+  is more realistic but more fragile to write; deferred to a v2 hardening pass.
+
+  Cleanup: the test calls `checkpoint-lifecycle --finalize` at the end of the second run.
 - **Zero-regression E2E** — the existing fixtures with NO `--checkpoint-dir` produce byte-identical
   helper outputs (the existing 190 tests still pass unchanged).
 
@@ -322,10 +425,18 @@ earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on dis
 - **Path traversal:** the new helpers receive paths but they're all post-confine (lifecycle takes
   `scope_realpath` already confined; `--checkpoint-dir` is computed by lifecycle from `projectDir`,
   not user input). `parse-audit-args` does not touch the FS.
-- **Cache poisoning:** a tampered cache file (wrong `input_digest` inside) is detected by re-computing
-  the key from the input and comparing — a mismatch is treated as cache miss (recompute) rather than
-  loud failure, to be resilient against partial-write corruption. **BUT** a manifest with the wrong
-  schema (additionalProperties present, missing required field) → validate-output rejects → exit 1.
+- **Cache poisoning — two distinct behaviors by artifact type (consistent with §2 Fix #5):**
+  - *Per-helper cache file* (`.json` under `<helper-name>/`) or *agent response cache file* (under
+    `agent-responses/`) tampered/corrupted: detected by re-computing `input_digest` from the live
+    input and comparing to the cached file's internal `input_digest`, OR by `JSON.parse` failing.
+    Either way → **silent miss + recompute + overwrite**. The audit proceeds; the corrupted file
+    is replaced with a fresh valid one. Resilient against partial-write corruption (atomic
+    `.tmp-<pid>` then rename mitigates this in practice but the silent-miss is the belt + suspenders).
+  - *Manifest* (`<run-id>/manifest.json`) tampered (missing required field, `additionalProperties`,
+    unparseable JSON): **exit 1** via `validate-output`'s `checkpoint-manifest` kind. The manifest
+    is the directory-level structural artifact; if it's broken, the run lifecycle is broken — no
+    silent recovery. The error message includes the cleanup instruction
+    (`rm -rf .oswe/checkpoints/<run-id>/`).
 - **Secret persistence:** explicitly bounded to `kill → resume` window. Workspace must already be
   trusted (existing SKILL doctrine). Gitignored via `.oswe/`. No new posture; just extended duration.
 - **Finalize race:** if `/oswe:audit` is killed *during* `checkpoint-lifecycle --finalize` (after
@@ -358,8 +469,12 @@ earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on dis
    `validators.mjs` in sync.
 3. `surface-scan.mjs` emits `file_content_digest` per vector; existing tests still pass; 4 new tests
    added.
-4. 4 cacheable helpers accept `--checkpoint-dir`, write on miss, short-circuit on hit; agent
-   response caching wired in SKILL §3 and §6.
+4. 3 JSON-in/JSON-out cacheable helpers (`allocate-budget`, `aggregate-findings`, `apply-verdicts`)
+   accept `--checkpoint-dir`, write on miss, short-circuit on hit. `render-html` follows the special
+   §3.4.1 contract (input_digest from `md_content || NUL || canonical(summary)`, cached HTML
+   bytes). `agent-response-cache.mjs` (new helper §3.5) provides `--lookup`/`--store` for
+   analyzer/verifier responses; SKILL §3 + §6 invoke it (lookup before dispatch, store after
+   validate-output).
 5. SKILL.md gains §0 (parse-args), §0.5 (lifecycle resolve), §7.5 (lifecycle finalize); §3 + §6
    plumb concurrency + agent-response cache; the prose is faithful to the helper contracts.
 6. e2e-replay extended: a kill-then-resume scenario asserts cache hits on the 4 helpers and a final
