@@ -335,11 +335,12 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   assert.equal(html.includes(XSS_CANARY), false,
     "XSS canary <img src=x onerror=alert(1)> must NOT appear intact in the HTML — render-html must escape it");
 
-  // === 14. STRUCTURAL INVARIANTS on the Markdown body the test fed in (sanity for what we exercised) ===
-  assert.match(mdBody, /CHAIN-1/);
-  assert.match(mdBody, /OSWE-1/);
-  assert.match(mdBody, /Analyzed/);
-  assert.match(mdBody, /Deprioritized/);
-  assert.match(mdBody, /Unreadable partition/);
-  assert.match(mdBody, /skipped_missing/);
+  // === 14. STRUCTURAL INVARIANTS — the rendered HTML preserved the 3 populated Coverage classes ===
+  // (Earlier draft asserted these on `mdBody` itself, which is a literal defined just above and
+  // therefore tautological. The real signal is whether render-html PRESERVED these terms through
+  // its Markdown→HTML conversion — that's what we check here, on the actual helper output.)
+  assert.match(html, /Analyzed/, "HTML must preserve the 'Analyzed' coverage label");
+  assert.match(html, /Deprioritized/, "HTML must preserve the 'Deprioritized' coverage label");
+  assert.match(html, /Unreadable partition/, "HTML must preserve the 'Unreadable partition' coverage label");
+  assert.match(html, /skipped_missing/, "HTML must preserve the skipped_missing count in the Coverage line");
 });
