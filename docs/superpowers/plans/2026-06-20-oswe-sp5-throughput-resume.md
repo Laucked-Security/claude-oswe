@@ -165,6 +165,24 @@ test("cacheLookup returns hit:false on input_digest mismatch inside the wrapper"
   assert.equal(r.hit, false);
 });
 
+test("cacheLookup with requiredPayloadKey returns hit:false when the wrapper is missing that key (silent miss per §6)", () => {
+  const dir = tmp();
+  const opts = { checkpointDir: dir, helperName: "h", inputDigest: "a".repeat(64), versionDigest: "b".repeat(64) };
+  mkdirSync(join(dir, "h"), { recursive: true });
+  // Plant a wrapper with valid digests but NO `output` field (payload corruption that left
+  // the digest fields intact). Without the payload-key check the caller would crash trying to
+  // writeFileSync(undefined). With requiredPayloadKey: "output" we treat as miss + recompute.
+  writeFileSync(
+    join(dir, "h", `${opts.inputDigest}-${opts.versionDigest}.json`),
+    JSON.stringify({ input_digest: opts.inputDigest, helper_version_digest: opts.versionDigest, generated_at: "x" })
+  );
+  assert.equal(cacheLookup({ ...opts, requiredPayloadKey: "output" }).hit, false);
+  // Same wrapper, different required key: also miss.
+  assert.equal(cacheLookup({ ...opts, requiredPayloadKey: "html_output" }).hit, false);
+  // Without requiredPayloadKey the wrapper passes digest checks and reports hit (back-compat).
+  assert.equal(cacheLookup(opts).hit, true);
+});
+
 test("cacheStore is atomic (writes via .tmp-<pid> then rename — no partial file after error path)", () => {
   // We can't easily induce a write error in a portable unit test, but we can confirm the visible
   // final file is the wrapper (not a .tmp-<pid> stub) and no .tmp file lingers in steady state.
@@ -223,17 +241,25 @@ export function cachePath(checkpointDir, helperName, inputDigest, versionDigest)
   return join(checkpointDir, helperName, `${inputDigest}-${versionDigest}.json`);
 }
 
-// Returns { hit: bool, wrapper?: parsed JSON }. Silent miss on:
+// Returns { hit: bool, wrapper?: parsed JSON }. Silent miss on ANY of:
 //   - file does not exist
 //   - JSON.parse fails (corruption)
-//   - the wrapper's internal input_digest doesn't equal the supplied one (tampering / partial write)
+//   - wrapper's internal input_digest != supplied (tampering / partial write)
+//   - wrapper's internal helper_version_digest != supplied (helper code changed)
+//   - `requiredPayloadKey` was passed AND the wrapper does not own that key (payload corruption
+//     that happened to keep the digest fields intact — without this check the caller would
+//     pass `undefined` to writeFileSync and crash exit 2 instead of silently recomputing,
+//     contradicting spec §6's "cache-payload corruption is recoverable, never fail-loud").
 // Per §6 of the spec: cache-payload corruption is recoverable, never fail-loud.
-export function cacheLookup({ checkpointDir, helperName, inputDigest, versionDigest }) {
+export function cacheLookup({ checkpointDir, helperName, inputDigest, versionDigest, requiredPayloadKey }) {
   const p = cachePath(checkpointDir, helperName, inputDigest, versionDigest);
   if (!existsSync(p)) return { hit: false };
   let wrapper;
   try { wrapper = JSON.parse(readFileSync(p, "utf8")); } catch { return { hit: false }; }
   if (wrapper.input_digest !== inputDigest || wrapper.helper_version_digest !== versionDigest) {
+    return { hit: false };
+  }
+  if (requiredPayloadKey && !Object.prototype.hasOwnProperty.call(wrapper, requiredPayloadKey)) {
     return { hit: false };
   }
   return { hit: true, wrapper };
@@ -261,7 +287,7 @@ export function cacheStore({ checkpointDir, helperName, inputDigest, versionDige
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/cache-wrap.test.mjs )`
-Expected: PASS — 10 tests, 0 failures.
+Expected: PASS — 11 tests, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -1657,7 +1683,7 @@ git commit -m "feat(sp5): agent-response-cache.mjs — schema-gated lookup/store
 
 Spec §3.4 standard contract. When `--checkpoint-dir` is omitted, behavior unchanged (zero-regression).
 
-- [ ] **Step 1: Add 2 failing tests**
+- [ ] **Step 1: Add 5 failing tests**
 
 Append to `skills/audit/scripts/test/allocate-budget.test.mjs`:
 
@@ -1707,12 +1733,55 @@ test("--checkpoint-dir hit on second call: cache file present, stderr logs 'cach
   assert.match(second.stderr, /cache hit/i);
   assert.deepEqual(second.out, first.out);
 });
+
+test("--checkpoint-dir without a value (end of args) -> exit 2 with usage (fail-loud, never silently disable cache)", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-cd-")));
+  const inP = join(dir, "in.json");
+  writeFileSync(inP, JSON.stringify({ budget: 12, vectors: [] }));
+  const r = spawnSync(process.execPath,
+    [CLI_ALLOC, "--file", inP, "--out", join(dir, "out.json"), "--checkpoint-dir"],
+    { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /checkpoint-dir requires a path argument/i);
+});
+
+test("--checkpoint-dir followed by another flag -> exit 2 (never silently treat the flag name as a directory)", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-cd-")));
+  const inP = join(dir, "in.json");
+  writeFileSync(inP, JSON.stringify({ budget: 12, vectors: [] }));
+  const r = spawnSync(process.execPath,
+    [CLI_ALLOC, "--checkpoint-dir", "--file", inP, "--out", join(dir, "out.json")],
+    { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /checkpoint-dir requires a path argument.*--file/i);
+});
+
+test("cache wrapper with valid digests but missing 'output' field -> miss + recompute (no exit 2 crash)", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-poison-")));
+  const input = { budget: 12, vectors: [{ partition_id: "x", scannable: true, sources: 1, sinks: 1, content_key: "x", source_and_auth_files: 0, sink_hits: 1 }] };
+  // Populate the cache normally.
+  const first = runAllocate(input, ckpt);
+  assert.equal(first.code, 0);
+  // Find the cache file and STRIP the `output` field while keeping the digests valid.
+  const cacheDir = join(ckpt, "allocate-budget");
+  const files = readdirSync(cacheDir);
+  const p = join(cacheDir, files[0]);
+  const wrapper = JSON.parse(readFileSync(p, "utf8"));
+  delete wrapper.output;
+  writeFileSync(p, JSON.stringify(wrapper));
+  // Second call must NOT trust the corrupted wrapper. It re-computes silently and produces
+  // the same output as the first run (proving recovery, not crash).
+  const second = runAllocate(input, ckpt);
+  assert.equal(second.code, 0, `expected silent recompute, got exit ${second.code} with stderr: ${second.stderr}`);
+  assert.doesNotMatch(second.stderr, /cache hit/i);
+  assert.deepEqual(second.out, first.out);
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `( cd skills/audit/scripts && node --test test/allocate-budget.test.mjs )`
-Expected: the 2 new tests fail (no `--checkpoint-dir` handling yet, no cache dir created). All other allocate-budget tests still pass.
+Expected: the 5 new tests fail. The first two (cache miss/hit) fail because `--checkpoint-dir` is not yet parsed. The two bad-`--checkpoint-dir` tests fail because today the helper silently swallows the malformed flag (no fail-loud yet). The missing-`output`-field test fails because today's `cacheLookup` returns hit:true on any digest match (the corrupted wrapper then crashes the helper with a TypeError from `JSON.stringify(undefined)` instead of recomputing). All pre-existing allocate-budget tests still pass.
 
 - [ ] **Step 3: Wire --checkpoint-dir into allocate-budget.mjs**
 
@@ -1748,6 +1817,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const fi = args.indexOf("--file"), oi = args.indexOf("--out");
   const ci = args.indexOf("--checkpoint-dir");
+  if (ci !== -1 && (!args[ci + 1] || args[ci + 1].startsWith("--"))) {
+    process.stderr.write("usage: allocate-budget.mjs ... --checkpoint-dir <abs>   (--checkpoint-dir requires a path argument, got: " + (args[ci + 1] ?? "<end of args>") + ")\n");
+    process.exit(2);
+  }
   const checkpointDir = ci !== -1 ? args[ci + 1] : null;
   if (fi === -1 || !args[fi + 1] || oi === -1 || !args[oi + 1]) {
     process.stderr.write("usage: allocate-budget.mjs --file <input.json> --out <allocation.json> [--checkpoint-dir <abs>]\n"); process.exit(2);
@@ -1759,7 +1832,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (checkpointDir) {
     const inputDigest = sha256Hex(canonicalize(input));
     const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
-    const lookup = cacheLookup({ checkpointDir, helperName: "allocate-budget", inputDigest, versionDigest });
+    const lookup = cacheLookup({ checkpointDir, helperName: "allocate-budget", inputDigest, versionDigest, requiredPayloadKey: "output" });
     if (lookup.hit) {
       try { writeFileSync(args[oi + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
       catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
@@ -1786,7 +1859,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/allocate-budget.test.mjs )`
-Expected: PASS — every prior test still passes; the 2 new tests pass.
+Expected: PASS — every prior test still passes; the 5 new tests pass.
 
 - [ ] **Step 5: Commit**
 
@@ -1877,6 +1950,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const fi = args.indexOf("--file"), oi = args.indexOf("--out");
   const ci = args.indexOf("--checkpoint-dir");
+  if (ci !== -1 && (!args[ci + 1] || args[ci + 1].startsWith("--"))) {
+    process.stderr.write("usage: aggregate-findings.mjs ... --checkpoint-dir <abs>   (--checkpoint-dir requires a path argument, got: " + (args[ci + 1] ?? "<end of args>") + ")\n");
+    process.exit(2);
+  }
   const checkpointDir = ci !== -1 ? args[ci + 1] : null;
   if (fi === -1 || oi === -1) {
     process.stderr.write("usage: aggregate-findings.mjs --file <in.json> --out <out.json> [--checkpoint-dir <abs>]\n"); process.exit(2);
@@ -1888,7 +1965,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (checkpointDir) {
     const inputDigest = sha256Hex(canonicalize(input));
     const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
-    const lookup = cacheLookup({ checkpointDir, helperName: "aggregate-findings", inputDigest, versionDigest });
+    const lookup = cacheLookup({ checkpointDir, helperName: "aggregate-findings", inputDigest, versionDigest, requiredPayloadKey: "output" });
     if (lookup.hit) {
       try { writeFileSync(args[oi + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
       catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
@@ -2007,6 +2084,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const fileIdx = args.indexOf("--file");
   const outIdx = args.indexOf("--out");
   const ci = args.indexOf("--checkpoint-dir");
+  if (ci !== -1 && (!args[ci + 1] || args[ci + 1].startsWith("--"))) {
+    process.stderr.write("usage: apply-verdicts.mjs ... --checkpoint-dir <abs>   (--checkpoint-dir requires a path argument, got: " + (args[ci + 1] ?? "<end of args>") + ")\n");
+    process.exit(2);
+  }
   const checkpointDir = ci !== -1 ? args[ci + 1] : null;
   if (fileIdx === -1 || outIdx === -1) {
     process.stderr.write("usage: apply-verdicts.mjs --file <input.json> --out <result.json> [--checkpoint-dir <abs>]\n");
@@ -2023,7 +2104,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (checkpointDir) {
     const inputDigest = sha256Hex(canonicalize(input));
     const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
-    const lookup = cacheLookup({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest });
+    const lookup = cacheLookup({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest, requiredPayloadKey: "output" });
     if (lookup.hit) {
       try { writeFileSync(args[outIdx + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
       catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
@@ -2168,8 +2249,15 @@ if (isMain()) {
   const args = process.argv.slice(2);
   const flag = (name) => { const i = args.indexOf(name); return i !== -1 ? args[i + 1] : undefined; };
   const mdPath = flag("--md"), sumPath = flag("--summary"), outPath = flag("--out");
-  const checkpointDir = flag("--checkpoint-dir") || null;
+  const ckptRaw = flag("--checkpoint-dir");
   const fail2 = (msg) => { process.stderr.write("render-html: " + msg + "\n"); process.exit(2); };
+  // --checkpoint-dir is OPTIONAL, but if present its value must exist and not be another flag.
+  // `flag(name)` returns args[i+1] without validation, so we re-check here against the raw args.
+  const ckptIdx = args.indexOf("--checkpoint-dir");
+  if (ckptIdx !== -1 && (!args[ckptIdx + 1] || args[ckptIdx + 1].startsWith("--"))) {
+    fail2("--checkpoint-dir requires a path argument, got: " + (args[ckptIdx + 1] ?? "<end of args>"));
+  }
+  const checkpointDir = ckptRaw || null;
   if (!mdPath || !sumPath || !outPath) {
     fail2("usage: render-html.mjs --md <report.md> --summary <summary.json> --out <report.html> [--checkpoint-dir <abs>]");
   }
@@ -2198,7 +2286,7 @@ if (isMain()) {
       Buffer.from(canonicalize(summary), "utf8")
     ]));
     versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
-    const lookup = cacheLookup({ checkpointDir, helperName: "render-html", inputDigest, versionDigest });
+    const lookup = cacheLookup({ checkpointDir, helperName: "render-html", inputDigest, versionDigest, requiredPayloadKey: "html_output" });
     if (lookup.hit) {
       const tmp = outPath + ".tmp-" + process.pid;
       try {
