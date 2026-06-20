@@ -2075,15 +2075,21 @@ Spec §3.4.1. Different from Tasks 7–9 because render-html takes `--md` + `--s
 
 - [ ] **Step 1: Extend the existing top-of-file imports**
 
-The existing `skills/audit/scripts/test/render-html.test.mjs` only imports `test, assert, escapeHtml, mdToHtml`. Every binding the new tests use is new. ADD these import lines at the top of the file (after the existing `import { escapeHtml, mdToHtml } ...` line):
+The existing `skills/audit/scripts/test/render-html.test.mjs` has imports SCATTERED across the file (lines 1–3, 43, 76–81 in the current file). It already imports `mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, tmpdir, join, dirname, fileURLToPath, execFileSync` — re-importing any of these will produce a `Identifier ... has already been declared` ESM parse error. Only **two new identifiers** are needed by the appended tests: `spawnSync` and `realpathSync`. Edit two existing import lines in place:
+
+(a) The existing line 76, `import { execFileSync } from "node:child_process";`, becomes:
 
 ```javascript
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { execFileSync, spawnSync } from "node:child_process";
 ```
+
+(b) The existing line 77, `import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";`, becomes:
+
+```javascript
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, realpathSync } from "node:fs";
+```
+
+Do NOT add a separate `import` block — every other binding the appended tests use (`tmpdir`, `join`, `fileURLToPath`) is already imported elsewhere in the file.
 
 - [ ] **Step 2: Append 2 new tests + helpers to the end of the same file**
 
@@ -2395,19 +2401,27 @@ git commit -m "feat(sp5): SKILL.md — §0 bootstrap+parse, §0.5 lifecycle, §3
 **Files:**
 - Create: `skills/audit/scripts/test/e2e-replay-resume.test.mjs`
 
-Spec §5 E2E replay. The pivot property: **TWO complete cacheable-pipeline runs with the SAME `--checkpoint-dir` and NO `--finalize` between them**. The second run must produce byte-identical outputs (incl. final MD + HTML) on every cacheable helper AND on both agent-response-cache lookups (analyzer + verifier). This is the assembly-level proof that the SP5 contract holds end-to-end at the SKILL/helper seam.
+Spec §5 E2E replay. The pivot property at the cacheable-helper seam: **TWO complete cacheable-helper passes with the SAME `--checkpoint-dir` and NO `--finalize` between them**. On the second pass: every cacheable helper logs `cache hit`, both agent-response-cache lookups (analyzer + verifier) return `hit:true`, and every output (JSON for the three standard helpers, HTML bytes for render-html) is byte-identical to the first pass.
+
+**Scope honesty:** this test does NOT exercise the live SKILL prose or the LLM. The Markdown report body is LLM-generated in production and therefore not byte-deterministic across kill-resume — the test pins a synthetic MD so it can isolate render-html's cache contract (the only deterministic step the test can verify here). The full pipeline including LLM is covered by the existing `e2e-replay.test.mjs` (which doesn't use `--checkpoint-dir`).
 
 - [ ] **Step 1: Write the resume test**
 
 Create `skills/audit/scripts/test/e2e-replay-resume.test.mjs`:
 
 ```javascript
-// SP5 v1 assembly-level proof (spec §5). TWO complete pipeline runs with the SAME
-// --checkpoint-dir and no --finalize between them. Second pass: every cacheable helper
-// (allocate-budget, aggregate-findings, apply-verdicts, render-html) hits its cache and
-// produces byte-identical output, AND agent-response-cache --lookup returns hit:true for
-// both analyzer-response and verifier-response. Simulates a kill-then-resume where the
-// first run reached every helper before being killed.
+// SP5 v1 assembly-level proof (spec §5) at the cacheable-helper seam. TWO complete
+// passes through the cacheable helpers with the SAME --checkpoint-dir and no --finalize
+// between them. Second pass: every cacheable helper (allocate-budget, aggregate-findings,
+// apply-verdicts, render-html) hits its cache and produces byte-identical output, AND
+// agent-response-cache --lookup returns hit:true for both analyzer-response and
+// verifier-response. Simulates a kill-then-resume where the first run reached every helper
+// before being killed.
+//
+// SCOPE: this test does NOT exercise the live SKILL or the LLM. The Markdown report body
+// is LLM-generated in production (nondeterministic across runs); this test pins a synthetic
+// MD so it can verify render-html's cache contract in isolation. The full pipeline-with-LLM
+// is covered by e2e-replay.test.mjs (which does not use --checkpoint-dir).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -2559,7 +2573,12 @@ function runOnePass(projectDir, checkpointDir, passLabel, expectAllHits) {
   const avOutput = JSON.parse(readFileSync(avOut, "utf8"));
 
   // --- render-html (cacheable, special two-stream contract) ---
-  // Use stable input files (same path across passes) so render-html's input_digest matches.
+  // Stable input files (same paths across passes) so render-html's two-stream input_digest matches.
+  // NOTE: in the live SKILL pipeline, the Markdown body is LLM-generated per §7's prose and
+  // therefore NOT byte-deterministic across runs. This test pins the Markdown to a hardcoded
+  // synthetic string so we can test render-html's CACHE contract in isolation — which is exactly
+  // what SP5 v1 is about. "Final report byte-identical across kill-resume" in production means:
+  // GIVEN the same MD + summary, render-html's cache returns the same HTML bytes. We prove that.
   const mdPath = join(projectDir, ".oswe", "tmp", "report.md");
   const sumPath = join(projectDir, ".oswe", "tmp", "summary.json");
   if (passLabel === "1") {
@@ -2572,12 +2591,11 @@ function runOnePass(projectDir, checkpointDir, passLabel, expectAllHits) {
   if (expectAllHits) assert.match(rhR.stderr, /cache hit/i, `pass ${passLabel}: render-html should hit`);
   else assert.doesNotMatch(rhR.stderr, /cache hit/i, `pass ${passLabel}: render-html should miss`);
   const html = readFileSync(htmlOut, "utf8");
-  const mdBytes = readFileSync(mdPath, "utf8");
 
   return {
     surfaceVectors: scan.vectors,
     allocOutput, aggOutput, avOutput,
-    html, mdBytes,
+    html,
     arcAnalyzerLookup, arcVerifierLookup
   };
 }
@@ -2596,7 +2614,7 @@ test("SP5 lifecycle resume: same invocation -> mode:'resume' with same run_id", 
   t.after(() => { try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* */ } });
 });
 
-test("SP5 e2e replay-resume: two complete pipeline runs, second pass hits everywhere + byte-identical report", (t) => {
+test("SP5 e2e replay-resume: two cacheable-helper passes, second pass hits every cache + outputs byte-identical", (t) => {
   const projectDir = setupProject();
   const lc1 = resolveLifecycle(projectDir, "-1");
   assert.equal(lc1.mode, "new");
@@ -2614,11 +2632,14 @@ test("SP5 e2e replay-resume: two complete pipeline runs, second pass hits everyw
   const pass2 = runOnePass(projectDir, lc2.checkpoint_dir, "2", /*expectAllHits=*/true);
 
   // === Byte-identical-output assertions across passes ===
+  // What this proves: every CACHEABLE helper, given identical inputs, returns identical bytes on
+  // a cache hit. It does NOT prove "final MD identical" because in production the MD body is
+  // LLM-generated (nondeterministic). The render-html HTML assertion is the production-relevant
+  // one: given the LLM-produced MD + summary, render-html's cache returns the same HTML bytes.
   assert.deepEqual(pass2.allocOutput, pass1.allocOutput, "allocate-budget output must be byte-identical across passes");
   assert.deepEqual(pass2.aggOutput, pass1.aggOutput, "aggregate-findings output must be byte-identical across passes");
   assert.deepEqual(pass2.avOutput, pass1.avOutput, "apply-verdicts output must be byte-identical across passes");
   assert.equal(pass2.html, pass1.html, "render-html HTML output must be byte-identical across passes");
-  assert.equal(pass2.mdBytes, pass1.mdBytes, "the Markdown report itself must be unchanged across passes");
   assert.deepEqual(pass2.arcAnalyzerLookup.cached_response, validAnalyzerResponse(),
     "analyzer cache must return the stored response unchanged");
   assert.deepEqual(pass2.arcVerifierLookup.cached_response, validVerifierResponse(),
