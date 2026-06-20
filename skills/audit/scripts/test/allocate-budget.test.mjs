@@ -128,3 +128,83 @@ test("invalid budget and non-array vectors are rejected (ok:false)", () => {
   assert.equal(allocate([], 0).ok, false);
   assert.equal(allocate("nope", 12).ok, false);
 });
+
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const CLI_ALLOC = fileURLToPath(new URL("../allocate-budget.mjs", import.meta.url));
+
+function runAllocate(input, checkpointDir) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-cache-")));
+  const inP = join(dir, "in.json");
+  const outP = join(dir, "out.json");
+  writeFileSync(inP, JSON.stringify(input));
+  const args = [CLI_ALLOC, "--file", inP, "--out", outP];
+  if (checkpointDir) args.push("--checkpoint-dir", checkpointDir);
+  const r = spawnSync(process.execPath, args, { encoding: "utf8" });
+  return { code: r.status, stderr: r.stderr, outPath: outP, out: existsSync(outP) ? JSON.parse(readFileSync(outP, "utf8")) : null };
+}
+
+test("--checkpoint-dir miss writes the cache file and the --out artifact", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-ckpt-")));
+  const input = { budget: 12, vectors: [{ partition_id: "x", scannable: true, sources: 1, sinks: 1, content_key: "x", source_and_auth_files: 0, sink_hits: 1 }] };
+  const r = runAllocate(input, ckpt);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.ok, true);
+  const cacheDir = join(ckpt, "allocate-budget");
+  const files = readdirSync(cacheDir);
+  assert.equal(files.length, 1);
+  assert.match(files[0], /^[0-9a-f]{64}-[0-9a-f]{64}\.json$/);
+});
+
+test("--checkpoint-dir hit on second call: cache file present, stderr logs 'cache hit', --out matches first run", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-ckpt-")));
+  const input = { budget: 12, vectors: [{ partition_id: "x", scannable: true, sources: 1, sinks: 1, content_key: "x", source_and_auth_files: 0, sink_hits: 1 }] };
+  const first = runAllocate(input, ckpt);
+  const second = runAllocate(input, ckpt);
+  assert.equal(second.code, 0);
+  assert.match(second.stderr, /cache hit/i);
+  assert.deepEqual(second.out, first.out);
+});
+
+test("--checkpoint-dir without a value (end of args) -> exit 2 with usage (fail-loud, never silently disable cache)", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-cd-")));
+  const inP = join(dir, "in.json");
+  writeFileSync(inP, JSON.stringify({ budget: 12, vectors: [] }));
+  const r = spawnSync(process.execPath,
+    [CLI_ALLOC, "--file", inP, "--out", join(dir, "out.json"), "--checkpoint-dir"],
+    { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /checkpoint-dir requires a path argument/i);
+});
+
+test("--checkpoint-dir followed by another flag -> exit 2 (never silently treat the flag name as a directory)", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-cd-")));
+  const inP = join(dir, "in.json");
+  writeFileSync(inP, JSON.stringify({ budget: 12, vectors: [] }));
+  const r = spawnSync(process.execPath,
+    [CLI_ALLOC, "--checkpoint-dir", "--file", inP, "--out", join(dir, "out.json")],
+    { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /checkpoint-dir requires a path argument.*--file/i);
+});
+
+test("cache wrapper with valid digests but missing 'output' field -> miss + recompute (no exit 2 crash)", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-alloc-poison-")));
+  const input = { budget: 12, vectors: [{ partition_id: "x", scannable: true, sources: 1, sinks: 1, content_key: "x", source_and_auth_files: 0, sink_hits: 1 }] };
+  const first = runAllocate(input, ckpt);
+  assert.equal(first.code, 0);
+  const cacheDir = join(ckpt, "allocate-budget");
+  const files = readdirSync(cacheDir);
+  const p = join(cacheDir, files[0]);
+  const wrapper = JSON.parse(readFileSync(p, "utf8"));
+  delete wrapper.output;
+  writeFileSync(p, JSON.stringify(wrapper));
+  const second = runAllocate(input, ckpt);
+  assert.equal(second.code, 0, `expected silent recompute, got exit ${second.code} with stderr: ${second.stderr}`);
+  assert.doesNotMatch(second.stderr, /cache hit/i);
+  assert.deepEqual(second.out, first.out);
+});

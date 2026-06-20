@@ -5,6 +5,7 @@
 //   exit 0 ok / 1 invalid input / 2 IO|usage.
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
+import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";
 
 // Documented weights (§4). Tests assert the INDUCED ORDERING, not these magnitudes — they are tunable.
 const W_SOURCE = 1, W_SINK = 2, W_COPRESENT = 3, W_UNAUTH = 4, W_DENSITY = 1, W_LEAD = 2;
@@ -89,14 +90,41 @@ export function allocate(vectors, budget, sarifLeadsByPartition = {}) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const fi = args.indexOf("--file"), oi = args.indexOf("--out");
+  const ci = args.indexOf("--checkpoint-dir");
+  if (ci !== -1 && (!args[ci + 1] || args[ci + 1].startsWith("--"))) {
+    process.stderr.write("usage: allocate-budget.mjs ... --checkpoint-dir <abs>   (--checkpoint-dir requires a path argument, got: " + (args[ci + 1] ?? "<end of args>") + ")\n");
+    process.exit(2);
+  }
+  const checkpointDir = ci !== -1 ? args[ci + 1] : null;
   if (fi === -1 || !args[fi + 1] || oi === -1 || !args[oi + 1]) {
-    process.stderr.write("usage: allocate-budget.mjs --file <input.json> --out <allocation.json>\n"); process.exit(2);
+    process.stderr.write("usage: allocate-budget.mjs --file <input.json> --out <allocation.json> [--checkpoint-dir <abs>]\n"); process.exit(2);
   }
   let input;
   try { input = JSON.parse(readFileSync(args[fi + 1], "utf8")); }
   catch (e) { process.stderr.write("cannot read --file: " + e.message + "\n"); process.exit(2); }
+
+  if (checkpointDir) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    const lookup = cacheLookup({ checkpointDir, helperName: "allocate-budget", inputDigest, versionDigest, requiredPayloadKey: "output" });
+    if (lookup.hit) {
+      try { writeFileSync(args[oi + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
+      catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+      process.stderr.write("allocate-budget: cache hit\n");
+      process.exit(0);
+    }
+  }
+
   const r = allocate(input.vectors, input.budget, input.sarifLeadsByPartition || {});
   try { writeFileSync(args[oi + 1], JSON.stringify(r, null, 2)); }
   catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+
+  if (checkpointDir && r.ok) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    try { cacheStore({ checkpointDir, helperName: "allocate-budget", inputDigest, versionDigest, payload: { output: r } }); }
+    catch (e) { process.stderr.write("allocate-budget: cache store failed (non-fatal): " + e.message + "\n"); }
+  }
+
   process.exit(r.ok ? 0 : 1);
 }
