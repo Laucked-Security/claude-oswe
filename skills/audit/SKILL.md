@@ -43,8 +43,23 @@ never outlive the audit. Rules:
 
 ## Pipeline (strict order)
 
+### 0. Bootstrap & parse invocation args (deterministic)
+First, purge and re-create the temp dir (this used to be the first action of §1; it moved up so
+the §0 helper can use it):
+`rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp" && mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"`.
+
+Then normalize `$ARGUMENTS` into a structured form via the tested helper. Do NOT parse arg
+strings by hand. Write `{"raw_args": "${ARGUMENTS}"}` to a literal temp file with the file tool,
+then run inside a `trap` that removes both temp files on exit:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/parse-args-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/parse-args-out-<token>.json"' EXIT;
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/parse-audit-args.mjs"
+    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/parse-args-<token>.json"
+    --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/parse-args-out-<token>.json" )`.
+On exit 0, read `{scope, sarifPath, concurrency}` from the out file. On exit 1, abort the audit
+with the printed message (invalid args, e.g. concurrency out of range). On any abort here or
+later, `.oswe/tmp/` is purged as today.
+
 ### 1. Entry & recon
-- **First, purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp" && mkdir -p "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (see Temp-file hygiene).
 - Normalize `$ARGUMENTS` with the **tested confinement helper** (do not hand-roll the comparison, and
   do not put the path on the shell command line). Write `{ "projectDir": "<CLAUDE_PROJECT_DIR>",
   "arg": "<the raw argument or null>" }` to a literal temp file with the file tool, then run it inside
@@ -61,6 +76,24 @@ never outlive the audit. Rules:
   Exit 1 = malformed SARIF → note it and proceed with **no leads** (the audit still runs LLM-only);
   exit 2 = our IO/usage bug → fix the call. On exit 0, read the `leads[]` and `stats` into orchestration
   state. **No `--sarif` → leads = `[]` and the rest of the pipeline is byte-for-byte unchanged.**
+
+### 0.5 Resolve run-id and checkpoint dir (deterministic)
+Now that paths are confined and canonical, resolve the run lifecycle. Write
+`{"projectDir": "${CLAUDE_PROJECT_DIR}", "scope_realpath": "<confined>", "sarif_realpath": "<confined or null>", "concurrency": <N>}`
+to a literal temp file, then run inside a `trap`:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/lifecycle-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/lifecycle-out-<token>.json"' EXIT;
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/checkpoint-lifecycle.mjs"
+    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/lifecycle-in-<token>.json"
+    --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/lifecycle-out-<token>.json" )`.
+On exit 0, read `{run_id, mode, checkpoint_dir}` into orchestration state. On exit 1 (ambiguous
+resume), abort the audit with the printed cleanup instruction (it tells the user to
+`rm -rf .oswe/checkpoints/`). **If `mode: "resume"`, note this fact in the final report** so the
+reader knows the audit picked up from a prior interrupted run.
+
+**SECURITY NOTE**: `.oswe/checkpoints/<run-id>/` mirrors `.oswe/tmp/`'s trust model — it holds
+NOT-yet-redacted intermediates (including agent responses that may quote secrets verbatim). It is
+purged at clean exit (§7.5 Finalize) and only persists between a kill and the next resume.
+
 - Detect **all stacks present** (a repo may be polyglot) via manifests (`composer.json`, `package.json`, `pyproject.toml`/
   `requirements.txt`, `pom.xml`/`build.gradle`, `*.csproj`) and file extensions; detect **framework**
   via dependencies/structure.
@@ -95,7 +128,7 @@ the rest become ranked, justified gaps (never an opaque wall).
 - Then allocate. Write `{ "budget": 12, "vectors": [...from surface-scan...], "sarifLeadsByPartition":
   { "<pid>": { "count": <n> } } }` (the `sarifLeadsByPartition` map only when SARIF leads were ingested
   — §1; omit otherwise so the SARIF term is zero) to a temp file and run
-  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/allocate-budget.mjs" --file <in> --out <alloc>` →
+  `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/allocate-budget.mjs" --file <in> --out <alloc> --checkpoint-dir "${checkpoint_dir}"` →
   `{ analyze: [ { partition_id, score } ], gaps: [ { partition_id, gap_class, ... } ] }`.
 - §3 dispatches `oswe-analyzer` subagents **only for the partitions in `analyze[]`**, still **max 4
   concurrent** (the budget is the *coverage* limit; max-4 is the orthogonal *throughput* limit — both
@@ -106,11 +139,34 @@ the rest become ranked, justified gaps (never an opaque wall).
   them and the run is behaviorally identical to today (empty `deprioritized` list).
 
 ### 3. Analyze
+**Cache lookup before each analyzer dispatch (SP5 v1).** Before each analyzer call, write
+`{"checkpoint_dir": "<run checkpoint_dir>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "analyzer-response", "target_id": "<partition_id>", "dispatch_input": {<canonical dispatch payload — see below>}}`
+to a literal temp file, then run inside a `trap`:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/arc-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/arc-out-<token>.json"' EXIT;
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/agent-response-cache.mjs"
+    --lookup --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/arc-in-<token>.json"
+    --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/arc-out-<token>.json" )`.
+On `hit: true`, USE the `cached_response` directly and SKIP the analyzer dispatch (re-validation
+was already done inside the helper against the analyzer-response schema). On `hit: false`,
+dispatch the analyzer as today.
+
+The `dispatch_input` for an analyzer call MUST be:
+`{ "partition_id": "<id>", "files": [<sorted file paths>], "file_content_digest": "<from surface-scan vector>", "references_loaded": [<sorted stack names>], "agent_contract_files": [<sorted abs paths>] }`
+where `agent_contract_files` includes:
+- `${CLAUDE_PLUGIN_ROOT}/agents/oswe-analyzer.md`
+- Each `${CLAUDE_PLUGIN_ROOT}/skills/audit/references/<lang>.md` actually loaded for the partition
+- `${CLAUDE_PLUGIN_ROOT}/skills/audit/SKILL.md`
+
+**Cache store after each successful analyzer dispatch.** AFTER `validate-output analyzer-response`
+succeeds on a freshly-dispatched response, write
+`{"checkpoint_dir": "<...>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "analyzer-response", "target_id": "<partition_id>", "dispatch_input": {<same as lookup>}, "validated_response": {<the validated response>}}`
+to a temp file and run `agent-response-cache.mjs --store --file <...>` inside a `trap`.
+
 - **Small repo (≤ 2 partitions):** analyze inline yourself (no analyzer *subagents*) — but you MUST
   still produce **one `analyzer-response` object per partition** and **run it through the same
   validator** (kind `analyzer-response`) before aggregating. The inline path uses the identical
   contract; it does not skip validation. (Small fixtures take this path, so it must be airtight.)
-- **Otherwise:** dispatch `oswe-analyzer` subagents in parallel, **max 4 concurrent**, **budget 12
+- **Otherwise:** dispatch `oswe-analyzer` subagents in parallel, **max <concurrency> concurrent (the value resolved in §0)**, **budget 12
   partitions** total; anything beyond the budget → recorded as "not analyzed" in Coverage.
 - Every `analyzer-response` (inline or subagent) is **validated** (see Validation below) before aggregating.
 - **Bind each response to its assigned partition** (the schema cannot — it doesn't know what you
@@ -149,7 +205,7 @@ the rest become ranked, justified gaps (never an opaque wall).
 ### 4. Aggregate & dedupe (deterministic — via the tested helper)
 **Do not aggregate by hand.** Collect every aggregated analyzer finding into
 `{ "findings": [ …rawFindings ] }`, write it to a literal temp file, and run the tested helper:
-`node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/aggregate-findings.mjs" --file <in> --out <out>`
+`node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/aggregate-findings.mjs" --file <in> --out <out> --checkpoint-dir "${checkpoint_dir}"`
 (same `--file`/`--out` + temp-file + `trap` discipline as §6b). It returns `{ ok, error, findings }`.
 A **duplicate source `finding_id`** (e.g. two distinct findings both `auth-F001`) → `ok:false` (an
 analyzer/orchestrator bug — fix it, since `source_finding_ids` would be ambiguous). On `ok`, the
@@ -198,6 +254,17 @@ findings. **Validate each built chain** against `chain.schema.json`.
   keeping `batch_id` + `expected_targets`; never delete the wrapper, or its `expected_targets` — and
   thus the coverage gap — vanish). When you do re-dispatch, add the `batch_id` to the set first.
 
+**Cache lookup before each verifier batch dispatch (SP5 v1).** Before each verifier batch, write
+`{"checkpoint_dir": "<...>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "verifier-response", "target_id": "<batch_id>", "dispatch_input": {"batch_id": "<id>", "expected_targets": [<sorted>], "finding_or_chain_canonical": {<...>}, "agent_contract_files": [<sorted abs paths>]}}`
+and call `agent-response-cache.mjs --lookup`. The `agent_contract_files` for a verifier call MUST
+include:
+- `${CLAUDE_PLUGIN_ROOT}/agents/oswe-verifier.md`
+- `${CLAUDE_PLUGIN_ROOT}/skills/audit/SKILL.md`
+
+On `hit: true`, USE the `cached_response` and SKIP the verifier dispatch. On miss, dispatch.
+AFTER `validate-output verifier-response` succeeds, call `agent-response-cache.mjs --store` with
+the same dispatch_input and the validated response.
+
 - **Step A — per-batch check (local).** For each bound wrapper, after the `verifier-response` schema
   check, write `{ "findings": [ …full finding objects ], "chains": [ …full chain objects ],
   "batch": <wrapper> }` to a temp file and run
@@ -241,7 +308,8 @@ temp path and run the tested CLI (a process, not an importable tool):
 ( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"' EXIT
   node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/apply-verdicts.mjs" \
     --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" \
-    --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"
+    --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json" \
+    --checkpoint-dir "${checkpoint_dir}"
   rc=$?                                                           # capture BEFORE cat
   cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"      # <-- THIS stdout is the result you keep
   exit "$rc" )                                                    # preserve the CLI's exit code
@@ -289,11 +357,18 @@ to `provisional_severity` only for `not-requested` items). See Report format bel
 `summary` object** (see "HTML export" below) from the final findings/chains/`gaps` plus the
 orchestrator's aggregated analyzer-coverage state, write it to a literal `.oswe/tmp/` path (file tool,
 no shell interpolation), and run the tested helper under the usual `trap`:
-`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/render-html.mjs" --md "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md" --summary "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.html" )`.
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/render-html.mjs" --md "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md" --summary "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.html" --checkpoint-dir "${checkpoint_dir}" )`.
 **The HTML can never fail the audit.** On a non-zero exit (1 = summary the orchestrator built wrong;
 2 = IO), note `HTML export failed: <reason>; Markdown report at <path>` in the chat summary and
 continue — the `.md` is the guaranteed artifact. The atomic write means a failure never leaves a
 partial `.html`.
+
+### 7.5 Finalize the run checkpoint
+After the report (`.md` + `.html`) is written successfully, finalize the checkpoint:
+`node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/checkpoint-lifecycle.mjs" --finalize --run-id "${run_id}" --project-dir "${CLAUDE_PROJECT_DIR}"`.
+This flips the manifest to `completed: true` and removes the run's checkpoint dir. **On any abort
+earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on disk for the next
+`/oswe:audit` invocation to discover and resume from.
 
 **Then purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (the report is `[REDACTED]`-safe; the
 raw intermediate files are not — see Temp-file hygiene). This runs on the success path; on any abort
