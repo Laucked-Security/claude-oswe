@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSurfaceBlock, loadSurfaceBlock, scanPartition, contentKey } from "../surface-scan.mjs";
@@ -160,4 +160,53 @@ test("loadSurfaceBlock rejects a traversal-attempt stack name (path-traversal gu
   assert.equal(loadSurfaceBlock(".", "/anywhere"), null);
   assert.equal(loadSurfaceBlock("", "/anywhere"), null);
   assert.equal(loadSurfaceBlock(null, "/anywhere"), null);
+});
+
+test("scannable vector carries file_content_digest", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-scan-fcd-")));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.py"), "request.args.get('x')\n");
+  writeFileSync(join(dir, "src", "b.py"), "import os; os.system(x)\n");
+  const r = scanPartition(
+    { partition_id: "py:1", stack: "python", files: ["src/a.py", "src/b.py"] },
+    { sources: ["request.args.get"], sinks: ["os.system"], sanitizers: [], auth_markers: [] },
+    dir
+  );
+  assert.equal(r.scannable, true);
+  assert.match(r.file_content_digest, /^[0-9a-f]{64}$/);
+});
+
+test("same files + same content -> same file_content_digest (twice)", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-scan-fcd-")));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.py"), "x\n");
+  const part = { partition_id: "p", stack: "python", files: ["src/a.py"] };
+  const block = { sources: [], sinks: [], sanitizers: [], auth_markers: [] };
+  const r1 = scanPartition(part, block, dir);
+  const r2 = scanPartition(part, block, dir);
+  assert.equal(r1.file_content_digest, r2.file_content_digest);
+});
+
+test("changing one byte in one file flips file_content_digest", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-scan-fcd-")));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.py"), "x\n");
+  const part = { partition_id: "p", stack: "python", files: ["src/a.py"] };
+  const block = { sources: [], sinks: [], sanitizers: [], auth_markers: [] };
+  const before = scanPartition(part, block, dir).file_content_digest;
+  writeFileSync(join(dir, "src", "a.py"), "y\n");
+  const after = scanPartition(part, block, dir).file_content_digest;
+  assert.notEqual(before, after);
+});
+
+test("scannable:false (all files unreadable) has no file_content_digest", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-scan-fcd-")));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  const r = scanPartition(
+    { partition_id: "p", stack: "python", files: ["src/missing.py"] },
+    { sources: [], sinks: [], sanitizers: [], auth_markers: [] },
+    dir
+  );
+  assert.equal(r.scannable, false);
+  assert.equal(r.file_content_digest, undefined);
 });
