@@ -39,6 +39,23 @@ export function contentKey(files) {
   return createHash("sha256").update([...files].sort().join("\n")).digest("hex");
 }
 
+// File-content digest for a scannable partition (spec §3.3). Reads each file in content_key
+// (sorted-paths) order and concatenates sha256(file_i) || NUL into a single sha256. A byte change
+// in any file flips the digest; ordering inside the partition is irrelevant (sorted internally).
+// Unreadable files are skipped from the digest input (their absence shifts the digest, which is
+// the right invalidation signal: a file that disappeared changes the analyzer's input set).
+function fileContentDigest(sortedRelPaths, projectDir) {
+  const h = createHash("sha256");
+  for (const rel of sortedRelPaths) {
+    let bytes;
+    try { bytes = readFileSync(confinePath(projectDir, rel)); }
+    catch { continue; }
+    h.update(createHash("sha256").update(bytes).digest());
+    h.update(Buffer.from([0]));  // NUL separator
+  }
+  return h.digest("hex");
+}
+
 // loose substring (sources/sinks/sanitizers): over-match only over-ranks -> safe.
 const hasSub = (text, token) => Boolean(token) && text.includes(token);
 const countSub = (text, token) => {
@@ -115,12 +132,14 @@ export function scanPartition(partition, block, projectDir) {
       reason: "all files unreadable (missing/escape) — surface not assessed"
     };
   }
+  const sortedPaths = [...partition.files].sort();
   return {
     partition_id: partition.partition_id, stack: partition.stack, scannable: true,
     files: partition.files.length, sources, sinks, sanitizers, auth_markers,
     source_and_auth_files, source_hits, sink_hits, auth_hits,
     skipped_missing, skipped_out_of_scope,
-    content_key: contentKey(partition.files)
+    content_key: contentKey(partition.files),
+    file_content_digest: fileContentDigest(sortedPaths, projectDir)
   };
 }
 

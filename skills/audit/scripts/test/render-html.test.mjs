@@ -73,8 +73,8 @@ test("coverage and status bars reflect counts, no NaN on empty", () => {
   assert.equal(/NaN/.test(coverageBar({ analyzed: 0, skipped: 0 })), false);
 });
 
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -201,4 +201,50 @@ test("CLI: unwritable --out (parent dir missing) -> exit 2, no tmp leftover", ()
   // the .tmp-<pid> sibling lives in the (missing) dir, so nothing can leak into d
   assert.equal(readdirSync(d).some((f) => f.includes(".tmp-")), false);
   rmSync(d, { recursive: true, force: true });
+});
+
+const CLI_RH = fileURLToPath(new URL("../render-html.mjs", import.meta.url));
+
+function runRender(md, summary, checkpointDir) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-rh-cache-")));
+  const mdP = join(dir, "r.md");
+  const sumP = join(dir, "s.json");
+  const outP = join(dir, "r.html");
+  writeFileSync(mdP, md);
+  writeFileSync(sumP, JSON.stringify(summary));
+  const args = [CLI_RH, "--md", mdP, "--summary", sumP, "--out", outP];
+  if (checkpointDir) args.push("--checkpoint-dir", checkpointDir);
+  const r = spawnSync(process.execPath, args, { encoding: "utf8" });
+  return { code: r.status, stderr: r.stderr, html: existsSync(outP) ? readFileSync(outP, "utf8") : null };
+}
+
+function minimalSummary() {
+  return {
+    meta: { target: "test-project", stack: "python", date: "2026-06-20", verdict: "no-critique", proof_level: null },
+    severity_counts: { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 },
+    finding_status_counts: { accepted: 0, downgraded: 0, rejected: 0, "not-requested": 0 },
+    coverage: { analyzed: 0, skipped: 0 },
+    chains: []
+  };
+}
+
+test("render-html --checkpoint-dir miss writes the cache file (html_output payload)", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-rh-ckpt-")));
+  const r = runRender("# Report\n", minimalSummary(), ckpt);
+  assert.equal(r.code, 0);
+  const cacheDir = join(ckpt, "render-html");
+  const files = readdirSync(cacheDir);
+  assert.equal(files.length, 1);
+  const wrapper = JSON.parse(readFileSync(join(cacheDir, files[0]), "utf8"));
+  assert.equal(typeof wrapper.html_output, "string");
+  assert.ok(wrapper.html_output.startsWith("<!"));
+});
+
+test("render-html --checkpoint-dir hit on second call: stderr 'cache hit', html byte-identical", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-rh-ckpt-")));
+  const first = runRender("# Report\n", minimalSummary(), ckpt);
+  const second = runRender("# Report\n", minimalSummary(), ckpt);
+  assert.equal(second.code, 0);
+  assert.match(second.stderr, /cache hit/i);
+  assert.equal(second.html, first.html);
 });

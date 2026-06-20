@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -558,4 +558,38 @@ test("validate-batch.mjs CLI exits 0/1/2 (spawnSync)", () => {
   assert.match(dup.stdout, /duplicate canonical finding_id/);
 
   assert.equal(spawnSync(process.execPath, [VB]).status, 2); // missing --file
+});
+
+const CLI_AV = fileURLToPath(new URL("../apply-verdicts.mjs", import.meta.url));
+
+function runAV(input, checkpointDir) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-av-cache-")));
+  const inP = join(dir, "in.json");
+  const outP = join(dir, "out.json");
+  writeFileSync(inP, JSON.stringify(input));
+  const args = [CLI_AV, "--file", inP, "--out", outP];
+  if (checkpointDir) args.push("--checkpoint-dir", checkpointDir);
+  const r = spawnSync(process.execPath, args, { encoding: "utf8" });
+  return { code: r.status, stderr: r.stderr, out: existsSync(outP) ? JSON.parse(readFileSync(outP, "utf8")) : null };
+}
+
+// apply-verdicts CLI input per apply-verdicts.mjs:348: { findings: [...], chains: [...], batches: [...] }
+function minimalAVInput() {
+  return { findings: [], chains: [], batches: [] };
+}
+
+test("apply-verdicts --checkpoint-dir miss writes cache file", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-av-ckpt-")));
+  const r = runAV(minimalAVInput(), ckpt);
+  assert.equal(r.code, 0);
+  const files = readdirSync(join(ckpt, "apply-verdicts"));
+  assert.equal(files.length, 1);
+});
+
+test("apply-verdicts --checkpoint-dir hit on second call short-circuits with same output", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-av-ckpt-")));
+  const first = runAV(minimalAVInput(), ckpt);
+  const second = runAV(minimalAVInput(), ckpt);
+  assert.match(second.stderr, /cache hit/i);
+  assert.deepEqual(second.out, first.out);
 });

@@ -23,6 +23,7 @@
 // gaps: [{ target_type, target_id, reason }] for expected-but-unverified targets.
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
+import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";
 
 // Deterministic ordering so a "downgrade" can never RAISE severity or confidence.
 const SEV_INDEX = { Info: 0, Low: 1, Medium: 2, High: 3, Critical: 4 };
@@ -344,15 +345,21 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
   return { ok: true, error: null, error_kind: null, error_batch_id: null, findings: outFindings, chains: outChains, gaps, decisions };
 }
 
-// CLI: node apply-verdicts.mjs --file <input.json> --out <result.json>
+// CLI: node apply-verdicts.mjs --file <input.json> --out <result.json> [--checkpoint-dir <abs>]
 //   input.json: { "findings": [...], "chains": [...], "batches": [...] }
 //   exit 0 when result.ok, 1 when !ok (see error_kind/error_batch_id), 2 on usage/IO error.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const fileIdx = args.indexOf("--file");
   const outIdx = args.indexOf("--out");
+  const ci = args.indexOf("--checkpoint-dir");
+  if (ci !== -1 && (!args[ci + 1] || args[ci + 1].startsWith("--"))) {
+    process.stderr.write("usage: apply-verdicts.mjs ... --checkpoint-dir <abs>   (--checkpoint-dir requires a path argument, got: " + (args[ci + 1] ?? "<end of args>") + ")\n");
+    process.exit(2);
+  }
+  const checkpointDir = ci !== -1 ? args[ci + 1] : null;
   if (fileIdx === -1 || outIdx === -1) {
-    process.stderr.write("usage: apply-verdicts.mjs --file <input.json> --out <result.json>\n");
+    process.stderr.write("usage: apply-verdicts.mjs --file <input.json> --out <result.json> [--checkpoint-dir <abs>]\n");
     process.exit(2);
   }
   let input;
@@ -362,6 +369,19 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.stderr.write("cannot read --file: " + e.message + "\n");
     process.exit(2);
   }
+
+  if (checkpointDir) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    const lookup = cacheLookup({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest, requiredPayloadKey: "output" });
+    if (lookup.hit) {
+      try { writeFileSync(args[outIdx + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
+      catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+      process.stderr.write("apply-verdicts: cache hit\n");
+      process.exit(0);
+    }
+  }
+
   const result = applyVerdicts(input);
   try {
     writeFileSync(args[outIdx + 1], JSON.stringify(result, null, 2));
@@ -369,5 +389,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.stderr.write("cannot write --out: " + e.message + "\n");
     process.exit(2);
   }
+
+  if (checkpointDir && result.ok) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    try { cacheStore({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest, payload: { output: result } }); }
+    catch (e) { process.stderr.write("apply-verdicts: cache store failed (non-fatal): " + e.message + "\n"); }
+  }
+
   process.exit(result.ok ? 0 : 1);
 }

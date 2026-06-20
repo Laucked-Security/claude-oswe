@@ -4,6 +4,7 @@
 //   Source finding_ids must be globally UNIQUE (a duplicate is an analyzer/orchestrator bug).
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
+import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";
 
 const SEV = ["Info", "Low", "Medium", "High"];                 // analyzer never emits Critical
 const CONF = ["to verify", "likely", "strong static proof"];
@@ -85,17 +86,44 @@ export function aggregateFindings(rawFindings) {
   return { ok: true, error: null, findings: merged };
 }
 
-// CLI: node aggregate-findings.mjs --file <in.json> --out <out.json>
-//   in.json: { "findings": [ ...rawFindings ] }   exit 0 ok / 1 !ok / 2 usage|IO
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const fi = args.indexOf("--file"), oi = args.indexOf("--out");
-  if (fi === -1 || oi === -1) { process.stderr.write("usage: aggregate-findings.mjs --file <in.json> --out <out.json>\n"); process.exit(2); }
+  const ci = args.indexOf("--checkpoint-dir");
+  if (ci !== -1 && (!args[ci + 1] || args[ci + 1].startsWith("--"))) {
+    process.stderr.write("usage: aggregate-findings.mjs ... --checkpoint-dir <abs>   (--checkpoint-dir requires a path argument, got: " + (args[ci + 1] ?? "<end of args>") + ")\n");
+    process.exit(2);
+  }
+  const checkpointDir = ci !== -1 ? args[ci + 1] : null;
+  if (fi === -1 || oi === -1) {
+    process.stderr.write("usage: aggregate-findings.mjs --file <in.json> --out <out.json> [--checkpoint-dir <abs>]\n"); process.exit(2);
+  }
   let input;
   try { input = JSON.parse(readFileSync(args[fi + 1], "utf8")); }
   catch (e) { process.stderr.write("cannot read --file: " + e.message + "\n"); process.exit(2); }
+
+  if (checkpointDir) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    const lookup = cacheLookup({ checkpointDir, helperName: "aggregate-findings", inputDigest, versionDigest, requiredPayloadKey: "output" });
+    if (lookup.hit) {
+      try { writeFileSync(args[oi + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
+      catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+      process.stderr.write("aggregate-findings: cache hit\n");
+      process.exit(0);
+    }
+  }
+
   const result = aggregateFindings(input.findings || []);
   try { writeFileSync(args[oi + 1], JSON.stringify(result, null, 2)); }
   catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+
+  if (checkpointDir && result.ok) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    try { cacheStore({ checkpointDir, helperName: "aggregate-findings", inputDigest, versionDigest, payload: { output: result } }); }
+    catch (e) { process.stderr.write("aggregate-findings: cache store failed (non-fatal): " + e.message + "\n"); }
+  }
+
   process.exit(result.ok ? 0 : 1);
 }

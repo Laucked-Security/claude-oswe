@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,4 +118,38 @@ test("absent origin defaults to llm-discovered, and source_lead_ids is OMITTED w
   const r = aggregateFindings([raw("auth-F001", "auth")]);
   assert.equal(r.findings[0].origin, "llm-discovered");
   assert.equal(r.findings[0].source_lead_ids, undefined);   // omitted, not [] (spec §3.5)
+});
+
+const CLI_AGG = fileURLToPath(new URL("../aggregate-findings.mjs", import.meta.url));
+
+function runAgg(input, checkpointDir) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-agg-cache-")));
+  const inP = join(dir, "in.json");
+  const outP = join(dir, "out.json");
+  writeFileSync(inP, JSON.stringify(input));
+  const args = [CLI_AGG, "--file", inP, "--out", outP];
+  if (checkpointDir) args.push("--checkpoint-dir", checkpointDir);
+  const r = spawnSync(process.execPath, args, { encoding: "utf8" });
+  return { code: r.status, stderr: r.stderr, out: existsSync(outP) ? JSON.parse(readFileSync(outP, "utf8")) : null };
+}
+
+// aggregate-findings CLI input: { findings: [...rawFindings] } (per aggregate-findings.mjs:89).
+function minimalAggInput() {
+  return { findings: [] };
+}
+
+test("aggregate-findings --checkpoint-dir miss writes cache file", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-agg-ckpt-")));
+  const r = runAgg(minimalAggInput(), ckpt);
+  assert.equal(r.code, 0);
+  const files = readdirSync(join(ckpt, "aggregate-findings"));
+  assert.equal(files.length, 1);
+});
+
+test("aggregate-findings --checkpoint-dir hit on second call short-circuits with same output", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-agg-ckpt-")));
+  const first = runAgg(minimalAggInput(), ckpt);
+  const second = runAgg(minimalAggInput(), ckpt);
+  assert.match(second.stderr, /cache hit/i);
+  assert.deepEqual(second.out, first.out);
 });
