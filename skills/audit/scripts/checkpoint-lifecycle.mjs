@@ -88,7 +88,16 @@ export function resolveRun({ projectDir, scope_realpath, sarif_realpath, concurr
   return { ok: true, error: null, run_id, mode: "new", checkpoint_dir };
 }
 
+const RUN_ID_PATTERN = /^[0-9a-f]{16}$/;
+
 export function finalizeRun({ projectDir, runId }) {
+  // Reject any runId that doesn't match the run-id grammar (sha256-slice hex) BEFORE any FS access.
+  // The helper is normally called with a run_id resolveRun() emitted (always valid), but the public
+  // CLI is callable with arbitrary input — refuse `--run-id ..` or `--run-id /etc` outright so
+  // rmSync can never target a path-traversal-crafted directory.
+  if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) {
+    return { ok: false, warning: `finalize: invalid run-id ${JSON.stringify(runId)} (must match ^[0-9a-f]{16}$); no FS access performed` };
+  }
   const dir = join(projectDir, ".oswe", "checkpoints", runId);
   const mp = join(dir, "manifest.json");
   if (!existsSync(mp)) return { ok: true, warning: null };  // idempotent: nothing to do
@@ -122,7 +131,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     }
     const r = finalizeRun({ projectDir: args[pi + 1], runId: args[ri + 1] });
     if (r.warning) process.stderr.write(r.warning + "\n");
-    process.exit(0);
+    // r.ok===false means we refused the call (bad runId shape); exit 2 = usage.
+    // r.ok===true (with or without warning) = infrastructure path completed; exit 0.
+    process.exit(r.ok ? 0 : 2);
   }
 
   // resolve mode

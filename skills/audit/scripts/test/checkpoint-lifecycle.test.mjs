@@ -179,3 +179,20 @@ test("a manifest with unparseable JSON -> exit 1 with cleanup instruction", () =
   assert.equal(r.code, 1);
   assert.match(r.stderr, /malformed/i);
 });
+
+test("finalize rejects a runId that doesn't match ^[0-9a-f]{16}$ BEFORE any FS access (exit 2)", () => {
+  const p = setupProject();
+  // Craft a sibling dir we'd be horrified to see deleted. The validation must refuse before
+  // rmSync gets a chance to traverse into it.
+  const sibling = join(p, ".oswe", "checkpoints", "victim");
+  mkdirSync(sibling, { recursive: true });
+  writeFileSync(join(sibling, "marker.txt"), "must survive");
+  // Try a path-traversal-ish runId and a wrong-shape runId.
+  for (const badRunId of ["..", "../victim", "XYZ", "0123456789ABCDEF", "0123456789abcdef0"]) {
+    const f = finalize(p, badRunId);
+    assert.equal(f.code, 2, `expected exit 2 for runId ${JSON.stringify(badRunId)}, got ${f.code}`);
+    assert.match(f.stderr, /invalid run-id/i);
+  }
+  // The victim dir is untouched.
+  assert.equal(existsSync(join(sibling, "marker.txt")), true, "sibling dir must not have been touched");
+});

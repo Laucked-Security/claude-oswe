@@ -60,22 +60,28 @@ with the printed message (invalid args, e.g. concurrency out of range). On any a
 later, `.oswe/tmp/` is purged as today.
 
 ### 1. Entry & recon
-- Normalize `$ARGUMENTS` with the **tested confinement helper** (do not hand-roll the comparison, and
-  do not put the path on the shell command line). Write `{ "projectDir": "<CLAUDE_PROJECT_DIR>",
-  "arg": "<the raw argument or null>" }` to a literal temp file with the file tool, then run it inside
+- Confine `scope` (the value resolved by §0 — **never** `$ARGUMENTS` directly, which still carries
+  `--concurrency`/`--sarif` flags). Write `{ "projectDir": "<CLAUDE_PROJECT_DIR>",
+  "arg": "<scope from §0, or null>" }` to a literal temp file with the file tool, then run inside
   a `trap` that removes that file on exit:
   `( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/confine-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/confine-path.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/confine-<token>.json" )`
   It prints the confined real path (exit 0), or exits non-zero on a nonexistent path or one that
   escapes `${CLAUDE_PROJECT_DIR}` (`../`, symlink/junction, sibling-prefix like `project-old`). On a
-  non-zero exit, **purge `.oswe/tmp/` and abort the audit** with the printed message. `arg: null` → scope = project root.
-- **Optional `--sarif <path>` (additive to the scope arg).** If `$ARGUMENTS` contains `--sarif <path>`,
-  confine `<path>` with `confine-path.mjs` (same temp-file + `trap` discipline), then ingest it:
+  non-zero exit, **purge `.oswe/tmp/` and abort the audit** with the printed message. `scope: null`
+  (no positional arg) → scope = project root.
+- **Optional `--sarif` (driven by `sarifPath` from §0, not by re-parsing `$ARGUMENTS`).** If §0's
+  output set `sarifPath` (i.e. the user passed `--sarif <path>`), confine that value with
+  `confine-path.mjs` (same temp-file + `trap` discipline), then ingest it:
   write `{ "projectDir": "<CLAUDE_PROJECT_DIR>", "sarifPath": "<confined path>" }` to a literal temp
   file and run
   `( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/sarif-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/leads-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/ingest-sarif.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/sarif-in-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/leads-<token>.json" )`.
   Exit 1 = malformed SARIF → note it and proceed with **no leads** (the audit still runs LLM-only);
   exit 2 = our IO/usage bug → fix the call. On exit 0, read the `leads[]` and `stats` into orchestration
-  state. **No `--sarif` → leads = `[]` and the rest of the pipeline is byte-for-byte unchanged.**
+  state. **`sarifPath: null` → leads = `[]` and the rest of the pipeline is byte-for-byte unchanged.**
+- **Never re-parse `$ARGUMENTS` yourself** in §1 or any later phase: §0 has already done it with
+  `parse-audit-args.mjs`. The only consumers of §0's output are: `scope` here in §1 (for confine),
+  `sarifPath` here in §1 (for confine + ingest), and `concurrency` in §3 (for the analyzer dispatch
+  cap). Treat `$ARGUMENTS` as opaque after §0.
 
 ### 0.5 Resolve run-id and checkpoint dir (deterministic)
 Now that paths are confined and canonical, resolve the run lifecycle. Write
@@ -130,9 +136,10 @@ the rest become ranked, justified gaps (never an opaque wall).
   — §1; omit otherwise so the SARIF term is zero) to a temp file and run
   `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/allocate-budget.mjs" --file <in> --out <alloc> --checkpoint-dir "${checkpoint_dir}"` →
   `{ analyze: [ { partition_id, score } ], gaps: [ { partition_id, gap_class, ... } ] }`.
-- §3 dispatches `oswe-analyzer` subagents **only for the partitions in `analyze[]`**, still **max 4
-  concurrent** (the budget is the *coverage* limit; max-4 is the orthogonal *throughput* limit — both
-  apply). Everything in `gaps[]` is recorded for Coverage (§7) — never analyzed, never silently dropped.
+- §3 dispatches `oswe-analyzer` subagents **only for the partitions in `analyze[]`**, with
+  `max <concurrency> concurrent` (the value resolved in §0; default 4). The budget is the *coverage*
+  limit; `<concurrency>` is the orthogonal *throughput* limit — both apply. Everything in `gaps[]`
+  is recorded for Coverage (§7) — never analyzed, never silently dropped.
 - **Leads on a deprioritized partition** (hybrid mode) are reported as `lead not analyzed
   (deprioritized)` — the precision ledger still accounts for every lead.
 - **Zero-regression:** when the number of supported partitions ≤ budget, `analyze[]` contains all of
@@ -369,11 +376,21 @@ continue — the `.md` is the guaranteed artifact. The atomic write means a fail
 partial `.html`.
 
 ### 7.5 Finalize the run checkpoint
-After the report (`.md` + `.html`) is written successfully, finalize the checkpoint:
+After the **Markdown report is written successfully** AND the HTML attempt has finished (success
+OR the documented non-fatal failure above), finalize the checkpoint:
 `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/checkpoint-lifecycle.mjs" --finalize --run-id "${run_id}" --project-dir "${CLAUDE_PROJECT_DIR}"`.
-This flips the manifest to `completed: true` and removes the run's checkpoint dir. **On any abort
-earlier in the pipeline, DO NOT finalize** — the checkpoint must remain on disk for the next
-`/oswe:audit` invocation to discover and resume from.
+This flips the manifest to `completed: true` and removes the run's checkpoint dir.
+
+**Finalize-trigger contract.** Tying §7.5 to "MD written + HTML attempted" rather than "both
+written successfully" is deliberate: per §7 "the HTML can never fail the audit", so an HTML failure
+is **not** an abort — the audit is clean and the checkpoint (which holds NOT-yet-redacted
+intermediates) MUST be purged. Otherwise a recurring HTML failure (e.g. a broken summary the user
+can't fix) would leave secrets on disk indefinitely.
+
+**On any REAL abort** earlier in the pipeline (Node missing, confine-path escape, ambiguous resume,
+analyzer/verifier retry budget exhausted, orchestrator-input bug at §6/§6b, etc.), **DO NOT
+finalize** — the checkpoint must remain on disk for the next `/oswe:audit` invocation to discover
+and resume from. (`.md` not written = real abort; HTML-only failure = clean exit.)
 
 **Then purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (the report is `[REDACTED]`-safe; the
 raw intermediate files are not — see Temp-file hygiene). This runs on the success path; on any abort
