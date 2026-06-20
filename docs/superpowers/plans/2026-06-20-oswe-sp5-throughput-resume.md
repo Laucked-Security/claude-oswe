@@ -648,11 +648,10 @@ If `npm run build` is missing or fails because `node_modules` is absent locally,
 
 - [ ] **Step 5: Add a smoke test to validate-output**
 
-Append to `skills/audit/scripts/test/validate-output.test.mjs`:
+Append these tests to the end of `skills/audit/scripts/test/validate-output.test.mjs` (the file already imports `test, assert, validate` at the top — reuse them directly, no new imports):
 
 ```javascript
-test("validate-output accepts a well-formed checkpoint-manifest", async () => {
-  const { validate } = await import("../validate-output.mjs");
+test("validate-output accepts a well-formed checkpoint-manifest", () => {
   const ok = validate("checkpoint-manifest", {
     schema_version: 1,
     run_id: "0123456789abcdef",
@@ -666,8 +665,7 @@ test("validate-output accepts a well-formed checkpoint-manifest", async () => {
   assert.equal(ok.valid, true);
 });
 
-test("validate-output rejects a checkpoint-manifest with additionalProperties", async () => {
-  const { validate } = await import("../validate-output.mjs");
+test("validate-output rejects a checkpoint-manifest with additionalProperties", () => {
   const bad = validate("checkpoint-manifest", {
     schema_version: 1,
     run_id: "0123456789abcdef",
@@ -682,8 +680,7 @@ test("validate-output rejects a checkpoint-manifest with additionalProperties", 
   assert.equal(bad.valid, false);
 });
 
-test("validate-output rejects a checkpoint-manifest with bad concurrency range", async () => {
-  const { validate } = await import("../validate-output.mjs");
+test("validate-output rejects a checkpoint-manifest with bad concurrency range", () => {
   const bad = validate("checkpoint-manifest", {
     schema_version: 1,
     run_id: "0123456789abcdef",
@@ -1097,9 +1094,19 @@ git commit -m "feat(sp5): checkpoint-lifecycle.mjs — resolve + finalize, fail-
 
 Per spec §3.3. Compute `file_content_digest = sha256(byte-concat of (sha256(file_i) || NUL), in content_key sorted order)`. Scannable vectors gain the field; unscannable vectors do not (no files were readable).
 
-- [ ] **Step 1: Add 4 failing tests**
+- [ ] **Step 1: Extend the existing top-of-file imports**
 
-Append to `skills/audit/scripts/test/surface-scan.test.mjs`:
+The existing `skills/audit/scripts/test/surface-scan.test.mjs` already imports `test, assert, mkdtempSync, mkdirSync, writeFileSync, tmpdir, join, scanPartition`. Add `realpathSync` to the existing `from "node:fs"` import line so it reads:
+
+```javascript
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
+```
+
+Do NOT add any other imports — every other identifier the new tests use is already in scope.
+
+- [ ] **Step 2: Append 4 new tests to the end of the same file**
+
+Append these four `test(...)` blocks AFTER the last existing test in `surface-scan.test.mjs`. No new top-level imports.
 
 ```javascript
 test("scannable vector carries file_content_digest", () => {
@@ -1153,14 +1160,12 @@ test("scannable:false (all files unreadable) has no file_content_digest", () => 
 });
 ```
 
-These reference `scanPartition`, `mkdtempSync`, etc. — confirm the file's existing top-of-file imports cover them; if not, extend the import list to include `mkdtempSync, mkdirSync, writeFileSync, realpathSync` from `node:fs`, `tmpdir` from `node:os`, `join` from `node:path`. The existing surface-scan.test.mjs already imports `scanPartition` from `../surface-scan.mjs`.
-
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run tests to verify they fail**
 
 Run: `( cd skills/audit/scripts && node --test test/surface-scan.test.mjs )`
 Expected: the 4 new tests fail (file_content_digest is undefined). Existing tests still pass.
 
-- [ ] **Step 3: Extend surface-scan.mjs scanPartition + add helper**
+- [ ] **Step 4: Extend surface-scan.mjs scanPartition + add helper**
 
 In `skills/audit/scripts/surface-scan.mjs`, add the digest helper near the top (after the existing `import` block, before `confinePath` is used), and call it from `scanPartition`.
 
@@ -1217,12 +1222,12 @@ With:
   };
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/surface-scan.test.mjs )`
 Expected: every existing test still passes; the 4 new tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add skills/audit/scripts/surface-scan.mjs skills/audit/scripts/test/surface-scan.test.mjs
@@ -1247,7 +1252,7 @@ Create `skills/audit/scripts/test/agent-response-cache.test.mjs`:
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1403,10 +1408,9 @@ test("malformed cache file on disk -> lookup returns miss (silent recompute per 
     checkpoint_dir: ckpt, plugin_root: pluginRoot, kind: "analyzer-response", target_id: "py:web",
     dispatch_input: di, validated_response: validAnalyzerResponse()
   });
-  // Find the cache file and corrupt it
+  // Find the cache file and corrupt it (readdirSync, writeFileSync are imported at top).
   const arcDir = join(ckpt, "agent-responses");
-  const fs = require("node:fs");  // dynamic so we can readdir
-  const files = fs.readdirSync(arcDir);
+  const files = readdirSync(arcDir);
   assert.ok(files.length > 0, "store should have created a cache file");
   writeFileSync(join(arcDir, files[0]), "{not json");
   const r = call("--lookup", {
@@ -1424,15 +1428,14 @@ test("right input_digest, invalid cached_response shape -> miss (Fix #1 round 3)
     checkpoint_dir: ckpt, plugin_root: pluginRoot, kind: "analyzer-response", target_id: "py:web",
     dispatch_input: di, validated_response: validAnalyzerResponse()
   });
-  const fs = require("node:fs");
   const arcDir = join(ckpt, "agent-responses");
-  const files = fs.readdirSync(arcDir);
+  const files = readdirSync(arcDir);
   const p = join(arcDir, files[0]);
-  const wrapper = JSON.parse(fs.readFileSync(p, "utf8"));
+  const wrapper = JSON.parse(readFileSync(p, "utf8"));
   // Tamper validated_response into a shape that violates analyzer-response.schema.json (drop a
   // required field — analyzer-response requires `partition_id`).
   wrapper.validated_response = { not_partition_id: true };
-  fs.writeFileSync(p, JSON.stringify(wrapper));
+  writeFileSync(p, JSON.stringify(wrapper));
   const r = call("--lookup", {
     checkpoint_dir: ckpt, plugin_root: pluginRoot, kind: "analyzer-response", target_id: "py:web",
     dispatch_input: di
@@ -1800,24 +1803,23 @@ git commit -m "feat(sp5): allocate-budget gains optional --checkpoint-dir (cache
 - Modify: `skills/audit/scripts/aggregate-findings.mjs` (CLI block)
 - Modify: `skills/audit/scripts/test/aggregate-findings.test.mjs` (+2 tests)
 
-Same pattern as Task 7.
+The cache wiring follows the same shape as Task 7's, with the complete replacement code spelled out below (don't extrapolate from Task 7).
 
-- [ ] **Step 1: Inspect aggregate-findings CLI to confirm the shape**
+- [ ] **Step 1: Extend the existing top-of-file imports**
 
-Run: `head -40 skills/audit/scripts/aggregate-findings.mjs && tail -25 skills/audit/scripts/aggregate-findings.mjs`
-Confirm it accepts `--file <input>` and `--out <output>` (it does, mirroring allocate-budget).
-
-- [ ] **Step 2: Add 2 failing tests**
-
-Append to `skills/audit/scripts/test/aggregate-findings.test.mjs`:
+The existing `skills/audit/scripts/test/aggregate-findings.test.mjs` already imports `test, assert, spawnSync, mkdtempSync, writeFileSync, readFileSync, tmpdir, join, fileURLToPath`. Three new identifiers are needed: `readdirSync, existsSync, realpathSync`. Edit the existing `from "node:fs"` line so it reads:
 
 ```javascript
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+```
 
+Do NOT add any other top-level `import` lines — every other binding the new tests use is already in scope.
+
+- [ ] **Step 2: Append 2 new tests + helpers to the end of the same file**
+
+Append these helpers and tests AFTER the last existing test. No new top-level imports.
+
+```javascript
 const CLI_AGG = fileURLToPath(new URL("../aggregate-findings.mjs", import.meta.url));
 
 function runAgg(input, checkpointDir) {
@@ -1832,7 +1834,6 @@ function runAgg(input, checkpointDir) {
 }
 
 // aggregate-findings CLI input: { findings: [...rawFindings] } (per aggregate-findings.mjs:89).
-// Empty findings is a legitimate input (aggregateFindings([]) returns { ok:true, findings:[] }).
 function minimalAggInput() {
   return { findings: [] };
 }
@@ -1854,8 +1855,6 @@ test("aggregate-findings --checkpoint-dir hit on second call short-circuits with
 });
 ```
 
-`minimalAggInput()` matches the CLI contract documented at `aggregate-findings.mjs:89`. No adjustment needed.
-
 - [ ] **Step 3: Run tests to verify they fail**
 
 Run: `( cd skills/audit/scripts && node --test test/aggregate-findings.test.mjs )`
@@ -1863,33 +1862,60 @@ Expected: the 2 new tests fail (no cache dir, no `cache hit` stderr).
 
 - [ ] **Step 4: Wire --checkpoint-dir into aggregate-findings.mjs**
 
-Apply the same edit pattern as Task 7 Step 3 to `skills/audit/scripts/aggregate-findings.mjs`. The exact code differs only in three substitutions: the `helperName` is `"aggregate-findings"`, the success-result variable comes from the existing helper's main-function call, and the stderr "cache hit" message uses the helper name.
+In `skills/audit/scripts/aggregate-findings.mjs`:
 
-Specifically:
-1. Add to the file's import block: `import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";` and ensure `fileURLToPath` from `node:url` is imported (it already is in the existing file).
-2. In the CLI block, parse `--checkpoint-dir`: `const ci = args.indexOf("--checkpoint-dir"); const checkpointDir = ci !== -1 ? args[ci + 1] : null;`. Add it to the usage error message.
-3. After reading and parsing `input`, before calling the helper's main function, insert the cache-lookup block exactly as in Task 7 (substituting `"allocate-budget"` → `"aggregate-findings"`).
-4. After the helper writes `--out` and confirms success, insert the cache-store block (same substitution).
-
-Concretely, the existing tail of `aggregate-findings.mjs` (lines 90–100) reads:
+(a) Add this import alongside the existing imports near the top of the file (the existing file already imports `readFileSync, writeFileSync` from `node:fs` and `fileURLToPath` from `node:url`):
 
 ```javascript
+import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";
+```
+
+(b) Replace the entire existing CLI block at the bottom of the file (the `if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) { ... }` block) with this complete replacement:
+
+```javascript
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const args = process.argv.slice(2);
+  const fi = args.indexOf("--file"), oi = args.indexOf("--out");
+  const ci = args.indexOf("--checkpoint-dir");
+  const checkpointDir = ci !== -1 ? args[ci + 1] : null;
+  if (fi === -1 || oi === -1) {
+    process.stderr.write("usage: aggregate-findings.mjs --file <in.json> --out <out.json> [--checkpoint-dir <abs>]\n"); process.exit(2);
+  }
+  let input;
+  try { input = JSON.parse(readFileSync(args[fi + 1], "utf8")); }
+  catch (e) { process.stderr.write("cannot read --file: " + e.message + "\n"); process.exit(2); }
+
+  if (checkpointDir) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    const lookup = cacheLookup({ checkpointDir, helperName: "aggregate-findings", inputDigest, versionDigest });
+    if (lookup.hit) {
+      try { writeFileSync(args[oi + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
+      catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+      process.stderr.write("aggregate-findings: cache hit\n");
+      process.exit(0);
+    }
+  }
+
   const result = aggregateFindings(input.findings || []);
   try { writeFileSync(args[oi + 1], JSON.stringify(result, null, 2)); }
   catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
-  process.exit(result.ok ? 0 : 1);
-```
 
-Wrap it the same way Task 7 wraps `allocate(...)`:
-- Cache lookup happens AFTER input parsing and BEFORE the `aggregateFindings(...)` call.
-- Cache store happens AFTER `writeFileSync` succeeds, on the `result.ok` path.
-- The `helperName` arg to `cacheLookup`/`cacheStore` is `"aggregate-findings"`.
-- The stderr cache-hit log line is `"aggregate-findings: cache hit\n"`.
+  if (checkpointDir && result.ok) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    try { cacheStore({ checkpointDir, helperName: "aggregate-findings", inputDigest, versionDigest, payload: { output: result } }); }
+    catch (e) { process.stderr.write("aggregate-findings: cache store failed (non-fatal): " + e.message + "\n"); }
+  }
+
+  process.exit(result.ok ? 0 : 1);
+}
+```
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/aggregate-findings.test.mjs )`
-Expected: PASS.
+Expected: PASS — every prior test still passes; the 2 new tests pass.
 
 - [ ] **Step 6: Commit**
 
@@ -1906,19 +1932,21 @@ git commit -m "feat(sp5): aggregate-findings gains optional --checkpoint-dir"
 - Modify: `skills/audit/scripts/apply-verdicts.mjs` (CLI block)
 - Modify: `skills/audit/scripts/test/apply-verdicts.test.mjs` (+2 tests)
 
-Same pattern as Task 7. Be specifically careful here: the spec §2 says **the verdict logic itself is sacred** — only the CLI block is being modified to add the cache seam. No edits to the `applyVerdicts` function or any helpers it calls.
+The cache wiring follows the same shape as Tasks 7–8, with the complete replacement code spelled out below (don't extrapolate). **Important:** spec §2 says the verdict logic is sacred — only the CLI block is modified to add the cache seam. No edits to the `applyVerdicts` function or any helpers it calls.
 
-- [ ] **Step 1: Add 2 failing tests**
+- [ ] **Step 1: Extend the existing top-of-file imports**
 
-Append to `skills/audit/scripts/test/apply-verdicts.test.mjs`:
+The existing `skills/audit/scripts/test/apply-verdicts.test.mjs` already imports `test, assert, spawnSync, mkdtempSync, writeFileSync, readFileSync, tmpdir, join, fileURLToPath`. Three new identifiers are needed: `readdirSync, existsSync, realpathSync`. Edit the existing `from "node:fs"` line so it reads:
 
 ```javascript
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+```
 
+Do NOT add any other top-level imports.
+
+- [ ] **Step 2: Append 2 new tests + helpers to the end of the same file**
+
+```javascript
 const CLI_AV = fileURLToPath(new URL("../apply-verdicts.mjs", import.meta.url));
 
 function runAV(input, checkpointDir) {
@@ -1932,9 +1960,7 @@ function runAV(input, checkpointDir) {
   return { code: r.status, stderr: r.stderr, out: existsSync(outP) ? JSON.parse(readFileSync(outP, "utf8")) : null };
 }
 
-// apply-verdicts CLI input shape per apply-verdicts.mjs:348:
-//   { findings: [...], chains: [...], batches: [...] }
-// All-empty is the trivially valid case: zero findings, zero chains, zero verdict batches.
+// apply-verdicts CLI input per apply-verdicts.mjs:348: { findings: [...], chains: [...], batches: [...] }
 function minimalAVInput() {
   return { findings: [], chains: [], batches: [] };
 }
@@ -1956,31 +1982,81 @@ test("apply-verdicts --checkpoint-dir hit on second call short-circuits with sam
 });
 ```
 
-`minimalAVInput()` matches the CLI contract documented at `apply-verdicts.mjs:348`. No adjustment needed.
-
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run tests to verify they fail**
 
 Run: `( cd skills/audit/scripts && node --test test/apply-verdicts.test.mjs )`
 Expected: the 2 new tests fail.
 
-- [ ] **Step 3: Wire --checkpoint-dir into apply-verdicts.mjs**
-
-Same surgical change as Tasks 7–8:
-1. Add `import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";` to the imports.
-2. In the CLI block, parse `--checkpoint-dir` and add it to the usage message.
-3. After input parsing, before the call to the helper's main function, insert the cache-lookup block (`helperName: "apply-verdicts"`).
-4. After `writeFileSync(--out, ...)` succeeds, insert the cache-store block.
-
-`apply-verdicts.mjs` has the standard `--file`/`--out` CLI shape (confirmed at lines 350–357). The cache lookup goes between input parsing and the `applyVerdicts(input)` call (line 365). The cache store goes after the `writeFileSync` on the `result.ok` path. `helperName: "apply-verdicts"`. The stderr cache-hit log is `"apply-verdicts: cache hit\n"`.
+- [ ] **Step 4: Wire --checkpoint-dir into apply-verdicts.mjs**
 
 **Critical:** do NOT modify the `applyVerdicts` function or anything it calls. The verdict logic and Critical gating are explicitly sacred per spec §2 — only the CLI block changes.
 
-- [ ] **Step 4: Run tests to verify they pass**
+In `skills/audit/scripts/apply-verdicts.mjs`:
+
+(a) Add this import alongside the existing top-of-file imports (the existing file already imports `readFileSync, writeFileSync` from `node:fs` and `fileURLToPath` from `node:url`):
+
+```javascript
+import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";
+```
+
+(b) Replace the existing CLI block at the bottom of the file (lines 350–373, the `if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) { ... }` block) with this complete replacement:
+
+```javascript
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const args = process.argv.slice(2);
+  const fileIdx = args.indexOf("--file");
+  const outIdx = args.indexOf("--out");
+  const ci = args.indexOf("--checkpoint-dir");
+  const checkpointDir = ci !== -1 ? args[ci + 1] : null;
+  if (fileIdx === -1 || outIdx === -1) {
+    process.stderr.write("usage: apply-verdicts.mjs --file <input.json> --out <result.json> [--checkpoint-dir <abs>]\n");
+    process.exit(2);
+  }
+  let input;
+  try {
+    input = JSON.parse(readFileSync(args[fileIdx + 1], "utf8"));
+  } catch (e) {
+    process.stderr.write("cannot read --file: " + e.message + "\n");
+    process.exit(2);
+  }
+
+  if (checkpointDir) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    const lookup = cacheLookup({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest });
+    if (lookup.hit) {
+      try { writeFileSync(args[outIdx + 1], JSON.stringify(lookup.wrapper.output, null, 2)); }
+      catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
+      process.stderr.write("apply-verdicts: cache hit\n");
+      process.exit(0);
+    }
+  }
+
+  const result = applyVerdicts(input);
+  try {
+    writeFileSync(args[outIdx + 1], JSON.stringify(result, null, 2));
+  } catch (e) {
+    process.stderr.write("cannot write --out: " + e.message + "\n");
+    process.exit(2);
+  }
+
+  if (checkpointDir && result.ok) {
+    const inputDigest = sha256Hex(canonicalize(input));
+    const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    try { cacheStore({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest, payload: { output: result } }); }
+    catch (e) { process.stderr.write("apply-verdicts: cache store failed (non-fatal): " + e.message + "\n"); }
+  }
+
+  process.exit(result.ok ? 0 : 1);
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/apply-verdicts.test.mjs )`
 Expected: PASS — every prior test (verdict logic, Critical gating, etc.) still passes; the 2 new tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add skills/audit/scripts/apply-verdicts.mjs skills/audit/scripts/test/apply-verdicts.test.mjs
@@ -1997,9 +2073,9 @@ git commit -m "feat(sp5): apply-verdicts gains optional --checkpoint-dir (verdic
 
 Spec §3.4.1. Different from Tasks 7–9 because render-html takes `--md` + `--summary` (two inputs) and the cache payload is `html_output` (HTML bytes), not a JSON `output` object.
 
-- [ ] **Step 1: Add 2 failing tests**
+- [ ] **Step 1: Extend the existing top-of-file imports**
 
-Append to `skills/audit/scripts/test/render-html.test.mjs`:
+The existing `skills/audit/scripts/test/render-html.test.mjs` only imports `test, assert, escapeHtml, mdToHtml`. Every binding the new tests use is new. ADD these import lines at the top of the file (after the existing `import { escapeHtml, mdToHtml } ...` line):
 
 ```javascript
 import { spawnSync } from "node:child_process";
@@ -2007,7 +2083,13 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, real
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+```
 
+- [ ] **Step 2: Append 2 new tests + helpers to the end of the same file**
+
+Append AFTER the last existing test. No additional top-level imports.
+
+```javascript
 const CLI_RH = fileURLToPath(new URL("../render-html.mjs", import.meta.url));
 
 function runRender(md, summary, checkpointDir) {
@@ -2060,12 +2142,12 @@ test("render-html --checkpoint-dir hit on second call: stderr 'cache hit', html 
 
 `minimalSummary()` is verified against `report-summary.schema.json` (required fields: `meta`, `severity_counts`, `finding_status_counts`, `coverage`, `chains`). No adjustment needed.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run tests to verify they fail**
 
 Run: `( cd skills/audit/scripts && node --test test/render-html.test.mjs )`
 Expected: the 2 new tests fail (no cache dir, no cache-hit stderr).
 
-- [ ] **Step 3: Wire --checkpoint-dir into render-html.mjs (special two-stream input_digest)**
+- [ ] **Step 4: Wire --checkpoint-dir into render-html.mjs (special two-stream input_digest)**
 
 In `skills/audit/scripts/render-html.mjs`, add the cache-wrap import alongside the existing `import * as validators from "./validators.mjs";` line:
 
@@ -2145,12 +2227,12 @@ if (isMain()) {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/render-html.test.mjs )`
 Expected: PASS — every prior test passes; the 2 new tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add skills/audit/scripts/render-html.mjs skills/audit/scripts/test/render-html.test.mjs
@@ -2308,23 +2390,24 @@ git commit -m "feat(sp5): SKILL.md — §0 bootstrap+parse, §0.5 lifecycle, §3
 
 ---
 
-### Task 12: e2e-replay-resume.test.mjs — the assembly-level proof
+### Task 12: e2e-replay-resume.test.mjs — the spec §5 assembly-level proof
 
 **Files:**
 - Create: `skills/audit/scripts/test/e2e-replay-resume.test.mjs`
 
-Spec §5 E2E replay. The pivot property at the assembly level: two complete sequences of cacheable-helper invocations, with the same `--checkpoint-dir`, with no `--finalize` between them, produce byte-identical outputs on the second pass and every cached helper logs `cache hit` on stderr.
-
-The existing `e2e-replay.test.mjs` already proves the full pipeline runs end-to-end (and is gated by the structure-gate to stay passing). This new sibling test isolates the SP5 caching contract: lifecycle resume + 4 cached helpers + agent-response-cache, driven directly with minimal-valid inputs (no fake LLM responses needed — those don't change behavior across the cache boundary).
+Spec §5 E2E replay. The pivot property: **TWO complete cacheable-pipeline runs with the SAME `--checkpoint-dir` and NO `--finalize` between them**. The second run must produce byte-identical outputs (incl. final MD + HTML) on every cacheable helper AND on both agent-response-cache lookups (analyzer + verifier). This is the assembly-level proof that the SP5 contract holds end-to-end at the SKILL/helper seam.
 
 - [ ] **Step 1: Write the resume test**
 
 Create `skills/audit/scripts/test/e2e-replay-resume.test.mjs`:
 
 ```javascript
-// SP5 v1 assembly-level proof: lifecycle resume + 4 cacheable helpers + agent-response-cache
-// all hit on the second pass when the same --checkpoint-dir is reused. This is the test that
-// validates the pivot property at the seam between the SKILL and the helpers.
+// SP5 v1 assembly-level proof (spec §5). TWO complete pipeline runs with the SAME
+// --checkpoint-dir and no --finalize between them. Second pass: every cacheable helper
+// (allocate-budget, aggregate-findings, apply-verdicts, render-html) hits its cache and
+// produces byte-identical output, AND agent-response-cache --lookup returns hit:true for
+// both analyzer-response and verifier-response. Simulates a kill-then-resume where the
+// first run reached every helper before being killed.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -2340,7 +2423,7 @@ const CLI = (name) => join(SCRIPTS, `${name}.mjs`);
 const run = (args) => spawnSync(process.execPath, args, { encoding: "utf8" });
 function jw(p, obj) { writeFileSync(p, JSON.stringify(obj)); return p; }
 
-// Schema-valid minimal inputs (same as Tasks 7-10; see those tasks for schema references).
+// Schema-valid minimal inputs (same as Tasks 7-10).
 const minAllocInput = (vectors) => ({ budget: 12, vectors });
 const minAggInput = () => ({ findings: [] });
 const minAVInput = () => ({ findings: [], chains: [], batches: [] });
@@ -2351,6 +2434,12 @@ const minSummary = () => ({
   coverage: { analyzed: 0, skipped: 0 },
   chains: []
 });
+const validAnalyzerResponse = () => ({
+  partition_id: "py:web", status: "ok", findings: [],
+  coverage: { analyzed: ["src/a.py", "src/b.py"], skipped: [] }
+});
+// verifier-response.schema.json requires { status, verdicts: [verdict] }; empty verdicts are valid.
+const validVerifierResponse = () => ({ status: "ok", verdicts: [] });
 
 function setupProject() {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-e2e-resume-")));
@@ -2361,24 +2450,145 @@ function setupProject() {
   return dir;
 }
 
-// Resolve lifecycle once; returns { run_id, checkpoint_dir, mode }.
-function resolveLifecycle(projectDir) {
-  const inP = jw(join(projectDir, ".oswe", "tmp", "lc-in.json"), {
+function resolveLifecycle(projectDir, suffix = "") {
+  const inP = jw(join(projectDir, ".oswe", "tmp", `lc-in${suffix}.json`), {
     projectDir, scope_realpath: projectDir, sarif_realpath: null, concurrency: 4
   });
-  const outP = join(projectDir, ".oswe", "tmp", "lc-out.json");
+  const outP = join(projectDir, ".oswe", "tmp", `lc-out${suffix}.json`);
   const r = run([CLI("checkpoint-lifecycle"), "--file", inP, "--out", outP]);
   assert.equal(r.status, 0, `lifecycle resolve failed: ${r.stderr}`);
   return JSON.parse(readFileSync(outP, "utf8"));
 }
 
+// One complete cacheable-pipeline pass. Returns `{ helperOutputs, html, arcLookups }` so the
+// caller can compare pass-1 vs pass-2 byte-for-byte. `expectAllHits` controls assertion mode:
+// pass 1 expects misses everywhere; pass 2 expects hits everywhere.
+function runOnePass(projectDir, checkpointDir, passLabel, expectAllHits) {
+  // --- surface-scan (NOT cached — recomputes deterministically; same content -> same digest) ---
+  const ssIn = jw(join(projectDir, ".oswe", "tmp", `ss-in-${passLabel}.json`), {
+    projectDir, referencesDir: join(PLUGIN_ROOT, "skills", "audit", "references"),
+    partitions: [{ partition_id: "py:web", stack: "python", files: ["src/a.py", "src/b.py"] }]
+  });
+  const ssOut = join(projectDir, ".oswe", "tmp", `ss-out-${passLabel}.json`);
+  assert.equal(run([CLI("surface-scan"), "--file", ssIn, "--out", ssOut]).status, 0);
+  const scan = JSON.parse(readFileSync(ssOut, "utf8"));
+
+  // --- allocate-budget (cacheable) ---
+  const allocIn = jw(join(projectDir, ".oswe", "tmp", `alloc-in-${passLabel}.json`), minAllocInput(scan.vectors));
+  const allocOut = join(projectDir, ".oswe", "tmp", `alloc-out-${passLabel}.json`);
+  const allocR = run([CLI("allocate-budget"), "--file", allocIn, "--out", allocOut, "--checkpoint-dir", checkpointDir]);
+  assert.equal(allocR.status, 0, `pass ${passLabel}: allocate-budget failed: ${allocR.stderr}`);
+  if (expectAllHits) assert.match(allocR.stderr, /cache hit/i, `pass ${passLabel}: allocate-budget should hit`);
+  else assert.doesNotMatch(allocR.stderr, /cache hit/i, `pass ${passLabel}: allocate-budget should miss`);
+  const allocOutput = JSON.parse(readFileSync(allocOut, "utf8"));
+
+  // --- analyzer agent-response-cache: --lookup, then --store on miss ---
+  const analyzerDispatch = {
+    partition_id: "py:web",
+    files: ["src/a.py", "src/b.py"],
+    file_content_digest: scan.vectors[0].file_content_digest,
+    references_loaded: ["python"],
+    agent_contract_files: [
+      join(PLUGIN_ROOT, "agents", "oswe-analyzer.md"),
+      join(PLUGIN_ROOT, "skills", "audit", "SKILL.md")
+    ]
+  };
+  const arcLookIn = jw(join(projectDir, ".oswe", "tmp", `arc-an-lookup-${passLabel}.json`), {
+    checkpoint_dir: checkpointDir, plugin_root: PLUGIN_ROOT,
+    kind: "analyzer-response", target_id: "py:web", dispatch_input: analyzerDispatch
+  });
+  const arcLookOut = join(projectDir, ".oswe", "tmp", `arc-an-lookup-out-${passLabel}.json`);
+  assert.equal(run([CLI("agent-response-cache"), "--lookup", "--file", arcLookIn, "--out", arcLookOut]).status, 0);
+  const arcAnalyzerLookup = JSON.parse(readFileSync(arcLookOut, "utf8"));
+  if (expectAllHits) assert.equal(arcAnalyzerLookup.hit, true, `pass ${passLabel}: analyzer cache should hit`);
+  else {
+    assert.equal(arcAnalyzerLookup.hit, false, `pass ${passLabel}: analyzer cache should miss`);
+    // First pass: populate the cache (simulates "freshly-validated response stored after dispatch").
+    const storeIn = jw(join(projectDir, ".oswe", "tmp", `arc-an-store-${passLabel}.json`), {
+      checkpoint_dir: checkpointDir, plugin_root: PLUGIN_ROOT,
+      kind: "analyzer-response", target_id: "py:web",
+      dispatch_input: analyzerDispatch, validated_response: validAnalyzerResponse()
+    });
+    assert.equal(run([CLI("agent-response-cache"), "--store", "--file", storeIn]).status, 0);
+  }
+
+  // --- aggregate-findings (cacheable) ---
+  const aggIn = jw(join(projectDir, ".oswe", "tmp", `agg-in-${passLabel}.json`), minAggInput());
+  const aggOut = join(projectDir, ".oswe", "tmp", `agg-out-${passLabel}.json`);
+  const aggR = run([CLI("aggregate-findings"), "--file", aggIn, "--out", aggOut, "--checkpoint-dir", checkpointDir]);
+  assert.equal(aggR.status, 0, `pass ${passLabel}: aggregate-findings failed: ${aggR.stderr}`);
+  if (expectAllHits) assert.match(aggR.stderr, /cache hit/i, `pass ${passLabel}: aggregate-findings should hit`);
+  else assert.doesNotMatch(aggR.stderr, /cache hit/i, `pass ${passLabel}: aggregate-findings should miss`);
+  const aggOutput = JSON.parse(readFileSync(aggOut, "utf8"));
+
+  // --- verifier agent-response-cache: same pattern as analyzer (lookup, store on miss) ---
+  const verifierDispatch = {
+    batch_id: "batch:1",
+    expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }],
+    finding_or_chain_canonical: {},
+    agent_contract_files: [
+      join(PLUGIN_ROOT, "agents", "oswe-verifier.md"),
+      join(PLUGIN_ROOT, "skills", "audit", "SKILL.md")
+    ]
+  };
+  const arcVLookIn = jw(join(projectDir, ".oswe", "tmp", `arc-vf-lookup-${passLabel}.json`), {
+    checkpoint_dir: checkpointDir, plugin_root: PLUGIN_ROOT,
+    kind: "verifier-response", target_id: "batch:1", dispatch_input: verifierDispatch
+  });
+  const arcVLookOut = join(projectDir, ".oswe", "tmp", `arc-vf-lookup-out-${passLabel}.json`);
+  assert.equal(run([CLI("agent-response-cache"), "--lookup", "--file", arcVLookIn, "--out", arcVLookOut]).status, 0);
+  const arcVerifierLookup = JSON.parse(readFileSync(arcVLookOut, "utf8"));
+  if (expectAllHits) assert.equal(arcVerifierLookup.hit, true, `pass ${passLabel}: verifier cache should hit`);
+  else {
+    assert.equal(arcVerifierLookup.hit, false, `pass ${passLabel}: verifier cache should miss`);
+    const storeIn = jw(join(projectDir, ".oswe", "tmp", `arc-vf-store-${passLabel}.json`), {
+      checkpoint_dir: checkpointDir, plugin_root: PLUGIN_ROOT,
+      kind: "verifier-response", target_id: "batch:1",
+      dispatch_input: verifierDispatch, validated_response: validVerifierResponse()
+    });
+    assert.equal(run([CLI("agent-response-cache"), "--store", "--file", storeIn]).status, 0);
+  }
+
+  // --- apply-verdicts (cacheable) ---
+  const avIn = jw(join(projectDir, ".oswe", "tmp", `av-in-${passLabel}.json`), minAVInput());
+  const avOut = join(projectDir, ".oswe", "tmp", `av-out-${passLabel}.json`);
+  const avR = run([CLI("apply-verdicts"), "--file", avIn, "--out", avOut, "--checkpoint-dir", checkpointDir]);
+  assert.equal(avR.status, 0, `pass ${passLabel}: apply-verdicts failed: ${avR.stderr}`);
+  if (expectAllHits) assert.match(avR.stderr, /cache hit/i, `pass ${passLabel}: apply-verdicts should hit`);
+  else assert.doesNotMatch(avR.stderr, /cache hit/i, `pass ${passLabel}: apply-verdicts should miss`);
+  const avOutput = JSON.parse(readFileSync(avOut, "utf8"));
+
+  // --- render-html (cacheable, special two-stream contract) ---
+  // Use stable input files (same path across passes) so render-html's input_digest matches.
+  const mdPath = join(projectDir, ".oswe", "tmp", "report.md");
+  const sumPath = join(projectDir, ".oswe", "tmp", "summary.json");
+  if (passLabel === "1") {
+    writeFileSync(mdPath, "# E2E Resume Report\n");
+    writeFileSync(sumPath, JSON.stringify(minSummary()));
+  }
+  const htmlOut = join(projectDir, ".oswe", "tmp", `report-${passLabel}.html`);
+  const rhR = run([CLI("render-html"), "--md", mdPath, "--summary", sumPath, "--out", htmlOut, "--checkpoint-dir", checkpointDir]);
+  assert.equal(rhR.status, 0, `pass ${passLabel}: render-html failed: ${rhR.stderr}`);
+  if (expectAllHits) assert.match(rhR.stderr, /cache hit/i, `pass ${passLabel}: render-html should hit`);
+  else assert.doesNotMatch(rhR.stderr, /cache hit/i, `pass ${passLabel}: render-html should miss`);
+  const html = readFileSync(htmlOut, "utf8");
+  const mdBytes = readFileSync(mdPath, "utf8");
+
+  return {
+    surfaceVectors: scan.vectors,
+    allocOutput, aggOutput, avOutput,
+    html, mdBytes,
+    arcAnalyzerLookup, arcVerifierLookup
+  };
+}
+
 test("SP5 lifecycle resume: same invocation -> mode:'resume' with same run_id", (t) => {
   const projectDir = setupProject();
-  const first = resolveLifecycle(projectDir);
+  const first = resolveLifecycle(projectDir, "-a");
   assert.equal(first.mode, "new");
   assert.match(first.run_id, /^[0-9a-f]{16}$/);
 
-  const second = resolveLifecycle(projectDir);
+  const second = resolveLifecycle(projectDir, "-b");
   assert.equal(second.mode, "resume");
   assert.equal(second.run_id, first.run_id);
   assert.equal(second.checkpoint_dir, first.checkpoint_dir);
@@ -2386,109 +2596,49 @@ test("SP5 lifecycle resume: same invocation -> mode:'resume' with same run_id", 
   t.after(() => { try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* */ } });
 });
 
-test("SP5 4-helper cache: second pass with same --checkpoint-dir hits every cacheable helper", (t) => {
+test("SP5 e2e replay-resume: two complete pipeline runs, second pass hits everywhere + byte-identical report", (t) => {
   const projectDir = setupProject();
-  const { checkpoint_dir, run_id } = resolveLifecycle(projectDir);
+  const lc1 = resolveLifecycle(projectDir, "-1");
+  assert.equal(lc1.mode, "new");
 
-  // === surface-scan (NOT cached but produces file_content_digest used downstream) ===
-  const ssIn = jw(join(projectDir, ".oswe", "tmp", "ss-in.json"), {
-    projectDir, referencesDir: join(PLUGIN_ROOT, "skills", "audit", "references"),
-    partitions: [{ partition_id: "py:web", stack: "python", files: ["src/a.py", "src/b.py"] }]
-  });
-  const ssOut = join(projectDir, ".oswe", "tmp", "ss-out.json");
-  assert.equal(run([CLI("surface-scan"), "--file", ssIn, "--out", ssOut]).status, 0);
-  const scan = JSON.parse(readFileSync(ssOut, "utf8"));
+  // === PASS 1: every cacheable helper miss + populate analyzer/verifier caches ===
+  const pass1 = runOnePass(projectDir, lc1.checkpoint_dir, "1", /*expectAllHits=*/false);
 
-  // Helper to run a cacheable helper twice with same input + same --checkpoint-dir and assert hit.
-  function assertCacheHitOnSecondRun(name, input, extraArgs = []) {
-    const inP = jw(join(projectDir, ".oswe", "tmp", `${name}-in.json`), input);
-    const outP = join(projectDir, ".oswe", "tmp", `${name}-out.json`);
-    const baseArgs = name === "render-html"
-      ? ["--md", input.__mdPath, "--summary", input.__summaryPath, "--out", outP, "--checkpoint-dir", checkpoint_dir]
-      : ["--file", inP, "--out", outP, "--checkpoint-dir", checkpoint_dir];
-    const first = run([CLI(name), ...baseArgs, ...extraArgs]);
-    assert.equal(first.status, 0, `${name} first run failed: ${first.stderr}`);
-    assert.doesNotMatch(first.stderr, /cache hit/i, `${name} first run should be a miss`);
-    const firstOut = name === "render-html" ? readFileSync(outP, "utf8") : JSON.parse(readFileSync(outP, "utf8"));
+  // === Re-resolve lifecycle: NO --finalize between passes (simulates kill-then-resume) ===
+  const lc2 = resolveLifecycle(projectDir, "-2");
+  assert.equal(lc2.mode, "resume", "second resolve must be a resume, not a new run");
+  assert.equal(lc2.run_id, lc1.run_id, "resume must reuse the same run_id");
+  assert.equal(lc2.checkpoint_dir, lc1.checkpoint_dir);
 
-    const second = run([CLI(name), ...baseArgs, ...extraArgs]);
-    assert.equal(second.status, 0, `${name} second run failed: ${second.stderr}`);
-    assert.match(second.stderr, /cache hit/i, `${name} second run should hit`);
-    const secondOut = name === "render-html" ? readFileSync(outP, "utf8") : JSON.parse(readFileSync(outP, "utf8"));
-    if (name === "render-html") assert.equal(secondOut, firstOut);
-    else assert.deepEqual(secondOut, firstOut);
-  }
+  // === PASS 2: every cacheable helper hits + agent-response-cache hits (analyzer + verifier) ===
+  const pass2 = runOnePass(projectDir, lc2.checkpoint_dir, "2", /*expectAllHits=*/true);
 
-  assertCacheHitOnSecondRun("allocate-budget", minAllocInput(scan.vectors));
-  assertCacheHitOnSecondRun("aggregate-findings", minAggInput());
-  assertCacheHitOnSecondRun("apply-verdicts", minAVInput());
-
-  // render-html: prepare --md and --summary input files outside the standard --file path.
-  const mdPath = join(projectDir, ".oswe", "tmp", "rh.md");
-  const sumPath = join(projectDir, ".oswe", "tmp", "rh-summary.json");
-  writeFileSync(mdPath, "# E2E Resume Report\n");
-  writeFileSync(sumPath, JSON.stringify(minSummary()));
-  assertCacheHitOnSecondRun("render-html", { __mdPath: mdPath, __summaryPath: sumPath });
+  // === Byte-identical-output assertions across passes ===
+  assert.deepEqual(pass2.allocOutput, pass1.allocOutput, "allocate-budget output must be byte-identical across passes");
+  assert.deepEqual(pass2.aggOutput, pass1.aggOutput, "aggregate-findings output must be byte-identical across passes");
+  assert.deepEqual(pass2.avOutput, pass1.avOutput, "apply-verdicts output must be byte-identical across passes");
+  assert.equal(pass2.html, pass1.html, "render-html HTML output must be byte-identical across passes");
+  assert.equal(pass2.mdBytes, pass1.mdBytes, "the Markdown report itself must be unchanged across passes");
+  assert.deepEqual(pass2.arcAnalyzerLookup.cached_response, validAnalyzerResponse(),
+    "analyzer cache must return the stored response unchanged");
+  assert.deepEqual(pass2.arcVerifierLookup.cached_response, validVerifierResponse(),
+    "verifier cache must return the stored response unchanged");
 
   // === Finalize: manifest flipped + dir removed ===
-  const fin = run([CLI("checkpoint-lifecycle"), "--finalize", "--run-id", run_id, "--project-dir", projectDir]);
+  const fin = run([CLI("checkpoint-lifecycle"), "--finalize", "--run-id", lc1.run_id, "--project-dir", projectDir]);
   assert.equal(fin.status, 0);
-  assert.equal(existsSync(checkpoint_dir), false, "finalize removes the run dir");
-
-  t.after(() => { try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* */ } });
-});
-
-test("SP5 agent-response-cache: store then lookup hit (assembly with realistic dispatch_input)", (t) => {
-  const projectDir = setupProject();
-  const { checkpoint_dir } = resolveLifecycle(projectDir);
-
-  // Stub plugin_root = real plugin root (we hash real plugin files).
-  const dispatchInput = {
-    partition_id: "py:web",
-    files: ["src/a.py", "src/b.py"],
-    file_content_digest: "f".repeat(64),
-    references_loaded: ["python"],
-    agent_contract_files: [
-      join(PLUGIN_ROOT, "agents", "oswe-analyzer.md"),
-      join(PLUGIN_ROOT, "skills", "audit", "SKILL.md")
-    ]
-  };
-  // Schema-valid analyzer-response (matches the validAnalyzerResponse helper in Task 6's test).
-  const validatedResponse = {
-    partition_id: "py:web",
-    status: "ok",
-    findings: [],
-    coverage: { analyzed: ["src/a.py", "src/b.py"], skipped: [] }
-  };
-
-  const storeIn = jw(join(projectDir, ".oswe", "tmp", "arc-store.json"), {
-    checkpoint_dir, plugin_root: PLUGIN_ROOT, kind: "analyzer-response",
-    target_id: "py:web", dispatch_input: dispatchInput, validated_response: validatedResponse
-  });
-  const s = run([CLI("agent-response-cache"), "--store", "--file", storeIn]);
-  assert.equal(s.status, 0, `--store failed: ${s.stderr}`);
-
-  const lookupIn = jw(join(projectDir, ".oswe", "tmp", "arc-lookup.json"), {
-    checkpoint_dir, plugin_root: PLUGIN_ROOT, kind: "analyzer-response",
-    target_id: "py:web", dispatch_input: dispatchInput
-  });
-  const lookupOut = join(projectDir, ".oswe", "tmp", "arc-lookup-out.json");
-  const l = run([CLI("agent-response-cache"), "--lookup", "--file", lookupIn, "--out", lookupOut]);
-  assert.equal(l.status, 0);
-  const lookupResult = JSON.parse(readFileSync(lookupOut, "utf8"));
-  assert.equal(lookupResult.hit, true);
-  assert.deepEqual(lookupResult.cached_response, validatedResponse);
+  assert.equal(existsSync(lc1.checkpoint_dir), false, "finalize removes the run dir");
 
   t.after(() => { try { rmSync(projectDir, { recursive: true, force: true }); } catch { /* */ } });
 });
 ```
 
-All payloads above are schema-verified against their respective schemas (`analyzer-response`, `report-summary`) and CLI contracts (`aggregate-findings.mjs:89`, `apply-verdicts.mjs:348`). No adjustment expected.
+All payloads are schema-verified against their respective schemas (`analyzer-response`, `verifier-response`, `report-summary`) and CLI contracts (`aggregate-findings.mjs:89`, `apply-verdicts.mjs:348`).
 
 - [ ] **Step 2: Run the e2e resume test to verify it passes**
 
 Run: `( cd skills/audit/scripts && node --test test/e2e-replay-resume.test.mjs )`
-Expected: PASS — 3 tests, 0 failures.
+Expected: PASS — 2 tests, 0 failures (the standalone lifecycle-resume + the two-pass e2e proof).
 
 - [ ] **Step 3: Run the full suite + structure gate + regen check to confirm zero regression**
 
