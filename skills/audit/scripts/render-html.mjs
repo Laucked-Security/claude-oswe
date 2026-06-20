@@ -197,6 +197,7 @@ export function chainDiagram(chains) {
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import * as validators from "./validators.mjs";
+import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";
 
 const CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
 const STYLE = `
@@ -370,9 +371,17 @@ if (isMain()) {
   const args = process.argv.slice(2);
   const flag = (name) => { const i = args.indexOf(name); return i !== -1 ? args[i + 1] : undefined; };
   const mdPath = flag("--md"), sumPath = flag("--summary"), outPath = flag("--out");
+  const ckptRaw = flag("--checkpoint-dir");
   const fail2 = (msg) => { process.stderr.write("render-html: " + msg + "\n"); process.exit(2); };
+  // --checkpoint-dir is OPTIONAL, but if present its value must exist and not be another flag.
+  // `flag(name)` returns args[i+1] without validation, so we re-check here against the raw args.
+  const ckptIdx = args.indexOf("--checkpoint-dir");
+  if (ckptIdx !== -1 && (!args[ckptIdx + 1] || args[ckptIdx + 1].startsWith("--"))) {
+    fail2("--checkpoint-dir requires a path argument, got: " + (args[ckptIdx + 1] ?? "<end of args>"));
+  }
+  const checkpointDir = ckptRaw || null;
   if (!mdPath || !sumPath || !outPath) {
-    fail2("usage: render-html.mjs --md <report.md> --summary <summary.json> --out <report.html>");
+    fail2("usage: render-html.mjs --md <report.md> --summary <summary.json> --out <report.html> [--checkpoint-dir <abs>]");
   }
   let md, sumRaw;
   try { md = readFileSync(mdPath, "utf8"); } catch (e) { fail2("cannot read --md " + mdPath + ": " + e.message); }
@@ -386,17 +395,49 @@ if (isMain()) {
   const gErrs = graphErrors(summary);
   if (gErrs.length) {
     process.stderr.write("render-html: incoherent chain graph: " + gErrs.join("; ") + "\n");
-    process.exit(1);   // orchestrator built an edge to an undeclared node -> no HTML
+    process.exit(1);
   }
+
+  // SP5 cache lookup (special two-stream input_digest per spec §3.4.1).
+  // input_digest = sha256(md_bytes || NUL || canonical(summary)).
+  let inputDigest, versionDigest;
+  if (checkpointDir) {
+    inputDigest = sha256Hex(Buffer.concat([
+      Buffer.from(md, "utf8"),
+      Buffer.from([0]),
+      Buffer.from(canonicalize(summary), "utf8")
+    ]));
+    versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
+    const lookup = cacheLookup({ checkpointDir, helperName: "render-html", inputDigest, versionDigest, requiredPayloadKey: "html_output" });
+    if (lookup.hit) {
+      const tmp = outPath + ".tmp-" + process.pid;
+      try {
+        writeFileSync(tmp, lookup.wrapper.html_output);
+        renameSync(tmp, outPath);
+      } catch (e) {
+        try { unlinkSync(tmp); } catch { /* nothing */ }
+        fail2("cannot write --out " + outPath + ": " + e.message);
+      }
+      process.stderr.write("render-html: cache hit\n");
+      process.exit(0);
+    }
+  }
+
   let html;
   try { html = renderReport({ md, summary }); } catch (e) { fail2("render failed: " + e.message); }
   const tmp = outPath + ".tmp-" + process.pid;
   try {
     writeFileSync(tmp, html);
-    renameSync(tmp, outPath);   // atomic: never leaves a partial report.html
+    renameSync(tmp, outPath);
   } catch (e) {
     try { unlinkSync(tmp); } catch { /* nothing to clean */ }
     fail2("cannot write --out " + outPath + ": " + e.message);
   }
+
+  if (checkpointDir) {
+    try { cacheStore({ checkpointDir, helperName: "render-html", inputDigest, versionDigest, payload: { html_output: html } }); }
+    catch (e) { process.stderr.write("render-html: cache store failed (non-fatal): " + e.message + "\n"); }
+  }
+
   process.exit(0);
 }
