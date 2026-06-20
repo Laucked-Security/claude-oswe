@@ -3,7 +3,7 @@
 //   finalize — flip completed:true then rm the run dir
 // Manifest is validated through validate-output's checkpoint-manifest kind.
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { canonicalize, sha256Hex } from "./cache-wrap.mjs";
