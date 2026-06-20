@@ -2,7 +2,7 @@
 // aggregate-findings, apply-verdicts, render-html) and reused (canonicalize + sha256Hex only)
 // by agent-response-cache. Zero runtime dependencies.
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 // Recursive-key-sort JSON stringify. Two semantically-equal objects produce byte-identical
@@ -42,9 +42,11 @@ export function cachePath(checkpointDir, helperName, inputDigest, versionDigest)
 // Per §6 of the spec: cache-payload corruption is recoverable, never fail-loud.
 export function cacheLookup({ checkpointDir, helperName, inputDigest, versionDigest, requiredPayloadKey }) {
   const p = cachePath(checkpointDir, helperName, inputDigest, versionDigest);
-  if (!existsSync(p)) return { hit: false };
+  let raw;
+  try { raw = readFileSync(p, "utf8"); }
+  catch { return { hit: false }; }   // ENOENT / EBUSY / etc. — silent miss per spec §6
   let wrapper;
-  try { wrapper = JSON.parse(readFileSync(p, "utf8")); } catch { return { hit: false }; }
+  try { wrapper = JSON.parse(raw); } catch { return { hit: false }; }
   if (wrapper.input_digest !== inputDigest || wrapper.helper_version_digest !== versionDigest) {
     return { hit: false };
   }
