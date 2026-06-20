@@ -168,3 +168,46 @@ test("final-finding: empty provenance arrays fail", () => {
   const r = validate("final-finding", finalBase({ partitions: [], source_finding_ids: [], verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
   assert.equal(r.valid, false);
 });
+
+test("validate-output accepts a well-formed checkpoint-manifest", () => {
+  const ok = validate("checkpoint-manifest", {
+    schema_version: 1,
+    run_id: "0123456789abcdef",
+    started_at: "2026-06-20T12:00:00Z",
+    completed: false,
+    scope_realpath: null,
+    sarif_realpath: null,
+    concurrency: 4,
+    invocation_digest: "f".repeat(64)
+  });
+  assert.equal(ok.valid, true);
+});
+
+test("validate-output rejects a checkpoint-manifest with additionalProperties", () => {
+  const bad = validate("checkpoint-manifest", {
+    schema_version: 1,
+    run_id: "0123456789abcdef",
+    started_at: "2026-06-20T12:00:00Z",
+    completed: false,
+    scope_realpath: null,
+    sarif_realpath: null,
+    concurrency: 4,
+    invocation_digest: "f".repeat(64),
+    surprise: "extra"
+  });
+  assert.equal(bad.valid, false);
+});
+
+test("validate-output rejects a checkpoint-manifest with bad concurrency range", () => {
+  const bad = validate("checkpoint-manifest", {
+    schema_version: 1,
+    run_id: "0123456789abcdef",
+    started_at: "2026-06-20T12:00:00Z",
+    completed: false,
+    scope_realpath: null,
+    sarif_realpath: null,
+    concurrency: 99,
+    invocation_digest: "f".repeat(64)
+  });
+  assert.equal(bad.valid, false);
+});

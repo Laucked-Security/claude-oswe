@@ -9,7 +9,8 @@ const KIND_TO_EXPORT = {
   "finding": "finding",
   "final-finding": "finalFinding",
   "chain": "chain",
-  "verdict": "verdict"
+  "verdict": "verdict",
+  "checkpoint-manifest": "checkpointManifest"
 };
 
 export function validate(kind, data) {
