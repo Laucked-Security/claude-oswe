@@ -164,13 +164,35 @@ where `agent_contract_files` includes:
 - Each `${CLAUDE_PLUGIN_ROOT}/skills/audit/references/<lang>.md` actually loaded for the partition
 - `${CLAUDE_PLUGIN_ROOT}/skills/audit/SKILL.md`
 
-**Cache store after each successful analyzer dispatch.** AFTER `validate-output analyzer-response`
-succeeds on a freshly-dispatched response, write
+**Cache store ONLY after ALL local analyzer gates pass.** Schema-validity is necessary but not
+sufficient: a response that passes `validate-output analyzer-response` can still fail partition
+binding (wrong `partition_id` or malformed `finding_id`s), lead-coverage (1:1 with assigned leads),
+or carry `status:"error"` (analyzer couldn't analyze) — all of which trigger a retry or a coverage
+gap. Storing a schema-valid-but-otherwise-broken response would freeze that broken response across
+kill→resume: the next `--lookup` would `hit:true`, the dispatch would be skipped, and the retry
+mechanism would be neutralized. So **do not call `--store` immediately after
+`validate-output analyzer-response`**.
+
+Defer the `--store` call until the response has cleared **every** local gate:
+
+1. `validate-output analyzer-response` exit 0 (schema), AND
+2. partition binding: `response.partition_id === P` AND every `finding.partition_id === P` AND
+   every `finding.finding_id` matches `^<P>-F[0-9]{3,}$` AND `finding_id`s unique within the
+   response, AND
+3. lead coverage: exactly one `adjudicated_leads` entry per assigned lead, no unknown lead, no
+   `origin:"both"` raw finding, no `promoted` entry pointing at a missing finding, AND
+4. `status` is `ok` OR `partial` (`status:"error"` → no aggregation → no store).
+
+ONLY at that point write
 `{"checkpoint_dir": "<...>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "analyzer-response", "target_id": "<partition_id>", "dispatch_input": {<same as lookup>}, "validated_response": {<the validated response>}}`
 to a temp file and run `agent-response-cache.mjs --store --file <...>` inside a `trap`. **On any
 non-zero exit from `--store` (e.g. exit 2 on disk full or temp-dir race), log the stderr and
 continue** — the store is non-fatal infrastructure; the audit proceeds without caching this
 response and the next resume will simply re-dispatch.
+
+**Retried responses follow the same gate.** A response produced by the one-retry budget must also
+clear all four gates above before being stored — a retry can fail just as a first dispatch can.
+A partition that exhausts its retry budget (gap recorded) is NOT stored.
 
 - **Small repo (≤ 2 partitions):** analyze inline yourself (no analyzer *subagents*) — but you MUST
   still produce **one `analyzer-response` object per partition** and **run it through the same
@@ -272,10 +294,26 @@ include:
 - `${CLAUDE_PLUGIN_ROOT}/skills/audit/SKILL.md`
 
 On `hit: true`, USE the `cached_response` and SKIP the verifier dispatch. On miss, dispatch.
-AFTER `validate-output verifier-response` succeeds, call `agent-response-cache.mjs --store` with
-the same dispatch_input and the validated response. **On any non-zero exit from `--store`, log
-the stderr and continue** — the store is non-fatal infrastructure; the audit proceeds without
-caching this response and the next resume will re-dispatch.
+
+**Cache store ONLY after the global preflight loop (Step B) has converged.** A verifier response
+that passes `validate-output verifier-response` (schema) can still fail Step A's `validate-batch`
+(bad coverage, transition mismatch, downgrade-raise — `error_kind:"verifier-output"`) OR Step B's
+preflight (`error_kind:"verifier-output"` pointing at this batch's `batch_id`) — both trigger the
+retry/neutralize machinery. Storing right after the schema gate would freeze a verifier-output-bad
+response in the cache: next `--lookup` `hit:true`, dispatch skipped, retry machinery neutralized.
+
+Defer the `--store` call for every freshly-dispatched verifier batch until **§6 Step B's preflight
+loop has reached `ok:true`** (i.e. every batch has either passed validate-batch + preflight OR
+been neutralized). At that point:
+
+- For each batch that was **freshly dispatched** in this run (not a cache hit, not a neutralized
+  fallback): call `agent-response-cache.mjs --store` with its `{batch_id, dispatch_input,
+  validated_response}` payload. Skip batches that were already a cache hit (already stored on a
+  prior run) and skip batches that ended up neutralized (their `{status:"error", verdicts:[]}`
+  response would be poison — never store it).
+
+Same `--store` failure semantics as analyzer: non-zero exit → log stderr, continue. Same
+fail-loud-on-store-failure is wrong here for the same reason: store is infrastructure.
 
 - **Step A — per-batch check (local).** For each bound wrapper, after the `verifier-response` schema
   check, write `{ "findings": [ …full finding objects ], "chains": [ …full chain objects ],
