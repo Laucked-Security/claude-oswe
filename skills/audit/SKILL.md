@@ -160,7 +160,10 @@ where `agent_contract_files` includes:
 **Cache store after each successful analyzer dispatch.** AFTER `validate-output analyzer-response`
 succeeds on a freshly-dispatched response, write
 `{"checkpoint_dir": "<...>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "analyzer-response", "target_id": "<partition_id>", "dispatch_input": {<same as lookup>}, "validated_response": {<the validated response>}}`
-to a temp file and run `agent-response-cache.mjs --store --file <...>` inside a `trap`.
+to a temp file and run `agent-response-cache.mjs --store --file <...>` inside a `trap`. **On any
+non-zero exit from `--store` (e.g. exit 2 on disk full or temp-dir race), log the stderr and
+continue** — the store is non-fatal infrastructure; the audit proceeds without caching this
+response and the next resume will simply re-dispatch.
 
 - **Small repo (≤ 2 partitions):** analyze inline yourself (no analyzer *subagents*) — but you MUST
   still produce **one `analyzer-response` object per partition** and **run it through the same
@@ -263,7 +266,9 @@ include:
 
 On `hit: true`, USE the `cached_response` and SKIP the verifier dispatch. On miss, dispatch.
 AFTER `validate-output verifier-response` succeeds, call `agent-response-cache.mjs --store` with
-the same dispatch_input and the validated response.
+the same dispatch_input and the validated response. **On any non-zero exit from `--store`, log
+the stderr and continue** — the store is non-fatal infrastructure; the audit proceeds without
+caching this response and the next resume will re-dispatch.
 
 - **Step A — per-batch check (local).** For each bound wrapper, after the `verifier-response` schema
   check, write `{ "findings": [ …full finding objects ], "chains": [ …full chain objects ],
