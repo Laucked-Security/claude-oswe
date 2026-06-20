@@ -50,6 +50,26 @@ test("two findings with the same source/sink/class are merged with worst-case fi
   assert.equal(f.evidence.length, 2);                     // union
 });
 
+test("direct_flow:true is propagated through aggregation (SP6)", () => {
+  const r = aggregateFindings([raw("auth-F001", "auth", { direct_flow: true })]);
+  assert.equal(r.ok, true);
+  assert.equal(r.findings[0].direct_flow, true);
+  assert.equal(validate("finding", r.findings[0]).valid, true, JSON.stringify(validate("finding", r.findings[0]).errors));
+});
+
+test("direct_flow absent stays absent (no default injection)", () => {
+  const r = aggregateFindings([raw("auth-F001", "auth")]);
+  assert.equal("direct_flow" in r.findings[0], false);
+});
+
+test("direct_flow:true wins if any merged member has it", () => {
+  const a = raw("auth-F001", "auth");
+  const b = raw("api-F003", "api", { direct_flow: true });
+  const r = aggregateFindings([a, b]);
+  assert.equal(r.findings.length, 1);
+  assert.equal(r.findings[0].direct_flow, true);
+});
+
 test("aggregation is independent of input order", () => {
   const a = raw("auth-F001", "auth");
   const b = raw("api-F003", "api", { source: loc("b.php", 5, "$_POST['x']", "http-param") });

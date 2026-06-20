@@ -14,6 +14,7 @@
     "sink": { "$ref": "#/$defs/loc" },
     "auth": { "enum": ["unauthenticated", "authenticated", "admin"] },
     "transformations": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+    "direct_flow": { "type": "boolean" },
     "sanitizers": { "type": "array", "items": { "$ref": "#/$defs/sanitizer" } },
     "prerequisites": { "type": "array", "items": { "type": "string" } },
     "evidence": { "type": "array", "items": { "$ref": "#/$defs/fileline" } },

@@ -60,6 +60,7 @@ export function aggregateFindings(rawFindings) {
       sink: rep.sink,
       auth: AUTH[Math.min(...group.map((f) => AUTH.indexOf(f.auth)))],
       transformations: union("transformations"),
+      ...(group.some((f) => f.direct_flow) ? { direct_flow: true } : {}),
       sanitizers: union("sanitizers"),
       prerequisites: uniqSortedStrings(group.flatMap((f) => f.prerequisites || [])),
       evidence: union("evidence"),
