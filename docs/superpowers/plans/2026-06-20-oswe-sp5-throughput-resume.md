@@ -889,25 +889,32 @@ test("finalize emits a warning + exit 0 when rm fails (simulated via locked-styl
   assert.equal(existsSync(d), false, "happy path: dir removed");
 });
 
-test("a manifest with additionalProperties causes resolve to skip it (treated as incompatible)", () => {
+test("a manifest with additionalProperties -> exit 1 with cleanup instruction (fail-loud per §6)", () => {
   const p = setupProject();
   const id = "ccccccccccccccc1";
   const d = join(p, ".oswe", "checkpoints", id);
   mkdirSync(d, { recursive: true });
-  // Live invocation will be (scope:p, sarif:null, concurrency:4). Compute its digest.
-  const probe = resolve(p, p, null, 4);
-  const probeManifest = JSON.parse(readFileSync(join(probe.out.checkpoint_dir, "manifest.json"), "utf8"));
-  rmSync(probe.out.checkpoint_dir, { recursive: true, force: true });
   writeFileSync(join(d, "manifest.json"), JSON.stringify({
     schema_version: 1, run_id: id, started_at: "2026-06-20T12:00:00Z",
     completed: false, scope_realpath: p, sarif_realpath: null, concurrency: 4,
-    invocation_digest: probeManifest.invocation_digest,
+    invocation_digest: "0".repeat(64),
     surprise: "extra"  // additionalProperties violation
   }));
-  // resolve treats malformed manifest as not-compatible -> creates a NEW run, not exit 1.
   const r = resolve(p, p, null, 4);
-  assert.equal(r.code, 0);
-  assert.equal(r.out.mode, "new");
+  assert.equal(r.code, 1, "malformed manifest must fail loud, not silently fall through to a fresh run");
+  assert.match(r.stderr, /schema-invalid|malformed|unreadable/i);
+  assert.match(r.stderr, new RegExp(`rm -rf \\.oswe/checkpoints/${id}`));
+});
+
+test("a manifest with unparseable JSON -> exit 1 with cleanup instruction", () => {
+  const p = setupProject();
+  const id = "ccccccccccccccc2";
+  const d = join(p, ".oswe", "checkpoints", id);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, "manifest.json"), "{not json at all");
+  const r = resolve(p, p, null, 4);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /malformed/i);
 });
 ```
 
@@ -950,11 +957,24 @@ function scanCompatible(projectDir, digest) {
   for (const entry of readdirSync(root)) {
     const manifestPath = join(root, entry, "manifest.json");
     if (!existsSync(manifestPath)) continue;
-    const m = readManifest(manifestPath);
-    if (!m) continue;
-    // Schema-gate the candidate manifest. A malformed manifest is NOT compatible (silently skipped)
-    // since the run lifecycle on it would itself be broken — the user must clean it up out-of-band.
-    if (!validate("checkpoint-manifest", m).valid) continue;
+    // Spec §6: a manifest that EXISTS but is unparseable / schema-invalid is fail-loud
+    // (exit 1 with cleanup), not silent-skip. The manifest is the directory-level structural
+    // artifact; broken structure means broken run lifecycle. Cache-payload files get silent
+    // recovery (§6 again), but manifests do not.
+    let raw;
+    try { raw = readFileSync(manifestPath, "utf8"); }
+    catch (e) {
+      throw new Error(`manifest unreadable at .oswe/checkpoints/${entry}/manifest.json (${e.message}). Please \`rm -rf .oswe/checkpoints/${entry}\` and re-run.`);
+    }
+    let m;
+    try { m = JSON.parse(raw); }
+    catch (e) {
+      throw new Error(`manifest JSON malformed at .oswe/checkpoints/${entry}/manifest.json (${e.message}). Please \`rm -rf .oswe/checkpoints/${entry}\` and re-run.`);
+    }
+    const v = validate("checkpoint-manifest", m);
+    if (!v.valid) {
+      throw new Error(`manifest schema-invalid at .oswe/checkpoints/${entry}/manifest.json (${JSON.stringify(v.errors)}). Please \`rm -rf .oswe/checkpoints/${entry}\` and re-run.`);
+    }
     if (m.invocation_digest === digest && m.completed === false) out.push({ run_id: entry, manifest: m });
   }
   return out;
@@ -962,7 +982,9 @@ function scanCompatible(projectDir, digest) {
 
 export function resolveRun({ projectDir, scope_realpath, sarif_realpath, concurrency }) {
   const digest = invocationDigest({ scope_realpath, sarif_realpath, concurrency });
-  const compat = scanCompatible(projectDir, digest);
+  let compat;
+  try { compat = scanCompatible(projectDir, digest); }
+  catch (e) { return { ok: false, error: e.message, run_id: null, mode: null, checkpoint_dir: null }; }
 
   if (compat.length > 1) {
     return {
@@ -1056,7 +1078,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/checkpoint-lifecycle.test.mjs )`
-Expected: PASS — 10 tests, 0 failures.
+Expected: PASS — 11 tests, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -1244,13 +1266,15 @@ function setupCheckpoint() {
   return realpathSync(mkdtempSync(join(tmpdir(), "oswe-arc-ckpt-")));
 }
 
-// A minimal valid analyzer-response payload. The real schema (analyzer-response.schema.json)
-// requires more fields; this test assumes the schema is permissive enough or we use the
-// minimal required shape. If validation fails on the happy path, we tweak this in test only.
+// Minimal schema-valid analyzer-response (matches analyzer-response.schema.json's required
+// fields: partition_id, status, findings, coverage). Coverage required sub-fields: analyzed[],
+// skipped[]; skipped items need {path, reason}.
 function validAnalyzerResponse() {
   return {
     partition_id: "py:web",
-    findings: []
+    status: "ok",
+    findings: [],
+    coverage: { analyzed: ["src/a.py", "src/b.py"], skipped: [] }
   };
 }
 
@@ -1470,7 +1494,7 @@ test("agent_contract_files entry outside plugin_root -> exit 2 (round 5 Fix #1)"
 });
 ```
 
-If a unit test in the analyzer-response section above fails because the minimal `validAnalyzerResponse()` shape doesn't satisfy `analyzer-response.schema.json` (validate-output gates the live response in addition to the cache one), inspect the schema and add the missing required fields to `validAnalyzerResponse()` in the test only. The schema is authoritative; the test mirrors it.
+`validAnalyzerResponse()` above is schema-verified against `analyzer-response.schema.json` (required: `partition_id`, `status`, `findings`, `coverage` with `analyzed[]` + `skipped[]`). No adjustment needed.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1524,7 +1548,12 @@ function computeInputDigest(dispatch_input, plugin_root) {
 }
 
 function cacheFilePath(checkpointDir, kind, targetId, inputDigest) {
-  return join(checkpointDir, "agent-responses", `${kind}-${targetId}-${inputDigest}.json`);
+  // Windows forbids `:` in filenames and target_ids like "py:web" or "batch:1:3" routinely
+  // contain it. Hash (target_id, input_digest) into a single filesystem-safe 64-hex token.
+  // This is deterministic — same (target_id, input_digest) always produces the same filename —
+  // and preserves the collision-resistance property of the original layout.
+  const fileId = sha256Hex(canonicalize({ target_id: targetId, input_digest: inputDigest }));
+  return join(checkpointDir, "agent-responses", `${kind}-${fileId}.json`);
 }
 
 export function lookup({ checkpoint_dir, plugin_root, kind, target_id, dispatch_input }) {
@@ -1606,7 +1635,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `( cd skills/audit/scripts && node --test test/agent-response-cache.test.mjs )`
-Expected: PASS — 11 tests, 0 failures. If the `validAnalyzerResponse()` shape doesn't satisfy the schema, the "store then lookup -> hit:true" test will fail in the in-helper re-validation step. In that case, read `skills/audit/schemas/analyzer-response.schema.json` to learn the required fields and add them to `validAnalyzerResponse()` in the test. Re-run; should pass.
+Expected: PASS — 11 tests, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -1802,10 +1831,10 @@ function runAgg(input, checkpointDir) {
   return { code: r.status, stderr: r.stderr, out: existsSync(outP) ? JSON.parse(readFileSync(outP, "utf8")) : null };
 }
 
-// Use the smallest aggregate-findings input that the helper accepts (an empty array of analyzer
-// responses is the simplest valid input — see existing aggregate-findings.test.mjs for the shape).
+// aggregate-findings CLI input: { findings: [...rawFindings] } (per aggregate-findings.mjs:89).
+// Empty findings is a legitimate input (aggregateFindings([]) returns { ok:true, findings:[] }).
 function minimalAggInput() {
-  return { analyzer_responses: [] };
+  return { findings: [] };
 }
 
 test("aggregate-findings --checkpoint-dir miss writes cache file", () => {
@@ -1825,7 +1854,7 @@ test("aggregate-findings --checkpoint-dir hit on second call short-circuits with
 });
 ```
 
-If `minimalAggInput()` is not accepted, peek at the existing tests in this file to learn the real minimal valid shape, and substitute.
+`minimalAggInput()` matches the CLI contract documented at `aggregate-findings.mjs:89`. No adjustment needed.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
@@ -1842,18 +1871,20 @@ Specifically:
 3. After reading and parsing `input`, before calling the helper's main function, insert the cache-lookup block exactly as in Task 7 (substituting `"allocate-budget"` → `"aggregate-findings"`).
 4. After the helper writes `--out` and confirms success, insert the cache-store block (same substitution).
 
-Concretely, if the existing tail of aggregate-findings.mjs looks like:
+Concretely, the existing tail of `aggregate-findings.mjs` (lines 90–100) reads:
 
 ```javascript
-  const r = aggregateFindings(input.analyzer_responses);
-  try { writeFileSync(args[oi + 1], JSON.stringify(r, null, 2)); }
+  const result = aggregateFindings(input.findings || []);
+  try { writeFileSync(args[oi + 1], JSON.stringify(result, null, 2)); }
   catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
-  process.exit(r.ok ? 0 : 1);
+  process.exit(result.ok ? 0 : 1);
 ```
 
-(check what the actual function name and input field are; the spec calls this helper "aggregate-findings"), wrap it the same way Task 7 wraps `allocate(...)`.
-
-The cache lookup happens AFTER input parsing and BEFORE the real helper logic. The cache store happens AFTER `writeFileSync` succeeds, on the `ok` path.
+Wrap it the same way Task 7 wraps `allocate(...)`:
+- Cache lookup happens AFTER input parsing and BEFORE the `aggregateFindings(...)` call.
+- Cache store happens AFTER `writeFileSync` succeeds, on the `result.ok` path.
+- The `helperName` arg to `cacheLookup`/`cacheStore` is `"aggregate-findings"`.
+- The stderr cache-hit log line is `"aggregate-findings: cache hit\n"`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -1901,10 +1932,11 @@ function runAV(input, checkpointDir) {
   return { code: r.status, stderr: r.stderr, out: existsSync(outP) ? JSON.parse(readFileSync(outP, "utf8")) : null };
 }
 
-// Use the simplest valid apply-verdicts input. Inspect the existing tests in this file to learn
-// the minimal accepted shape (typically { findings: [], chains: [], verifier_responses: [] }).
+// apply-verdicts CLI input shape per apply-verdicts.mjs:348:
+//   { findings: [...], chains: [...], batches: [...] }
+// All-empty is the trivially valid case: zero findings, zero chains, zero verdict batches.
 function minimalAVInput() {
-  return { findings: [], chains: [], verifier_responses: [] };
+  return { findings: [], chains: [], batches: [] };
 }
 
 test("apply-verdicts --checkpoint-dir miss writes cache file", () => {
@@ -1924,7 +1956,7 @@ test("apply-verdicts --checkpoint-dir hit on second call short-circuits with sam
 });
 ```
 
-Adjust `minimalAVInput()` based on the existing apply-verdicts.test.mjs if the shape differs.
+`minimalAVInput()` matches the CLI contract documented at `apply-verdicts.mjs:348`. No adjustment needed.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1939,7 +1971,9 @@ Same surgical change as Tasks 7–8:
 3. After input parsing, before the call to the helper's main function, insert the cache-lookup block (`helperName: "apply-verdicts"`).
 4. After `writeFileSync(--out, ...)` succeeds, insert the cache-store block.
 
-Verify by reading the file that `apply-verdicts.mjs` actually has the `--file`/`--out` CLI shape. If it does not (it differs slightly — see file), adjust accordingly. The cache primitives don't care about the helper's internal logic, only that we have a JSON input and a JSON output written to a known path.
+`apply-verdicts.mjs` has the standard `--file`/`--out` CLI shape (confirmed at lines 350–357). The cache lookup goes between input parsing and the `applyVerdicts(input)` call (line 365). The cache store goes after the `writeFileSync` on the `result.ok` path. `helperName: "apply-verdicts"`. The stderr cache-hit log is `"apply-verdicts: cache hit\n"`.
+
+**Critical:** do NOT modify the `applyVerdicts` function or anything it calls. The verdict logic and Critical gating are explicitly sacred per spec §2 — only the CLI block changes.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1989,17 +2023,16 @@ function runRender(md, summary, checkpointDir) {
   return { code: r.status, stderr: r.stderr, html: existsSync(outP) ? readFileSync(outP, "utf8") : null };
 }
 
-// Minimal valid summary. The shape is governed by report-summary.schema.json — peek at the
-// existing render-html.test.mjs to find a known-valid sample if this one fails validation.
+// Schema-valid report-summary per report-summary.schema.json. Required: meta (with target,
+// stack, date, verdict, proof_level), severity_counts (5 keys), finding_status_counts (4 keys),
+// coverage ({analyzed,skipped} as integers — different from analyzer-response.coverage!), chains.
 function minimalSummary() {
-  // Use whatever the existing render-html tests use; below is a plausible shape that must be
-  // adjusted to match report-summary.schema.json's required fields.
   return {
-    verdict: "no-rce-found",
-    findings: [],
-    chains: [],
-    coverage: { partitions_analyzed: 0, partitions_total: 0, gaps: [] },
-    generated_at: "2026-06-20T12:00:00Z"
+    meta: { target: "test-project", stack: "python", date: "2026-06-20", verdict: "no-critique", proof_level: null },
+    severity_counts: { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 },
+    finding_status_counts: { accepted: 0, downgraded: 0, rejected: 0, "not-requested": 0 },
+    coverage: { analyzed: 0, skipped: 0 },
+    chains: []
   };
 }
 
@@ -2025,7 +2058,7 @@ test("render-html --checkpoint-dir hit on second call: stderr 'cache hit', html 
 });
 ```
 
-If `minimalSummary()` doesn't satisfy `reportSummary` (the helper validates it), copy the shape from the existing render-html.test.mjs file's first valid test case.
+`minimalSummary()` is verified against `report-summary.schema.json` (required fields: `meta`, `severity_counts`, `finding_status_counts`, `coverage`, `chains`). No adjustment needed.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2307,16 +2340,16 @@ const CLI = (name) => join(SCRIPTS, `${name}.mjs`);
 const run = (args) => spawnSync(process.execPath, args, { encoding: "utf8" });
 function jw(p, obj) { writeFileSync(p, JSON.stringify(obj)); return p; }
 
-// Same minimal valid shapes as Tasks 7-10. Inspect the existing test files for the same helpers
-// and substitute the real schema-acceptable shape if any of these fail validation.
+// Schema-valid minimal inputs (same as Tasks 7-10; see those tasks for schema references).
 const minAllocInput = (vectors) => ({ budget: 12, vectors });
-const minAggInput = () => ({ analyzer_responses: [] });
-const minAVInput = () => ({ findings: [], chains: [], verifier_responses: [] });
+const minAggInput = () => ({ findings: [] });
+const minAVInput = () => ({ findings: [], chains: [], batches: [] });
 const minSummary = () => ({
-  verdict: "no-rce-found",
-  findings: [], chains: [],
-  coverage: { partitions_analyzed: 0, partitions_total: 0, gaps: [] },
-  generated_at: "2026-06-20T12:00:00Z"
+  meta: { target: "test-project", stack: "python", date: "2026-06-20", verdict: "no-critique", proof_level: null },
+  severity_counts: { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 },
+  finding_status_counts: { accepted: 0, downgraded: 0, rejected: 0, "not-requested": 0 },
+  coverage: { analyzed: 0, skipped: 0 },
+  chains: []
 });
 
 function setupProject() {
@@ -2420,9 +2453,13 @@ test("SP5 agent-response-cache: store then lookup hit (assembly with realistic d
       join(PLUGIN_ROOT, "skills", "audit", "SKILL.md")
     ]
   };
-  // Use a minimal valid analyzer-response — same fallback rule as Task 6: if the schema rejects
-  // this shape, peek at the schema and add the required fields here.
-  const validatedResponse = { partition_id: "py:web", findings: [] };
+  // Schema-valid analyzer-response (matches the validAnalyzerResponse helper in Task 6's test).
+  const validatedResponse = {
+    partition_id: "py:web",
+    status: "ok",
+    findings: [],
+    coverage: { analyzed: ["src/a.py", "src/b.py"], skipped: [] }
+  };
 
   const storeIn = jw(join(projectDir, ".oswe", "tmp", "arc-store.json"), {
     checkpoint_dir, plugin_root: PLUGIN_ROOT, kind: "analyzer-response",
@@ -2446,7 +2483,7 @@ test("SP5 agent-response-cache: store then lookup hit (assembly with realistic d
 });
 ```
 
-If `validatedResponse = { partition_id: "py:web", findings: [] }` or any `min*Input` fails validation against its respective schema, peek at `skills/audit/schemas/*.schema.json` (analyzer-response, report-summary, etc.) to learn the exact required fields and add them to the test stub. The point of this test is the cache machinery — the payload shape just needs to be schema-valid.
+All payloads above are schema-verified against their respective schemas (`analyzer-response`, `report-summary`) and CLI contracts (`aggregate-findings.mjs:89`, `apply-verdicts.mjs:348`). No adjustment expected.
 
 - [ ] **Step 2: Run the e2e resume test to verify it passes**
 
