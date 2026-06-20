@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "report.schema.json",
+  "title": "OSWE Canonical Run Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run", "coverage", "findings", "chains", "verdicts"],
+  "properties": {
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "generated", "scope"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "generated": { "type": "string", "minLength": 1 },
+        "scope": { "type": "array", "items": { "type": "string" } },
+        "benchmark_test_ids": { "type": "array", "items": { "type": "string", "pattern": "^BenchmarkTest[0-9]{5}$" }, "uniqueItems": true },
+        "path_map": { "type": "object" }
+      }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["analyzed", "skipped"],
+      "properties": {
+        "analyzed": { "type": "array", "items": { "type": "string" } },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["path", "reason"],
+            "properties": { "path": { "type": "string" }, "reason": { "type": "string" } }
+          }
+        },
+        "benchmark_cases": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["test_id", "status"],
+            "properties": {
+              "test_id": { "type": "string", "pattern": "^BenchmarkTest[0-9]{5}$" },
+              "status": { "enum": ["analyzed", "deprioritized", "gap", "unsupported", "unreadable"] },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "findings": { "type": "array", "items": { "$ref": "final-finding.schema.json" } },
+    "chains": { "type": "array", "items": { "$ref": "chain.schema.json" } },
+    "verdicts": { "type": "array", "items": { "$ref": "verdict.schema.json" } },
+    "lead_adjudications": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["lead_id", "outcome"],
+        "properties": {
+          "lead_id": { "type": "string", "pattern": "^L[0-9]{3,}$" },
+          "outcome": { "enum": ["promoted", "refuted", "inconclusive"] },
+          "finding_id": { "type": "string", "pattern": "^(.+-F[0-9]{3,}|OSWE-[0-9]+)$" },
+          "reason": { "type": "string", "minLength": 1 },
+          "test_id": { "type": "string", "pattern": "^BenchmarkTest[0-9]{5}$" },
+          "location": { "$ref": "finding.schema.json#/$defs/fileline" }
+        },
+        "allOf": [
+          { "if": { "properties": { "outcome": { "const": "promoted" } }, "required": ["outcome"] }, "then": { "required": ["finding_id"] } },
+          { "if": { "properties": { "outcome": { "const": "refuted" } }, "required": ["outcome"] }, "then": { "required": ["reason"] } },
+          { "if": { "properties": { "outcome": { "const": "inconclusive" } }, "required": ["outcome"] }, "then": { "required": ["reason"] } }
+        ]
+      }
+    }
+  }
+}

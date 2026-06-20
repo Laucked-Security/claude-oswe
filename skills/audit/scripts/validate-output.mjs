@@ -10,6 +10,7 @@ const KIND_TO_EXPORT = {
   "final-finding": "finalFinding",
   "chain": "chain",
   "verdict": "verdict",
+  "report": "report",
   "checkpoint-manifest": "checkpointManifest"
 };
 
