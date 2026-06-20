@@ -8,7 +8,7 @@
 
 [![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Tests: 222 passing](https://img.shields.io/badge/tests-222%20passing-brightgreen)
+![Tests: 292 passing](https://img.shields.io/badge/tests-292%20passing-brightgreen)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
@@ -30,9 +30,10 @@ positives on safe code, no exploit chain, no proof, no reproducibility. That's n
 `oswe` is built to **not do that**:
 
 - **Determinism where it matters.** Severity, dedup, and the "is this a Critical unauth-RCE?" decision
-  are **not** left to the model — they run in tested, dependency-free Node helpers with **222 unit
-  tests** (190 pipeline + 32 benchmark, including an end-to-end replay smoke test that drives the
-  full helper chain via real CLIs with pre-baked responses). The model *finds*; the helpers *decide*.
+  are **not** left to the model — they run in tested, dependency-free Node helpers with **292 unit
+  tests** (260 pipeline + 32 benchmark, including two end-to-end replay tests that drive the full
+  helper chain via real CLIs with pre-baked responses — one for the no-cache path, one for the
+  kill-then-resume cache path). The model *finds*; the helpers *decide*.
 - **A verifier that pushes back.** Every candidate chain and high-severity finding is re-checked by an
   independent verifier that can **downgrade or reject** — it doesn't rubber-stamp the analyzer.
 - **Schema-gated I/O.** Each agent response is validated against a JSON Schema before it's trusted; a
@@ -62,14 +63,23 @@ self-contained, zero-dependency file (AJV is a **dev-only** tool used to regener
 ## Usage
 
 ```text
-/oswe:audit                # audit the whole project
-/oswe:audit src/api        # restrict to a sub-path (kept inside the project root)
+/oswe:audit                              # audit the whole project
+/oswe:audit src/api                      # restrict to a sub-path (kept inside the project root)
 /oswe:audit --sarif results.sarif        # also adjudicate a SAST's findings (Semgrep/CodeQL SARIF)
 /oswe:audit --sarif results.sarif src/api  # ...restricted to a sub-path
+/oswe:audit --concurrency 8              # raise analyzer/verifier throughput (1..16, default 4)
 ```
 
 The audit **never auto-runs** (`disable-model-invocation: true`) — it triggers only on the explicit
 command. A timestamped report is written to `.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.{md,html}`.
+
+**Kill-then-resume** (SP5 v1). Long audits on big repos are now interruption-safe: every helper +
+every validated agent response is checkpointed under `.oswe/checkpoints/<run-id>/` keyed by input
++ helper-version + plugin-contract digest. Kill the run with `Ctrl-C`, relaunch the same command,
+and the already-validated work is reused — the helpers short-circuit on cache hit, the analyzer +
+verifier dispatches are skipped on cache hit, and the final report is produced again without
+re-paying for the LLM passes that already succeeded. The checkpoint dir is purged at clean exit
+(secrets are bounded to the kill→resume window, same trust model as `.oswe/tmp/`).
 
 ### Example run (abridged)
 
@@ -135,11 +145,12 @@ breakdown, and honest caveats: [`benchmark/BENCHMARK.md`](benchmark/BENCHMARK.md
 ## How it works
 
 ```text
-recon → partition (by module / framework / auth boundary)
-      → analyze   (parallel read-only oswe-analyzer subagents, max 4)
-      → aggregate/dedupe   (deterministic Node helper, stable OSWE-N ids)
-      → build chains  → verify  (independent oswe-verifier, bound batches)
-      → apply verdicts (deterministic Critical gating) → report (.md + .html)
+parse-args → recon → partition (by module / framework / auth boundary)
+           → analyze   (parallel read-only oswe-analyzer subagents, max <concurrency>, default 4)
+           → aggregate/dedupe   (deterministic Node helper, stable OSWE-N ids)
+           → build chains  → verify  (independent oswe-verifier, bound batches)
+           → apply verdicts (deterministic Critical gating) → report (.md + .html)
+           → finalize checkpoint (clean exit) — or leave it on kill, for the next run to resume
 ```
 
 - **Read-only agents.** The analyzer/verifier subagents cannot modify your code.
@@ -147,10 +158,18 @@ recon → partition (by module / framework / auth boundary)
   anything escaping the project root (`../`, symlinks, sibling-prefix tricks).
 - **Critical gating.** A chain is `Critical` **only if** the verifier accepted it end-to-end, every
   member finding is accepted, the entry is `unauthenticated`, and the impact is `unauth-rce`.
+- **Configurable throughput.** `--concurrency N` (1..16, default 4) caps parallel analyzer +
+  verifier dispatches. Independent of the 12-partition coverage budget — both still apply.
+- **Implicit resume.** Same command after a kill picks up where the previous run left off:
+  helpers detect their own cached output by content+version digest, agent responses are reused
+  only if they cleared every downstream gate (schema + partition binding + lead coverage +
+  validate-batch + global preflight). Editing user code, an analyzer reference, or `SKILL.md`
+  invalidates the affected cache entries automatically.
 - **Secrets never leave.** Discovered secret values are `[REDACTED]`; only `file:line` is cited.
   Intermediate `.oswe/tmp/` files are purged at start, end, and on any abort.
+  `.oswe/checkpoints/` is gitignored and purged at clean exit (same trust model).
 
-The seven JSON Schemas live in [`skills/audit/schemas/`](skills/audit/schemas/); the deterministic
+The nine JSON Schemas live in [`skills/audit/schemas/`](skills/audit/schemas/); the deterministic
 helpers and their tests in [`skills/audit/scripts/`](skills/audit/scripts/).
 
 ---
@@ -207,7 +226,7 @@ The runtime validator [`skills/audit/scripts/validators.mjs`](skills/audit/scrip
 helper inlined). Run the suites (Node ≥ 20 only, no install):
 
 ```bash
-( cd skills/audit/scripts && node --test )          # 190 pipeline tests
+( cd skills/audit/scripts && node --test )          # 260 pipeline tests
 ( cd benchmark && node --test )                     # 32 benchmark-engine tests
 node .github/scripts/check-structure.mjs            # stacks / references / fixtures-markers gate
 ```
