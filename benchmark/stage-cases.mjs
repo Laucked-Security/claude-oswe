@@ -109,13 +109,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   writeFileSync(`${outBase}/${label}.sarif`, JSON.stringify(filtered, null, 2));
 
   // Staging manifest: the reproducible STAGED scope (feeds report.json run.benchmark_test_ids[]).
+  // Written INSIDE the stage dir (per-scope) so per-category staging does not clobber one shared file.
   // NB: this is the staged set, NOT the analyzed set — the budget may deprioritize some (#R3.3/#R4.1).
-  writeFileSync(`${outBase}/staged.json`, JSON.stringify({ generated: new Date().toISOString().slice(0, 10), label, count: ids.length, staged: ids }, null, 2) + "\n");
+  writeFileSync(`${stageRel}/staged.json`, JSON.stringify({ generated: new Date().toISOString().slice(0, 10), label, count: ids.length, staged: ids }, null, 2) + "\n");
 
   process.stdout.write(
     `staged ${ids.length} ${label} cases + helpers${stagedResources ? " + resources" : ""} -> ${stageRel}\n` +
     `SARIF leads: ${filtered.runs[0].results.length} -> ${outBase}/${label}.sarif\n` +
-    `manifest: ${outBase}/staged.json (${ids.length} ids)\n` +
+    `manifest: ${stageRel}/staged.json (${ids.length} ids)\n` +
     `RUN:  /oswe:audit --sarif ${outBase}/${label}.sarif ${stageRel}\n`
   );
   process.exit(0);

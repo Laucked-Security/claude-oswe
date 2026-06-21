@@ -66,7 +66,8 @@ test("SP6: --all stages every truth case and writes a staging manifest", () => {
   const { corpus, truthP, sarifP, out } = makeCorpus();
   const r = spawnSync(process.execPath, [CLI, "--all", "--truth", truthP, "--sarif", sarifP, "--corpus", corpus, "--out", out], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  const manifest = JSON.parse(readFileSync(join(out, "staged.json"), "utf8"));
+  // Manifest lives in the stage dir (per-scope), so per-category staging doesn't clobber it.
+  const manifest = JSON.parse(readFileSync(join(out, "all", "staged.json"), "utf8"));
   assert.deepEqual([...manifest.staged].sort(), ["BenchmarkTest00001", "BenchmarkTest00002", "BenchmarkTest00003"]);
   assert.ok(existsSync(join(out, "all", "BenchmarkTest00002.java")));
 });
