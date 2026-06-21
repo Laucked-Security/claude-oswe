@@ -136,7 +136,7 @@ test("finding with invalid final_severity fails", () => {
 const finalBase = (overrides = {}) => baseFinding({ finding_id: "OSWE-3", partitions: ["auth"], source_finding_ids: ["auth-F001"], ...overrides });
 
 test("final-finding: accepted requires final fields", () => {
-  const ok = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
+  const ok = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", direct_flow: true }));
   assert.equal(ok.valid, true, JSON.stringify(ok.errors));
   const missing = validate("final-finding", finalBase({ verification_status: "accepted" }));
   assert.equal(missing.valid, false);
@@ -167,6 +167,27 @@ test("final-finding: non-canonical id fails", () => {
 test("final-finding: empty provenance arrays fail", () => {
   const r = validate("final-finding", finalBase({ partitions: [], source_finding_ids: [], verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
   assert.equal(r.valid, false);
+});
+
+// --- SP6 Task 11: accepted High findings require a complete proof chain ---
+test("final-finding: accepted High without transformations or direct_flow fails", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
+  assert.equal(r.valid, false);
+});
+
+test("final-finding: accepted High with direct_flow:true passes", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", direct_flow: true }));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("final-finding: accepted High with a non-empty transformations passes", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", transformations: [{ file: "a", line: 1, desc: "decode then exec" }] }));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("final-finding: accepted Medium is exempt from proof-completeness", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "Medium", final_confidence: "likely" }));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
 
 test("validate-output accepts a well-formed checkpoint-manifest", () => {

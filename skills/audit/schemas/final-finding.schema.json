@@ -16,6 +16,16 @@
       "if": { "properties": { "verification_status": { "const": "rejected" } }, "required": ["verification_status"] },
       "then": { "not": { "anyOf": [ { "required": ["final_severity"] }, { "required": ["final_confidence"] } ] } },
       "else": { "required": ["final_severity", "final_confidence"] }
+    },
+    {
+      "$comment": "SP6: an accepted/downgraded High finding must carry a complete proof — a non-empty transformations chain OR an explicit direct_flow:true. rejected findings have no final_severity, so they never match.",
+      "if": { "properties": { "final_severity": { "const": "High" } }, "required": ["final_severity"] },
+      "then": {
+        "anyOf": [
+          { "properties": { "transformations": { "type": "array", "minItems": 1 } }, "required": ["transformations"] },
+          { "properties": { "direct_flow": { "const": true } }, "required": ["direct_flow"] }
+        ]
+      }
     }
   ]
 }

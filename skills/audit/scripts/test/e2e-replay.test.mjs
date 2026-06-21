@@ -120,6 +120,7 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
       source: { file: "a/app.py", line: 3, symbol: "request.args.get", kind: "http-param" },
       sink:   { file: "a/app.py", line: 4, symbol: "render_template_string", kind: "template-render" },
       auth: "unauthenticated",
+      direct_flow: true, // raw source->sink (SSTI), no intervening transformation — SP6 proof completeness
       provisional_severity: "High",
       confidence: "strong static proof",                    // Pinned per spec §3.5 — drives final_confidence after apply.
       verification_status: "not-requested"

@@ -24,6 +24,7 @@ const finding = (id, sev = "High") => ({
   provisional_severity: sev,
   confidence: "strong static proof",
   verification_status: "not-requested",
+  direct_flow: true, // SP6: accepted High final-findings need a complete proof; this is a raw source->sink
   partitions: ["auth"],
   source_finding_ids: ["src-" + id]
 });

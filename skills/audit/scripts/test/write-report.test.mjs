@@ -13,7 +13,7 @@ const finalFinding = {
   sink: { file: "b", line: 2, symbol: "q", kind: "query" },
   auth: "unauthenticated", provisional_severity: "High", confidence: "strong static proof",
   verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof",
-  partitions: ["auth"], source_finding_ids: ["auth-F001"]
+  direct_flow: true, partitions: ["auth"], source_finding_ids: ["auth-F001"]
 };
 const chain = {
   chain_id: "CHAIN-1",
