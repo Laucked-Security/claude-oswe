@@ -77,3 +77,12 @@ test("SP6: --all does not require --category or --subset", () => {
   const r = spawnSync(process.execPath, [CLI, "--all", "--truth", truthP, "--sarif", sarifP, "--corpus", corpus, "--out", out], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
 });
+
+test("SP6: --category X --all stages the FULL category (no --subset)", () => {
+  const { corpus, truthP, sarifP, out } = makeCorpus(); // truth: 00001 cmdi, 00002 sqli, 00003 xss
+  const r = spawnSync(process.execPath, [CLI, "--category", "cmdi", "--all", "--truth", truthP, "--sarif", sarifP, "--corpus", corpus, "--out", out], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const manifest = JSON.parse(readFileSync(join(out, "cmdi", "staged.json"), "utf8"));
+  assert.deepEqual(manifest.staged, ["BenchmarkTest00001"]); // only the cmdi case, not the subset of 8
+  assert.ok(existsSync(join(out, "cmdi", "BenchmarkTest00001.java")));
+});
