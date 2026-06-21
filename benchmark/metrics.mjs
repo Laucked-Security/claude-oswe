@@ -26,7 +26,9 @@ function validateLedger(ledger, truth) {
   for (const k of Object.keys(ledger)) if (!topAllowed.has(k)) return `unknown top-level ledger field: ${k}`;
   for (const k of ["dataset", "subset", "generated"]) if (typeof ledger[k] !== "string" || !ledger[k]) return `ledger.${k} must be a non-empty string`;
   const seen = new Set();
-  const allowed = new Set(["test_id", "semgrep_flagged", "oswe_covered", "oswe_adjudication", "oswe_independent", "cwe"]);
+  const allowed = new Set(["test_id", "semgrep_flagged", "oswe_covered", "oswe_adjudication", "oswe_independent", "cwe",
+    "oswe_attempted", "accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings",
+    "accepted_critical_chains", "proof_complete_critical_chains", "chain_reached_rce"]);
   for (const e of ledger.entries) {
     for (const k of Object.keys(e)) if (!allowed.has(k)) return `unknown ledger field: ${k}`;
     if (!/^BenchmarkTest\d{5}$/.test(e.test_id)) return `bad test_id: ${e.test_id}`;
