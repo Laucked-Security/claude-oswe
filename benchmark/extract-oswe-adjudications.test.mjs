@@ -64,6 +64,28 @@ test("refuted/promoted leads resolve to their own case, not mixed (#R3.2, #R4.2)
   assert.equal(map.BenchmarkTest00013.adjudication, "promoted");
 });
 
+test("refuted + inconclusive leads on one case -> inconclusive, order-independent (#R5.3)", () => {
+  const base = { run: { run_id: "r", generated: "g", scope: [] }, coverage: { analyzed: [], skipped: [], benchmark_cases: [{ test_id: "BenchmarkTest00020", status: "analyzed" }] }, findings: [], chains: [], verdicts: [] };
+  const ref = { lead_id: "L001", outcome: "refuted", reason: "r", test_id: "BenchmarkTest00020" };
+  const inc = { lead_id: "L002", outcome: "inconclusive", reason: "r", test_id: "BenchmarkTest00020" };
+  const a = extractAdjudications([{ ...base, lead_adjudications: [ref, inc] }]);
+  const b = extractAdjudications([{ ...base, lead_adjudications: [inc, ref] }]);
+  assert.equal(a.BenchmarkTest00020.adjudication, "inconclusive");
+  assert.equal(b.BenchmarkTest00020.adjudication, "inconclusive");
+});
+
+test("a case is refuted only when every lead is refuted; promoted always wins (#R5.3)", () => {
+  const base = { run: { run_id: "r", generated: "g", scope: [] }, coverage: { analyzed: [], skipped: [], benchmark_cases: [{ test_id: "BenchmarkTest00021", status: "analyzed" }] }, findings: [], chains: [], verdicts: [] };
+  const allRefuted = extractAdjudications([{ ...base, lead_adjudications: [
+    { lead_id: "L001", outcome: "refuted", reason: "r", test_id: "BenchmarkTest00021" },
+    { lead_id: "L002", outcome: "refuted", reason: "r", test_id: "BenchmarkTest00021" }] }]);
+  assert.equal(allRefuted.BenchmarkTest00021.adjudication, "refuted");
+  const withPromoted = extractAdjudications([{ ...base, lead_adjudications: [
+    { lead_id: "L001", outcome: "refuted", reason: "r", test_id: "BenchmarkTest00021" },
+    { lead_id: "L002", outcome: "promoted", finding_id: "OSWE-9", test_id: "BenchmarkTest00021" }] }]);
+  assert.equal(withPromoted.BenchmarkTest00021.adjudication, "promoted");
+});
+
 test("an unrefuted counterexample does not count toward ce_resolved", () => {
   const r = { ...REPORT, verdicts: [
     { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: [{ hypothesis: "h", checked: true, refuted: false }] },

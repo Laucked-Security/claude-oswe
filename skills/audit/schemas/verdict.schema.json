@@ -43,6 +43,9 @@
     { "if": { "properties": { "target_type": { "const": "chain" } }, "required": ["target_type"] },
       "then": { "required": ["transition_verdicts"] } },
     { "if": { "properties": { "verdict": { "const": "downgraded" } }, "required": ["verdict"] },
-      "then": { "required": ["new_severity", "new_confidence"] } }
+      "then": { "required": ["new_severity", "new_confidence"] } },
+    { "$comment": "SP6: an accepted/downgraded FINDING verdict must carry a non-empty counterexamples[] (the refutation checklist). rejected findings and chain verdicts are exempt.",
+      "if": { "properties": { "target_type": { "const": "finding" }, "verdict": { "enum": ["accepted", "downgraded"] } }, "required": ["target_type", "verdict"] },
+      "then": { "properties": { "counterexamples": { "type": "array", "minItems": 1 } }, "required": ["counterexamples"] } }
   ]
 }

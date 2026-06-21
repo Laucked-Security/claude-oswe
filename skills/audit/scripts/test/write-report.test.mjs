@@ -23,7 +23,7 @@ const chain = {
   final_impact: "unauth-rce", severity: "Critical", confidence: "strong static proof",
   verification_status: "accepted"
 };
-const verdict = { target_type: "finding", target_id: "OSWE-3", verdict: "accepted", justification: "src->sink a:1->b:2" };
+const verdict = { target_type: "finding", target_id: "OSWE-3", verdict: "accepted", justification: "src->sink a:1->b:2", counterexamples: [{ hypothesis: "auth blocks", checked: true, refuted: true }] };
 
 test("buildReport assembles a report that validates", () => {
   const r = buildReport({ run: run(), coverage: coverage(), findings: [finalFinding], chains: [chain], verdicts: [verdict] });

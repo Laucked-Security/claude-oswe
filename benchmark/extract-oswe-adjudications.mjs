@@ -19,7 +19,9 @@ import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const TID_RE = /BenchmarkTest(\d{5})/;
-const ADJ_RANK = { refuted: 1, inconclusive: 1, promoted: 2 }; // promoted wins; otherwise first-seen.
+// Lattice: a case is "refuted" only if EVERY lead was refuted; any inconclusive lead keeps it
+// inconclusive; any promoted lead wins. Max-rank aggregation -> order-independent (#R5.3).
+const ADJ_RANK = { refuted: 0, inconclusive: 1, promoted: 2 };
 
 function initEntry() {
   return {

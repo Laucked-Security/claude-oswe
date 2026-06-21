@@ -99,8 +99,8 @@ test("verifier-response with multiple verdicts passes", () => {
   const r = validate("verifier-response", {
     status: "ok",
     verdicts: [
-      { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "src->sink confirmed login.php:15" },
-      { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "sanitizer partially blocks, upload.php:40" }
+      { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "src->sink confirmed login.php:15", counterexamples: [{ hypothesis: "auth blocks", checked: true, refuted: true }] },
+      { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "sanitizer partially blocks, upload.php:40", counterexamples: [{ hypothesis: "sanitizer blocks", checked: true, refuted: false }] }
     ]
   });
   assert.equal(r.valid, true, JSON.stringify(r.errors));
@@ -187,8 +187,22 @@ test("verdict: a counterexample with non-boolean checked fails", () => {
   assert.equal(r.valid, false);
 });
 
-test("verdict: counterexamples is optional (backward compat)", () => {
-  const r = validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" });
+test("verdict: accepted finding REQUIRES non-empty counterexamples (#R5.1)", () => {
+  assert.equal(validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }).valid, false);
+  assert.equal(validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: [] }).valid, false);
+});
+
+test("verdict: downgraded finding REQUIRES non-empty counterexamples (#R5.1)", () => {
+  assert.equal(validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x" }).valid, false);
+});
+
+test("verdict: rejected finding does not require counterexamples", () => {
+  const r = validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" });
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("verdict: a chain verdict does not require counterexamples", () => {
+  const r = validate("verdict", { target_type: "chain", target_id: "CHAIN-1", verdict: "accepted", justification: "x", transition_verdicts: [{ from: "entry", to: "OSWE-1", verdict: "accepted", justification: "x" }] });
   assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
 

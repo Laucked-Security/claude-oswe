@@ -430,6 +430,16 @@ Like the HTML, **`report.json` can never fail the audit**: on a non-zero exit (1
 `report.schema.json` validation — a bug to fix; 2 = IO), note `report.json export failed: <reason>`
 in the chat summary and continue — the `.md` remains the guaranteed artifact.
 
+**Benchmark mode (auditing staged OWASP BenchmarkJava cases).** When the scope is a benchmark stage
+(`staged.json` present), the downstream extractor (`extract-oswe-adjudications.mjs`) keys everything on
+`BenchmarkTestNNNNN`, so the report MUST additionally carry: (a) `run.benchmark_test_ids[]` = the staged
+ids from `staged.json` (the staged scope); (b) `coverage.benchmark_cases[]` = one
+`{ test_id, status, reason? }` per staged case, where `status` is `analyzed` for cases whose partition
+the budget actually analyzed and `deprioritized`/`gap`/`unsupported`/`unreadable` otherwise — this is the
+**authoritative** attempted/covered signal, NOT the staged set; and (c) a `test_id` (or
+`location:{file,line}`) on every `lead_adjudications[]` entry so each refuted/promoted lead resolves to
+its case. Outside benchmark mode these fields are omitted.
+
 ### 7.5 Finalize the run checkpoint
 After the **Markdown report is written successfully** AND the HTML and `report.json` attempts have
 finished (success OR the documented non-fatal failures above), finalize the checkpoint:
