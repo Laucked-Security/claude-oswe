@@ -28,6 +28,18 @@ function subsetIdsForCategory(subset, truthCsv, category) {
   return subset.test_ids.filter((id) => cat.get(id) === category);
 }
 
+// All BenchmarkTestNNNNN ids present in the truth CSV (the full-2740 staging set, SP6 --all).
+export function allTruthIds(truthCsv) {
+  const ids = [];
+  for (const l of truthCsv.split(/\r?\n/).slice(1)) {
+    const t = l.trim();
+    if (!t || t.startsWith("#")) continue;
+    const id = t.split(",")[0].trim();
+    if (/^BenchmarkTest\d{5}$/.test(id)) ids.push(id);
+  }
+  return ids;
+}
+
 // Copy a source tree into scope. Includes the file kinds a fixture might read to decide its own
 // behaviour: .java (helpers/sources), .properties (benchmark.properties → hashAlg1/cryptoAlg1), .xml
 // (e.g. xpathi's employees.xml). Other artifacts are skipped to keep the staged scope tight.
@@ -61,20 +73,22 @@ export function filterSarif(sarif, ids, stageRel) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const get = (f) => { const i = args.indexOf(f); return i === -1 ? null : args[i + 1]; };
+  const all = args.includes("--all");
   const category = get("--category"), subsetPath = get("--subset"), truthPath = get("--truth"),
     sarifPath = get("--sarif"), corpus = get("--corpus"), outBase = get("--out") || "external/bench-stage";
-  if (!category || !subsetPath || !truthPath || !sarifPath || !corpus) {
-    process.stderr.write("usage: stage-cases.mjs --category <c> --subset <j> --truth <csv> --sarif <s> --corpus <benchmarkRoot> [--out external/bench-stage]\n");
+  if (!truthPath || !sarifPath || !corpus || (!all && (!category || !subsetPath))) {
+    process.stderr.write("usage: stage-cases.mjs (--all | --category <c> --subset <j>) --truth <csv> --sarif <s> --corpus <benchmarkRoot> [--out external/bench-stage]\n");
     process.exit(2);
   }
-  let subset, truth, sarif;
-  try { subset = JSON.parse(readFileSync(subsetPath, "utf8")); truth = readFileSync(truthPath, "utf8"); sarif = JSON.parse(readFileSync(sarifPath, "utf8")); }
+  let subset = null, truth, sarif;
+  try { truth = readFileSync(truthPath, "utf8"); sarif = JSON.parse(readFileSync(sarifPath, "utf8")); if (subsetPath) subset = JSON.parse(readFileSync(subsetPath, "utf8")); }
   catch (e) { process.stderr.write("cannot read input: " + e.message + "\n"); process.exit(2); }
 
-  const ids = subsetIdsForCategory(subset, truth, category);
-  if (!ids.length) { process.stderr.write(`no subset cases for category "${category}"\n`); process.exit(1); }
+  const label = all ? "all" : category;
+  const ids = all ? allTruthIds(truth) : subsetIdsForCategory(subset, truth, category);
+  if (!ids.length) { process.stderr.write(all ? "truth has no BenchmarkTest cases\n" : `no subset cases for category "${category}"\n`); process.exit(1); }
 
-  const stageRel = `${outBase}/${category}`;
+  const stageRel = `${outBase}/${label}`;
   const testSrc = join(corpus, "testcode");
   const helpersSrc = join(corpus, "helpers");
   mkdirSync(stageRel, { recursive: true });
@@ -92,12 +106,17 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try { copyTree(resourcesSrc, join(stageRel, "resources")); stagedResources = 1; } catch { /* resources optional */ }
 
   const filtered = filterSarif(sarif, ids, stageRel);
-  writeFileSync(`${outBase}/${category}.sarif`, JSON.stringify(filtered, null, 2));
+  writeFileSync(`${outBase}/${label}.sarif`, JSON.stringify(filtered, null, 2));
+
+  // Staging manifest: the reproducible STAGED scope (feeds report.json run.benchmark_test_ids[]).
+  // NB: this is the staged set, NOT the analyzed set — the budget may deprioritize some (#R3.3/#R4.1).
+  writeFileSync(`${outBase}/staged.json`, JSON.stringify({ generated: new Date().toISOString().slice(0, 10), label, count: ids.length, staged: ids }, null, 2) + "\n");
 
   process.stdout.write(
-    `staged ${ids.length} ${category} cases + helpers${stagedResources ? " + resources" : ""} -> ${stageRel}\n` +
-    `SARIF leads: ${filtered.runs[0].results.length} -> ${outBase}/${category}.sarif\n` +
-    `RUN:  /oswe:audit --sarif ${outBase}/${category}.sarif ${stageRel}\n`
+    `staged ${ids.length} ${label} cases + helpers${stagedResources ? " + resources" : ""} -> ${stageRel}\n` +
+    `SARIF leads: ${filtered.runs[0].results.length} -> ${outBase}/${label}.sarif\n` +
+    `manifest: ${outBase}/staged.json (${ids.length} ids)\n` +
+    `RUN:  /oswe:audit --sarif ${outBase}/${label}.sarif ${stageRel}\n`
   );
   process.exit(0);
 }
