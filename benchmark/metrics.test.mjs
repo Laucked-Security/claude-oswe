@@ -117,6 +117,16 @@ test("quality: attempted-aware structural diagnostic", () => {
   assert.equal(q.structural_fn_share, 0.5);
 });
 
+test("quality: per-category attempted coverage drives the revised SP6 gate", () => {
+  const q = computeMetrics(ledgerQ, truthQ).quality;
+  // truthQ real cases: T1+T2 sqli (both attempted), T3 cmdi (attempted), T4 xss (NOT attempted)
+  assert.equal(q.attempted_per_category.sqli, 2);
+  assert.equal(q.attempted_per_category.cmdi, 1);
+  assert.equal(q.attempted_per_category.xss, 0);
+  // the binding constraint: xss has 0 attempted -> gate stays blocked
+  assert.equal(q.min_attempted_per_category, 0);
+});
+
 test("a covered Semgrep-missed real vuln NOT found is an honest hybrid fn (regression guard)", () => {
   const l = { ...ledger, entries: [
     { test_id: "BenchmarkTest00004", semgrep_flagged: false, oswe_covered: true, oswe_adjudication: "no-lead", oswe_independent: false, cwe: 22 }

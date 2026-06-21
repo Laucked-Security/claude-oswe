@@ -1,8 +1,17 @@
 # SP6 — Instrumented Finding-Quality Loop
 
-> **Status:** design spec (rev 3 — incorporates review rounds #1–#6 and #R2.1–#R2.6).
+> **Status:** design spec (rev 6 — implemented; incorporates review rounds #1–#6, #R2–#R5, and the
+> budget-cap gate revision below).
 > Phases 0–1 are unconditional and have a bite-sized plan below.
 > Phases 2–3 are **metric-gated** — they get their own plans only after the Phase-1 ledger read.
+>
+> **Gate revision (rev 6).** The analyzer budget is hard-capped at **12 partitions/run** (`SKILL.md:124`,
+> no CLI override). So `attempted_real_share ≥ 0.80` of the full 2740 would need ~183 audit runs —
+> impractical. The Phase-3 gate is therefore read over a **declared stratified subset of 24 cases/category**
+> (`benchmark/subset-sp6.json`, 264 cases ≈ 22 runs), measured by **`min_attempted_per_category`** rather
+> than a global share. The full-2740 Semgrep baseline (precision 0.693, 552 FP) is kept as the public
+> headroom number; the oswe *quality* gate reads on the declared sample, consistent with the benchmark's
+> existing "declared in-scope subset" philosophy.
 
 **Goal:** Raise the *quality* of findings (proof, refutation, recall, independent discovery) — not the
 volume of reports — and make every step of that improvement a number on the existing benchmark harness,
@@ -65,7 +74,7 @@ Phase 0  Instrument   ──▶ report.json + extractor + enriched ledger (count
 Phase 1  Refute+prove ──▶ counterexample verifier (enforced) + enforced proof  (cheap: prompt+schema)
             │ measure on subset (non-regression) + full 2740
             ▼
-   READ THE LEDGER (only if attempted_real_share ≥ threshold) ── structural vs reasoning?
+   READ THE LEDGER (only if min_attempted_per_category ≥ 12, rev 6) ── structural vs reasoning?
             │
    ┌────────┴─────────┐
    │ mostly reasoning │ mostly structural
@@ -113,11 +122,15 @@ neg-search +       (the expensive bet — only if the ledger earns it)
 - Committed (sanitized — ids + booleans/counters + CWE only): `benchmark/results/ledger-full.json`,
   `benchmark/results/baseline-sp6.json`.
 - The 88-case `subset-owasp.json` is **kept as a precision negative-control**.
+- **Declared oswe sample (rev 6):** the oswe quality gate reads over `benchmark/subset-sp6.json` — a
+  deterministic **24 cases/category** stratified sample (12 real + 12 non-vuln, `make-subset.mjs --per 12`,
+  264 cases). The full-2740 Semgrep baseline stays for the headline FP number; the budget=12 cap makes
+  full-corpus oswe coverage impractical (~183 runs).
 - **Incremental population (#R2.2):** Semgrep+truth cover all 2740 from day one; oswe coverage grows over
   time. Each case carries `oswe_attempted`. `build-ledger.mjs:8` already degrades absent cases safely, but
   **the structural diagnostic excludes `oswe_attempted:false` cases**, and the Phase-3 gate is only read
-  once `attempted_real_share ≥ 0.80` (configurable). Below that threshold the gate read is *blocked*, not
-  guessed.
+  once `min_attempted_per_category ≥ 12` (every category's declared real sample audited). Below that the
+  gate read is *blocked*, not guessed.
 
 Phase 0 ends when: `report.json` emits+validates, the extractor produces `oswe-adjudications.json`, the
 ledger carries attempted+counters, metrics compute, and baselines are committed.
@@ -137,11 +150,12 @@ finding/chain-split (#4), scoped to enforced targets (#R2.6).
 | `ce_resolved_rate` | Σ `ce_resolved_high_findings` ÷ Σ `accepted_high_findings` — **High findings only** (chain edges are already refuted via `transition_verdicts`; chain-level CE deferred) (#R2.6) | Phase 1: **= 1.000** + validator rejects unresolved (#3) |
 | `recall` (full 2740) | tp ÷ (tp+fn), existing scorer | Phase 2: **> baseline**, precision held |
 | `independent_discovery_rate` | `oswe_independent:true` ÷ real findings | Phase 2: **> baseline** |
-| `attempted_real_share` | real cases with `oswe_attempted:true` ÷ real cases | **gate-read precondition ≥ 0.80** (#R2.2) |
+| `attempted_real_share` | real cases with `oswe_attempted:true` ÷ real cases | informational (full-corpus coverage) |
+| `attempted_per_category` / `min_attempted_per_category` | real cases attempted, per category / the min across categories | **gate-read precondition: `min_attempted_per_category ≥ 12`** (the declared 12-real-per-category stratified sample, rev 6) |
 | `real_not_found` | real, `oswe_attempted:true`, neither `promoted` nor independently discovered (matrix-independent, #5) | denominator |
 | `covered_fn` | `real_not_found` with `oswe_covered:true` (reasoning miss) | diagnostic |
 | `structural_fn` | `real_not_found` with `oswe_covered:false` (coverage/structure miss) | diagnostic |
-| `structural_fn_share` | `structural_fn ÷ real_not_found` | **decides Phase 3** (only when `attempted_real_share ≥ 0.80`) |
+| `structural_fn_share` | `structural_fn ÷ real_not_found` | **decides Phase 3** (only when `min_attempted_per_category ≥ 12`, rev 6) |
 
 `real_not_found` is restricted to **attempted** cases and computed independently of `m1/m2/m3` (which
 exclude `not_covered`), so it neither double-counts un-run cases nor contradicts the existing scorer.
@@ -364,10 +378,14 @@ assert.equal(map.BenchmarkTest00013.adjudication, "promoted");
 
 ### Task 13: Phase-1 gate read
 
-- [ ] Run subset + full-2740, emit `report.json`, extract adjudications, rebuild ledgers, run `metrics.mjs`.
+- [ ] Audit the declared stratified sample (`benchmark/subset-sp6.json`, 24/cat ≈ 22 runs at budget 12),
+  emit `report.json`, extract adjudications, rebuild the ledger, run `metrics.mjs`. Keep the full-2740
+  Semgrep baseline for the headline FP number.
 - [ ] **Assert Phase-1 gates:** subset `precision` ≥ 1.000; `finding_proof_complete_rate` = 1.000;
   `chain_proof_complete_rate` = 1.000; `ce_resolved_rate` = 1.000.
-- [ ] **Precondition the Phase-3 read:** only if `attempted_real_share ≥ 0.80`. Otherwise keep auditing.
+- [ ] **Precondition the Phase-3 read (rev 6):** only if `min_attempted_per_category ≥ 12` (every category's
+  declared real sample audited). Otherwise keep auditing. The budget=12 cap makes a global 0.80-of-2740
+  threshold ~183 runs — impractical — so the gate reads on the declared sample instead.
 - [ ] **Read `structural_fn_share`** → high → write **Phase 3** (graph + catalogs); low (`covered_fn`
   dominates) → write **Phase 2** (search passes + negative search + 2× verify), defer the graph.
 - [ ] Record decision + numbers in `benchmark/BENCHMARK.md`.
@@ -410,3 +428,7 @@ assert.equal(map.BenchmarkTest00013.adjudication, "promoted");
 - #R4.2 — `lead_adjudications[]` carry a `test_id`/`location` resolver; multi-case test asserts two
   refuted/promoted leads don't cross-attribute.
 - #R4.3 — §7 closure uses `benchmark_test_ids[]` (plural), consistent with the body.
+- rev 6 — budget is hard-capped at 12 partitions/run, so the Phase-3 gate read moved from
+  `attempted_real_share ≥ 0.80` of 2740 (~183 runs) to `min_attempted_per_category ≥ 12` over a declared
+  24/cat stratified sample (`benchmark/subset-sp6.json`, ≈ 22 runs). `attempted_per_category` /
+  `min_attempted_per_category` added to `metrics.mjs`.

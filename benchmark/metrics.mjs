@@ -99,6 +99,9 @@ export function computeMetrics(ledger, truth) {
   // m1/m2/m3 matrices, so un-run cases never inflate the structural diagnostic (#R2.2, #R2.3, #5). ---
   let acc_high = 0, proof_high = 0, ce_high = 0, acc_chain = 0, proof_chain = 0;
   let real_total = 0, real_attempted = 0, real_independent = 0, real_not_found = 0, covered_fn = 0, structural_fn = 0;
+  // Per-category real-case coverage: the revised SP6 gate reads structural_fn_share only once EVERY
+  // category has enough attempted real cases (the declared stratified sample), not a global 0.80 share.
+  const attempted_per_category = {};
   for (const e of ledger.entries) {
     acc_high += e.accepted_high_findings || 0;
     proof_high += e.proof_complete_high_findings || 0;
@@ -108,7 +111,9 @@ export function computeMetrics(ledger, truth) {
     const t = truth.get(e.test_id);
     if (!t || !t.real) continue;
     real_total++;
+    if (t.category && !(t.category in attempted_per_category)) attempted_per_category[t.category] = 0;
     if (e.oswe_attempted) real_attempted++;
+    if (e.oswe_attempted && t.category) attempted_per_category[t.category]++;
     if (e.oswe_independent === true) real_independent++;
     const found = (e.semgrep_flagged && e.oswe_adjudication === "promoted") || (!e.semgrep_flagged && e.oswe_independent === true);
     if (e.oswe_attempted && !found) {
@@ -124,7 +129,9 @@ export function computeMetrics(ledger, truth) {
     independent_discovery_rate: rate(real_independent, real_total),
     attempted_real_share: rate(real_attempted, real_total),
     real_not_found, covered_fn, structural_fn,
-    structural_fn_share: rate(structural_fn, real_not_found)
+    structural_fn_share: rate(structural_fn, real_not_found),
+    attempted_per_category,
+    min_attempted_per_category: Object.keys(attempted_per_category).length ? Math.min(...Object.values(attempted_per_category)) : 0
   };
 
   return {
