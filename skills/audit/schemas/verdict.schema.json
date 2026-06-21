@@ -23,7 +23,21 @@
         }
       }
     },
-    "justification": { "type": "string", "minLength": 1 }
+    "justification": { "type": "string", "minLength": 1 },
+    "counterexamples": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["hypothesis", "checked", "refuted"],
+        "properties": {
+          "hypothesis": { "type": "string", "minLength": 1 },
+          "checked": { "type": "boolean" },
+          "refuted": { "type": "boolean" },
+          "evidence": { "type": "array", "items": { "$ref": "finding.schema.json#/$defs/fileline" } },
+          "note": { "type": "string" }
+        }
+      }
+    }
   },
   "allOf": [
     { "if": { "properties": { "target_type": { "const": "chain" } }, "required": ["target_type"] },

@@ -127,6 +127,20 @@ export function validateBoundBatch(batch, { findingById, chainById }) {
       const f = findingById.get(v.target_id);
       if (!notIncrease(f.provisional_severity, f.confidence, v.new_severity, v.new_confidence)) return bad(`downgraded finding ${v.target_id} raises severity/confidence`, "verifier-output");
     }
+    // SP6: counterexample resolution — enforced only when the verdict carries counterexamples
+    // (presence is driven by the verifier prompt + the ce_resolved_rate metric, not this gate).
+    // accepted ⇒ every checked counterexample must be refuted; rejected/downgraded ⇒ at least one
+    // checked counterexample must hold (refuted:false), i.e. cite the surviving reason it is not real.
+    if (v.target_type === "finding" && Array.isArray(v.counterexamples) && v.counterexamples.length) {
+      const ces = v.counterexamples;
+      if (v.verdict === "accepted") {
+        if (!ces.every((c) => c.checked === true && c.refuted === true))
+          return bad(`accepted finding ${v.target_id} has an unrefuted counterexample`, "verifier-output");
+      } else if (v.verdict === "rejected" || v.verdict === "downgraded") {
+        if (!ces.some((c) => c.checked === true && c.refuted === false))
+          return bad(`${v.verdict} finding ${v.target_id} cites no holding counterexample`, "verifier-output");
+      }
+    }
     if (v.target_type === "chain") {
       const c = chainById.get(v.target_id);
       const tv = v.transition_verdicts || [];

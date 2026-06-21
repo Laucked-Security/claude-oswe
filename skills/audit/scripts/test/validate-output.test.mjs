@@ -169,6 +169,29 @@ test("final-finding: empty provenance arrays fail", () => {
   assert.equal(r.valid, false);
 });
 
+// --- SP6 Task 8: structured counterexamples on a verdict ---
+const ceVerdict = (counterexamples) => ({ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples });
+
+test("verdict: a well-formed counterexamples[] validates", () => {
+  const r = validate("verdict", ceVerdict([{ hypothesis: "auth blocks the path", checked: true, refuted: true, evidence: [{ file: "a", line: 1 }] }]));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("verdict: a counterexample missing hypothesis fails", () => {
+  const r = validate("verdict", ceVerdict([{ checked: true, refuted: true }]));
+  assert.equal(r.valid, false);
+});
+
+test("verdict: a counterexample with non-boolean checked fails", () => {
+  const r = validate("verdict", ceVerdict([{ hypothesis: "h", checked: "yes", refuted: true }]));
+  assert.equal(r.valid, false);
+});
+
+test("verdict: counterexamples is optional (backward compat)", () => {
+  const r = validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" });
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
 // --- SP6 Task 11: accepted High findings require a complete proof chain ---
 test("final-finding: accepted High without transformations or direct_flow fails", () => {
   const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));

@@ -496,6 +496,42 @@ test("validateBoundBatch: a rejected chain verdict STILL needs the exact transit
   assert.match(r.error, /transition_verdicts do not match/);
 });
 
+// --- SP6 Task 9: counterexample resolution (enforced when counterexamples are present) ---
+const ceFbatch = (verdict, counterexamples) => fbatch(
+  "ok",
+  [{ target_type: "finding", target_id: "OSWE-1", verdict, justification: "x", ...(verdict === "downgraded" ? { new_severity: "Medium", new_confidence: "likely" } : {}), counterexamples }],
+  [{ target_type: "finding", target_id: "OSWE-1" }]
+);
+const ceCheck = (b) => validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
+
+test("validateBoundBatch: accepted finding with an unrefuted counterexample is verifier-output", () => {
+  const r = ceCheck(ceFbatch("accepted", [{ hypothesis: "auth blocks", checked: true, refuted: false }]));
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "verifier-output");
+  assert.match(r.error, /counterexample/);
+});
+
+test("validateBoundBatch: accepted finding with every counterexample refuted passes", () => {
+  const r = ceCheck(ceFbatch("accepted", [{ hypothesis: "auth blocks", checked: true, refuted: true }]));
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("validateBoundBatch: rejected finding whose counterexamples are all refuted is contradictory (verifier-output)", () => {
+  const r = ceCheck(ceFbatch("rejected", [{ hypothesis: "auth blocks", checked: true, refuted: true }]));
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "verifier-output");
+});
+
+test("validateBoundBatch: rejected finding citing a holding counterexample passes", () => {
+  const r = ceCheck(ceFbatch("rejected", [{ hypothesis: "sanitizer breaks payload", checked: true, refuted: false }]));
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("validateBoundBatch: a finding verdict with NO counterexamples is unaffected (presence not enforced here)", () => {
+  const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
+  assert.equal(ceCheck(b).ok, true);
+});
+
 test("validateBoundBatch: finding downgrade-raise is caught pre-retry", () => {
   const v = { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "High", new_confidence: "strong static proof", justification: "x" };
   const b = fbatch("ok", [v], [{ target_type: "finding", target_id: "OSWE-1" }]);
