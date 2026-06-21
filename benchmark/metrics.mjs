@@ -95,10 +95,42 @@ export function computeMetrics(ledger, truth) {
       excluded.not_covered++;
     }
   }
+  // --- SP6 quality block: counter-based (proof/ce), attempt-aware (structural FN). Independent of the
+  // m1/m2/m3 matrices, so un-run cases never inflate the structural diagnostic (#R2.2, #R2.3, #5). ---
+  let acc_high = 0, proof_high = 0, ce_high = 0, acc_chain = 0, proof_chain = 0;
+  let real_total = 0, real_attempted = 0, real_independent = 0, real_not_found = 0, covered_fn = 0, structural_fn = 0;
+  for (const e of ledger.entries) {
+    acc_high += e.accepted_high_findings || 0;
+    proof_high += e.proof_complete_high_findings || 0;
+    ce_high += e.ce_resolved_high_findings || 0;
+    acc_chain += e.accepted_critical_chains || 0;
+    proof_chain += e.proof_complete_critical_chains || 0;
+    const t = truth.get(e.test_id);
+    if (!t || !t.real) continue;
+    real_total++;
+    if (e.oswe_attempted) real_attempted++;
+    if (e.oswe_independent === true) real_independent++;
+    const found = (e.semgrep_flagged && e.oswe_adjudication === "promoted") || (!e.semgrep_flagged && e.oswe_independent === true);
+    if (e.oswe_attempted && !found) {
+      real_not_found++;
+      if (e.oswe_covered) covered_fn++; else structural_fn++;
+    }
+  }
+  const rate = (n, d) => (d > 0 ? n / d : null);
+  const quality = {
+    finding_proof_complete_rate: rate(proof_high, acc_high),
+    chain_proof_complete_rate: rate(proof_chain, acc_chain),
+    ce_resolved_rate: rate(ce_high, acc_high),
+    independent_discovery_rate: rate(real_independent, real_total),
+    attempted_real_share: rate(real_attempted, real_total),
+    real_not_found, covered_fn, structural_fn,
+    structural_fn_share: rate(structural_fn, real_not_found)
+  };
+
   return {
     ok: true, error: null,
     semgrep_raw: finalize(m1), oswe_over_semgrep: finalize(m2), hybrid: finalize(m3),
-    excluded, deltas, cwe_mismatches, total: ledger.entries.length
+    excluded, deltas, cwe_mismatches, total: ledger.entries.length, quality
   };
 }
 

@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ruleCweMap, flaggedByCase, scoreRaw } from "./score-semgrep.mjs";
 import { parseTruthCsv } from "./metrics.mjs";
+
+const CLI = fileURLToPath(new URL("./score-semgrep.mjs", import.meta.url));
 
 // Minimal synthetic SARIF: 2 rules (CWE-78 cmdi, CWE-89 sqli), results on 3 test cases.
 const sarif = {
@@ -65,6 +72,18 @@ test("crypto CWE equivalence: a CWE-326 Semgrep flag counts for a CWE-327 case",
   const m = scoreRaw(["BenchmarkTest05000"], flaggedByCase(cryptoSarif), cryptoTruth);
   // 326 must be accepted for the 327 case -> this is a true positive, NOT a false negative
   assert.deepEqual([m.tp, m.fp, m.fn, m.tn], [1, 0, 0, 0]);
+});
+
+test("SP6: --all scores every truth case (cases.length === truth.size, no --subset)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oswe-ss-"));
+  const sarifP = join(dir, "s.sarif"), truthP = join(dir, "t.csv"), outP = join(dir, "flagged.json");
+  writeFileSync(sarifP, JSON.stringify(sarif));
+  writeFileSync(truthP, "# h\nBenchmarkTest00001,cmdi,true,78\nBenchmarkTest00002,cmdi,false,78\nBenchmarkTest00003,sqli,true,89\nBenchmarkTest00004,sqli,false,89\n");
+  const r = spawnSync(process.execPath, [CLI, "--sarif", sarifP, "--truth", truthP, "--all", "--out", outP], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const flagged = JSON.parse(readFileSync(outP, "utf8"));
+  assert.equal(flagged.cases.length, 4); // === truth.size
+  assert.deepEqual(flagged.cases.map((c) => c.semgrep_flagged), [true, true, false, false]);
 });
 
 test("a flagged map entry per subset case is derivable for the ledger", () => {

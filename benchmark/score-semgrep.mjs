@@ -89,24 +89,27 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const get = (f) => { const i = args.indexOf(f); return i === -1 ? null : args[i + 1]; };
   const sarifPath = get("--sarif"), truthPath = get("--truth"), subsetPath = get("--subset"), outPath = get("--out"), mdPath = get("--md");
-  if (!sarifPath || !truthPath || !subsetPath || !outPath) {
-    process.stderr.write("usage: score-semgrep.mjs --sarif <s> --truth <csv> --subset <json> --out <flagged.json> [--md <md>]\n");
+  const all = args.includes("--all");
+  if (!sarifPath || !truthPath || !outPath || (!subsetPath && !all)) {
+    process.stderr.write("usage: score-semgrep.mjs --sarif <s> --truth <csv> (--subset <json> | --all) --out <flagged.json> [--md <md>]\n");
     process.exit(2);
   }
-  let sarif, truth, subset;
+  let sarif, truth, subset = null;
   try { sarif = JSON.parse(readFileSync(sarifPath, "utf8")); } catch (e) { process.stderr.write("cannot read --sarif: " + e.message + "\n"); process.exit(2); }
   try { truth = parseTruthCsv(readFileSync(truthPath, "utf8")); } catch (e) { process.stderr.write("cannot read --truth: " + e.message + "\n"); process.exit(2); }
-  try { subset = JSON.parse(readFileSync(subsetPath, "utf8")); } catch (e) { process.stderr.write("cannot read --subset: " + e.message + "\n"); process.exit(2); }
+  if (subsetPath) { try { subset = JSON.parse(readFileSync(subsetPath, "utf8")); } catch (e) { process.stderr.write("cannot read --subset: " + e.message + "\n"); process.exit(2); } }
   if (!Array.isArray(sarif.runs) || !sarif.runs.length) { process.stderr.write("SARIF has no runs[]\n"); process.exit(1); }
-  if (!Array.isArray(subset.test_ids) || !subset.test_ids.length) { process.stderr.write("subset has no test_ids[]\n"); process.exit(1); }
+  if (subset && (!Array.isArray(subset.test_ids) || !subset.test_ids.length)) { process.stderr.write("subset has no test_ids[]\n"); process.exit(1); }
 
   const flagged = flaggedByCase(sarif);
   const full = scoreRaw([...truth.keys()], flagged, truth);
-  const sub = scoreRaw(subset.test_ids, flagged, truth);
-  const cases = subset.test_ids
+  // --all scores every truth case; otherwise the subset. The case list drives the emitted ledger input.
+  const caseIds = all ? [...truth.keys()] : subset.test_ids;
+  const sub = scoreRaw(caseIds, flagged, truth);
+  const cases = caseIds
     .filter((id) => truth.has(id))
     .map((id) => ({ test_id: id, semgrep_flagged: accepts(truth.get(id).cwe, flagged.get(id) || new Set()), cwe: truth.get(id).cwe }));
-  const out = { dataset: subset.dataset || "owasp-benchmark-java-1.2", generated: new Date().toISOString().slice(0, 10), semgrep_raw: { full, subset: sub }, cases };
+  const out = { dataset: (subset && subset.dataset) || "owasp-benchmark-java-1.2", generated: new Date().toISOString().slice(0, 10), semgrep_raw: { full, subset: sub }, cases };
   try {
     writeFileSync(outPath, JSON.stringify(out, null, 2) + "\n");
     if (mdPath) writeFileSync(mdPath, toMd(full, sub, cases.length));
