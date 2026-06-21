@@ -92,3 +92,36 @@ node benchmark/metrics.mjs --ledger benchmark/results/ledger-11cat.json \
 ```
 
 Full procedure (corpus clone, Semgrep scan, oswe runs, ledger assembly) is in [`README.md`](README.md).
+
+## SP6 full-2740 baseline (in progress)
+
+SP6 moves the corpus from the saturated 88-case subset to the **full OWASP BenchmarkJava 2740**, where
+there is real headroom. The Semgrep baseline over all 2740 (from the existing `owasp-semgrep.sarif`):
+
+| matrix (2740) | tp | fp | fn | tn | precision | recall | fpr |
+|---|---|---|---|---|---|---|---|
+| `semgrep_raw` | 1248 | 552 | 167 | 773 | **0.693** | 0.882 | **0.417** |
+| `oswe_over_semgrep` (56 adjudicated) | 40 | 0 | 1 | 15 | **1.000** | 0.976 | 0.000 |
+
+**552 Semgrep false positives** are the headroom the adjudication layer must refute across the full
+corpus — the precision story the 88-subset could only hint at. Sanitized baseline:
+[`results/ledger-full.json`](results/ledger-full.json), [`results/baseline-sp6.json`](results/baseline-sp6.json).
+
+**SP6 quality metrics + the Phase-1 gate are intentionally NOT yet readable.** `attempted_real_share`
+is ~0 because the only oswe data so far is the pre-SP6 88-case runs (no `report.json`, hence
+`finding_proof_complete_rate` / `ce_resolved_rate` are `null`). Per the design, the Phase-3 gate read is
+**blocked until `attempted_real_share ≥ 0.80`** (#R2.2) — i.e. it requires the oswe-audit campaign
+(per-case `/oswe:audit` emitting `report.json`, fed through `extract-oswe-adjudications.mjs`). The
+deterministic pipeline (`score-semgrep --all` → `stage-cases --all` → audit → `extract-oswe-adjudications`
+→ `build-ledger` → `metrics`) is wired and tested end-to-end; the remaining step is the audit campaign.
+
+Regenerate the Semgrep side + metrics:
+
+```bash
+node benchmark/score-semgrep.mjs --sarif external/owasp-semgrep.sarif \
+  --truth external/BenchmarkJava/expectedresults-1.2.csv --all --out external/flagged-full.json
+node benchmark/build-ledger.mjs --flagged external/flagged-full.json --oswe <oswe-adjudications.json> \
+  --out benchmark/results/ledger-full.json
+node benchmark/metrics.mjs --ledger benchmark/results/ledger-full.json \
+  --truth external/BenchmarkJava/expectedresults-1.2.csv --out benchmark/results/baseline-sp6.json
+```
