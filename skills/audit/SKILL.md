@@ -413,9 +413,22 @@ no shell interpolation), and run the tested helper under the usual `trap`:
 continue — the `.md` is the guaranteed artifact. The atomic write means a failure never leaves a
 partial `.html`.
 
+**Then emit the canonical `report.json` (alongside the `.md`, same basename).** This is the
+machine-readable artifact downstream tooling (benchmark ledger, baseline/diff, exports) keys on.
+Build a **`[REDACTED]`-safe parts object** `{ run, coverage, findings, chains, verdicts,
+lead_adjudications }` — `run` = `{ run_id, generated: "YYYY-MM-DD", scope }`; `coverage` = the
+aggregated analyzer coverage (`analyzed`, `skipped`); `findings`/`chains`/`verdicts` = the final
+validated objects; `lead_adjudications` = the per-lead outcomes (only when `--sarif` leads were
+ingested) — write it to a literal `.oswe/tmp/` path (file tool, no shell interpolation), and run the
+tested helper under the usual `trap`:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/write-report.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" )`.
+Like the HTML, **`report.json` can never fail the audit**: on a non-zero exit (1 = the parts failed
+`report.schema.json` validation — a bug to fix; 2 = IO), note `report.json export failed: <reason>`
+in the chat summary and continue — the `.md` remains the guaranteed artifact.
+
 ### 7.5 Finalize the run checkpoint
-After the **Markdown report is written successfully** AND the HTML attempt has finished (success
-OR the documented non-fatal failure above), finalize the checkpoint:
+After the **Markdown report is written successfully** AND the HTML and `report.json` attempts have
+finished (success OR the documented non-fatal failures above), finalize the checkpoint:
 `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/checkpoint-lifecycle.mjs" --finalize --run-id "${run_id}" --project-dir "${CLAUDE_PROJECT_DIR}"`.
 This flips the manifest to `completed: true` and removes the run's checkpoint dir.
 
