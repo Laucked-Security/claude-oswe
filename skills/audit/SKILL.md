@@ -320,8 +320,12 @@ fail-loud-on-store-failure is wrong here for the same reason: store is infrastru
   "batch": <wrapper> }` to a temp file and run
   `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-batch.mjs" --file <in>` (exit 0 valid /
   1 invalid / 2 usage|IO). It checks: every verdict targets one of this batch's `expected_targets`, no
-  duplicate verdict, coverage matches `status`, **plus** transition mismatches/contradictions and
-  finding downgrade-raises.
+  duplicate verdict, coverage matches `status`, **plus** transition mismatches/contradictions,
+  finding downgrade-raises, **and counterexample resolution** (an `accepted` finding whose
+  `counterexamples[]` contains an unrefuted entry, or a `rejected`/`downgraded` finding that cites no
+  holding counterexample, is `error_kind:"verifier-output"` — see the verifier's counterexample
+  checklist). Counterexample *presence* is driven by the verifier prompt and measured by the
+  benchmark `ce_resolved_rate`, not hard-gated here.
   **Branch on the failure kind — not every failure is retryable.** On exit 1, read the printed
   `{ ok:false, error, error_kind }`:
   - **schema-invalid response, or `error_kind: "verifier-output"`** → the verifier misbehaved:
