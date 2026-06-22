@@ -560,6 +560,24 @@ test("validateBoundBatch and applyVerdicts agree on a coverage mismatch", () => 
   assert.equal(r.error_kind, "verifier-output");
 });
 
+test("a trust-boundary finding may not be a chain member (orchestrator-input)", () => {
+  const tb = { ...finding("OSWE-1"), vuln_class: "trust-boundary", provisional_severity: "Low" };
+  // chain() references OSWE-1 and OSWE-2 by default; OSWE-1 is now a hygiene finding -> illegal.
+  const r = applyVerdicts({ findings: [tb, finding("OSWE-2")], chains: [chain()], batches: [] });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /trust-boundary/);
+  assert.match(r.error, /chain/);
+  assert.equal(r.error_kind, "orchestrator-input");
+});
+
+test("a normal finding is still allowed as a chain member", () => {
+  // sanity: both members non-trust-boundary -> this particular check does not fire.
+  // (the call may still fail later for unrelated reasons like missing batches; we only assert this
+  //  specific error is NOT the trust-boundary one.)
+  const r = applyVerdicts({ findings: [finding("OSWE-1"), finding("OSWE-2")], chains: [chain()], batches: [] });
+  if (!r.ok) assert.ok(!/trust-boundary/.test(r.error), "must not fail with the trust-boundary error: " + r.error);
+});
+
 test("CLI exits 0/1/2 (spawnSync)", () => {
   const dir = mkdtempSync(join(tmpdir(), "oswe-cli-"));
   const inOk = join(dir, "ok.json");

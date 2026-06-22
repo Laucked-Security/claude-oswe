@@ -125,16 +125,33 @@ demonstrated on real data across all 11 categories.
 00176) — the only category whose sink is itself a shell. A 7th chain (BT00177) was verifier-**rejected**
 on dead-code grounds (`(7*42)-86 = 208 > 200`, always-true ternary) and correctly excluded.
 
-**Recall cost is 8, ALL in `trustbound`** (00031/00098/00251/00324/00325/00327/00424/00425) — oswe
-systematically over-refutes the trust-boundary class (tainted value used as a key / out-of-class
-constant). That is oswe's measured weak spot.
+**Recall cost was 8, ALL in `trustbound`** (00031/00098/00251/00324/00325/00327/00424/00425) — oswe
+refused the trust-boundary class (CWE-501, tainted value written into session/trusted state) because it
+is not an RCE chain. The SP6 gate read (`structural_fn_share` = 0.05 → reasoning, not structural)
+correctly pointed to **Phase 2, not the app graph**, and scoped it to this one class.
 
-**Phase-3 gate read (#R2.2, rev 6): OPEN** — `min_attempted_per_category` = **12** (all 11 categories'
-declared real sample audited). Decision: **`structural_fn_share` = 0.05** (1 structural miss vs 19 covered
-"reasoning" misses out of 20 real-not-found). **→ the residual misses are reasoning, not structural →
-Phase 2 (search passes + negative search + 2× verify, starting with `trustbound`), NOT the app graph
-(Phase 3).** The instrumented loop did its job: it answered the graph-vs-verifier question with evidence,
-and the answer is "not the graph — fix the reasoning."
+### SP7 — trust-boundary hygiene lane (same 24/cat sample, trustbound re-audited)
+
+SP7 added a strictly-bounded **hygiene lane**: CWE-501 trust-boundary violations are recognised as
+**Low** hygiene findings (never Medium+, never a chain member, never an RCE path), accepted by the
+verifier only for a direct attacker→trusted-store crossing. After re-auditing `trustbound` on the 24/cat
+sample:
+
+| matrix | tp | fp | fn | tn | precision | recall | youden |
+|---|---|---|---|---|---|---|---|
+| `oswe_over_semgrep` (152 adjudicated) | 112 | 0 | 0 | 40 | **1.000** | **1.000** | **1.000** |
+
+**All SP7 gates met:** precision **held at 1.000** (the lane adds zero false positives), recall **0.929 →
+1.000** (all 8 trustbound recovered as Low hygiene findings), `hygiene_findings` = **12** (the new
+visibility metric), every trust-boundary finding Low/Info and in **no** chain, and the SP6 gates unchanged
+(`finding_proof_complete_rate`/`chain_proof_complete_rate`/`ce_resolved_rate` = 1.000).
+
+The verifier's dead-code reasoning held: the two non-real trustbound cases (BT00323/00755, the same
+always-true `(7*42)-86 > 200` constant-fold as cmdi's BT00177) were **rejected** with the "value is a
+constant" counterexample. A scoring bug (#R7.1 — a promoted lead carries the analyzer's *raw* finding id,
+which must be resolved to the canonical finding via `source_finding_ids` before honouring the verifier's
+rejection) briefly mis-scored them as false positives; the extractor fix restored precision to 1.000
+without re-auditing.
 
 Sanitized data: [`results/ledger-full.json`](results/ledger-full.json),
 [`results/baseline-sp6.json`](results/baseline-sp6.json).

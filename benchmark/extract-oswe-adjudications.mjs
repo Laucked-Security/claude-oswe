@@ -27,7 +27,8 @@ function initEntry() {
   return {
     oswe_attempted: false, covered: false, independent: false,
     accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0,
-    accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false
+    accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false,
+    hygiene_findings: 0
   };
 }
 
@@ -58,6 +59,14 @@ export function extractAdjudications(reports) {
     }
 
     const findingById = new Map((report.findings || []).map((f) => [f.finding_id, f]));
+    // A lead_adjudication carries the ANALYZER-stage raw finding_id (partition-scoped, e.g. "p07-F001"),
+    // but after aggregation the verifier's verdict is on the CANONICAL finding (OSWE-N), which lists the
+    // raw ids in source_finding_ids. Map raw id -> canonical finding so a lead promoted by the analyzer
+    // but rejected by the verifier resolves correctly (#R7.1, generalises #R6.1).
+    const findingByRawId = new Map();
+    for (const f of report.findings || []) {
+      for (const raw of f.source_finding_ids || []) findingByRawId.set(raw, f);
+    }
     const verdictByFid = new Map(
       (report.verdicts || []).filter((v) => v.target_type === "finding").map((v) => [v.target_id, v])
     );
@@ -76,6 +85,9 @@ export function extractAdjudications(reports) {
             vd.counterexamples.every((c) => c.checked === true && c.refuted === true)) {
           e.ce_resolved_high_findings++;
         }
+      }
+      if (f.vuln_class === "trust-boundary" && f.verification_status === "accepted") {
+        e.hygiene_findings++;
       }
     }
 
@@ -105,7 +117,7 @@ export function extractAdjudications(reports) {
       if (!tid) continue;
       let outcome = la.outcome;
       if (outcome === "promoted" && la.finding_id) {
-        const f = findingById.get(la.finding_id);
+        const f = findingById.get(la.finding_id) || findingByRawId.get(la.finding_id);
         if (f && f.verification_status === "rejected") outcome = "refuted";
       }
       const e = ensure(tid);

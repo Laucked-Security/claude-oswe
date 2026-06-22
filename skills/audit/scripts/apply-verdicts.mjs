@@ -197,6 +197,7 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
   for (const c of chains) {
     for (const id of c.finding_ids) {
       if (!findingById.has(id)) return fail(`chain ${c.chain_id} references unknown finding ${id}`, "orchestrator-input");
+      if (findingById.get(id).vuln_class === "trust-boundary") return fail(`chain ${c.chain_id} references trust-boundary hygiene finding ${id} (trust-boundary findings are never chain members)`, "orchestrator-input");
     }
   }
 

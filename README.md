@@ -8,7 +8,7 @@
 
 [![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Tests: 337 passing](https://img.shields.io/badge/tests-337%20passing-brightgreen)
+![Tests: 346 passing](https://img.shields.io/badge/tests-346%20passing-brightgreen)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
@@ -30,8 +30,8 @@ positives on safe code, no exploit chain, no proof, no reproducibility. That's n
 `oswe` is built to **not do that**:
 
 - **Determinism where it matters.** Severity, dedup, and the "is this a Critical unauth-RCE?" decision
-  are **not** left to the model — they run in tested, dependency-free Node helpers with **337 unit
-  tests** (286 pipeline + 51 benchmark, including two end-to-end replay tests that drive the full
+  are **not** left to the model — they run in tested, dependency-free Node helpers with **346 unit
+  tests** (291 pipeline + 55 benchmark, including two end-to-end replay tests that drive the full
   helper chain via real CLIs with pre-baked responses — one for the no-cache path, one for the
   kill-then-resume cache path). The model *finds*; the helpers *decide*.
 - **A verifier that pushes back — by refutation.** Every candidate chain and high-severity finding is
@@ -82,8 +82,14 @@ source→sink proof chain, and every accept/downgrade verdict carries a structur
 checklist the verifier had to refute. These are enforced deterministically (schema + `apply-verdicts`)
 and measured on the benchmark (`finding_proof_complete_rate`, `ce_resolved_rate`). On the OWASP
 BenchmarkJava stratified sample (24/category, 11 categories) oswe scores **precision 1.000 / recall
-0.929** over Semgrep, refuting Semgrep's false positives while keeping a complete proof for each promotion.
-See [`benchmark/BENCHMARK.md`](benchmark/BENCHMARK.md).
+1.000** over Semgrep, refuting Semgrep's false positives while keeping a complete proof for each promotion.
+
+**Trust-boundary hygiene lane** (SP7). On top of the RCE-chain core, obvious CWE-501 trust-boundary
+violations (attacker data written into trusted/session state) are reported as **Low/Info hygiene
+findings** — never a chain member, never an RCE path, accepted by the verifier only for a direct
+attacker→trusted-store crossing. This recovered the 8 previously-missed trustbound cases (recall
+0.929 → 1.000) without adding a single false positive. *OSWE-core for exploit chains, plus explicit
+low-severity hygiene findings when the evidence is clean.* See [`benchmark/BENCHMARK.md`](benchmark/BENCHMARK.md).
 
 **Kill-then-resume** (SP5 v1). Long audits on big repos are now interruption-safe: every helper +
 every validated agent response is checkpointed under `.oswe/checkpoints/<run-id>/` keyed by input
@@ -238,8 +244,8 @@ The runtime validator [`skills/audit/scripts/validators.mjs`](skills/audit/scrip
 helper inlined). Run the suites (Node ≥ 20 only, no install):
 
 ```bash
-( cd skills/audit/scripts && node --test )          # 286 pipeline tests
-( cd benchmark && node --test )                     # 51 benchmark-engine tests
+( cd skills/audit/scripts && node --test )          # 291 pipeline tests
+( cd benchmark && node --test )                     # 55 benchmark-engine tests
 node .github/scripts/check-structure.mjs            # stacks / references / fixtures-markers gate
 ```
 

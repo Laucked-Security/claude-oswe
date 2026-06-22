@@ -269,3 +269,28 @@ test("validate-output rejects a checkpoint-manifest with bad concurrency range",
   });
   assert.equal(bad.valid, false);
 });
+
+// --- SP7: trust-boundary hygiene severity invariant ---
+test("trust-boundary finding must be Low or Info", () => {
+  const tb = (sev) => baseFinding({ vuln_class: "trust-boundary", provisional_severity: sev });
+  assert.equal(validate("finding", tb("Low")).valid, true, JSON.stringify(validate("finding", tb("Low")).errors));
+  assert.equal(validate("finding", tb("Info")).valid, true);
+  assert.equal(validate("finding", tb("Medium")).valid, false);
+  assert.equal(validate("finding", tb("High")).valid, false);
+});
+
+test("non-trust-boundary finding keeps the full severity enum", () => {
+  assert.equal(validate("finding", baseFinding({ vuln_class: "sqli", provisional_severity: "High" })).valid, true);
+});
+
+test("final-finding trust-boundary must be Low/Info when not rejected", () => {
+  // finalBase sets accepted + final fields; a High trust-boundary must fail, Low must pass.
+  // NOTE: accepted High findings require a complete proof (transformations or direct_flow:true) per SP6 —
+  // include direct_flow:true so the ONLY reason a High fails is the trust-boundary severity invariant.
+  // provisional_severity must also be Low/Info for trust-boundary (finding.schema.json allOf constraint).
+  const tb = (sev) => finalBase({ vuln_class: "trust-boundary", provisional_severity: "Low", final_severity: sev, final_confidence: "likely", direct_flow: true });
+  assert.equal(validate("final-finding", tb("Low")).valid, true, JSON.stringify(validate("final-finding", tb("Low")).errors));
+  assert.equal(validate("final-finding", tb("High")).valid, false);
+  // a rejected trust-boundary finding has no final_severity, so the invariant does not apply:
+  assert.equal(validate("final-finding", finalBase({ vuln_class: "trust-boundary", provisional_severity: "Low", verification_status: "rejected" })).valid, true);
+});

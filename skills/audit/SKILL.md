@@ -500,15 +500,22 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
 
 ## Report format
 - **Header**: target, detected stack + framework, date, scope, authorization reminder.
-- **Executive summary**: counts per severity + verdict (was an unauth-RCE path found? with what proof level?).
+- **Executive summary**: counts per severity + verdict (was an unauth-RCE path found? with what proof level?). Trust-boundary hygiene findings (CWE-501) are **counted and shown separately** from exploit findings/chains — they do **not** affect the unauth-RCE verdict.
 - **Exploit chains**: each chain step by step (from `chain` objects), proof per transition.
 - **Detailed findings**: one block per finding, showing `verification_status` and a severity chosen by
   status:
   - `accepted` / `downgraded` → **`final_severity`** + `final_confidence`;
   - `not-requested` → `provisional_severity` + `confidence` (unverified);
   - `rejected` → it has **no** final severity by design; show `provisional_severity` struck through /
-    labelled **“refuted”** (do not present it as a live finding). A rejected finding also appears in
+    labelled **”refuted”** (do not present it as a live finding). A rejected finding also appears in
     the annex (§ “Dismissed findings”) with its reason.
+  - Findings with `vuln_class:”trust-boundary”` are **excluded** here; they appear instead in the
+    dedicated **Hygiene / Trust-boundary** section below.
+- **Hygiene / Trust-boundary (CWE-501)**: a **separate** section, placed after exploit findings and
+  visually distinct, for accepted findings with `vuln_class:”trust-boundary”`. These are
+  **non-exploitable hygiene findings** (attacker data written into trusted/session state), always
+  **Low/Info**, and **never** part of an exploit chain or the unauth-RCE verdict. Show each entry with
+  its `source`→`sink` (file:line) and `final_severity`. **If there are none, omit this section.**
 - **Coverage**: analyzed vs skipped + reason. This is where **everything that was NOT a clean
   refutation** is recorded with its cause, sourced from `applyVerdicts`'s **`gaps[]`** plus the
   decisions whose `outcome` is `not-requested`:

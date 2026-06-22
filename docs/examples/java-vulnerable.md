@@ -20,7 +20,8 @@
 |---|---|
 | **Critical** | **1 chain** (CHAIN-1 — unauthenticated RCE) |
 | High | 2 findings (OSWE-1, OSWE-2) |
-| Medium / Low / Info | 0 |
+| **Low** | **1 finding** (OSWE-3 — CWE-501 trust-boundary hygiene) |
+| Medium / Info | 0 |
 
 **Verdict: an unauthenticated remote-code-execution path was found and verified.**
 Proof level: **strong static proof** end-to-end (verifier-accepted, every chain transition accepted).
@@ -28,6 +29,10 @@ Proof level: **strong static proof** end-to-end (verifier-accepted, every chain 
 A remote, unauthenticated attacker sets the client-controllable `X-User-Role: admin` header to pass the
 only authorization check, then supplies a SpEL expression in the `q` parameter of `/admin/eval`, which
 is parsed and evaluated server-side — yielding arbitrary OS command execution with no credentials.
+
+Additionally, `TrustBoundary.java` `store` writes the attacker-controlled `uid` parameter directly into
+the trusted session via `HttpSession.setAttribute` — a **Low** trust-boundary hygiene finding (CWE-501),
+independent of and not part of the RCE chain.
 
 ---
 
