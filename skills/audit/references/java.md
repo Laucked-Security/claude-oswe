@@ -22,6 +22,7 @@
   `disallow-doctype-decl` / external-entity features disabled.
 - **SSRF**: `RestTemplate`, `HttpClient`, `URL.openConnection`, `WebClient` to an attacker host.
 - **Path traversal**: `new File(base, input)` / `Files.newInputStream` without `..` containment.
+- **Trust-boundary (CWE-501):** attacker-controlled data written into session/cookie/trusted server state (`HttpSession.setAttribute`/`putValue`, `response.addCookie`) — a **hygiene** finding (Low/Info), not an RCE sink and never a chain member.
 
 ## Auth boundaries (Spring Security)
 - `@PreAuthorize` / `@Secured` / `@RolesAllowed` on controllers/methods; `SecurityFilterChain` /
@@ -40,7 +41,7 @@
 ```surface
 {
   "sources": ["@RequestParam", "@RequestBody", "@PathVariable", "@RequestHeader", "@CookieValue", "@ModelAttribute", "getParameter", "getHeader", "getCookies", "getInputStream", "getQueryString", "getReader", "X-User-Role", "X-Forwarded-User"],
-  "sinks": ["ObjectInputStream", ".readObject(", "XMLDecoder", "XStream", "@JsonTypeInfo", "Yaml.load", "parseExpression(", ".getValue(", "MVEL.eval", "Runtime.getRuntime().exec", "ProcessBuilder", "Statement.execute", "createNativeQuery", "nativeQuery", "createQuery", "DocumentBuilder", "SAXParser"],
+  "sinks": ["ObjectInputStream", ".readObject(", "XMLDecoder", "XStream", "@JsonTypeInfo", "Yaml.load", "parseExpression(", ".getValue(", "MVEL.eval", "Runtime.getRuntime().exec", "ProcessBuilder", "Statement.execute", "createNativeQuery", "nativeQuery", "createQuery", "DocumentBuilder", "SAXParser", "setAttribute", "putValue", "addCookie"],
   "sanitizers": ["PreparedStatement", "setString(", "ESAPI", "OWASP", "getCanonicalPath"],
   "auth_markers": ["@PreAuthorize", "@Secured", "@RolesAllowed", "SecurityFilterChain", "@EnableWebSecurity"]
 }

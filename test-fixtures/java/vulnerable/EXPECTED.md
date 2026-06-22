@@ -9,3 +9,9 @@ The auditor should report a **Critical** unauthenticated-RCE chain:
    `T(java.lang.Runtime).getRuntime().exec(...)` → RCE.
 
 Chain: unauthenticated → forged `X-User-Role: admin` → SpEL injection → **RCE**.
+
+## Plus a Low hygiene finding (CWE-501 trust-boundary)
+
+`TrustBoundary.java` `store`: the attacker-controlled `uid` parameter is written into the trusted
+session via `HttpSession.setAttribute` — a **Low** trust-boundary hygiene finding, **not** part of the
+RCE chain.
