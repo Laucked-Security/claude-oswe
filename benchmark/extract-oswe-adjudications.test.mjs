@@ -98,6 +98,19 @@ test("a promoted lead whose finding the verifier rejected is net 'refuted' (#R6.
   assert.equal(m.BenchmarkTest00177.adjudication, "refuted"); // oswe ultimately dismissed it
 });
 
+test("a promoted lead referencing a RAW finding_id whose canonical finding was rejected is 'refuted' (#R7.1)", () => {
+  // The analyzer-stage lead carries the partition-scoped raw id (p07-F001); after aggregation the
+  // canonical finding is OSWE-8 with source_finding_ids:[p07-F001], and the verifier rejected OSWE-8.
+  const report = {
+    run: { run_id: "r", generated: "g", scope: [], benchmark_test_ids: ["BenchmarkTest00323"] },
+    coverage: { analyzed: [], skipped: [], benchmark_cases: [{ test_id: "BenchmarkTest00323", status: "analyzed" }] },
+    findings: [{ finding_id: "OSWE-8", verification_status: "rejected", source: { file: "x/BenchmarkTest00323.java", line: 61 }, source_finding_ids: ["trustbound-bench-p07-F001"] }],
+    chains: [], verdicts: [],
+    lead_adjudications: [{ lead_id: "L011", outcome: "promoted", finding_id: "trustbound-bench-p07-F001", test_id: "BenchmarkTest00323" }]
+  };
+  assert.equal(extractAdjudications([report]).BenchmarkTest00323.adjudication, "refuted");
+});
+
 test("a rejected chain with unauth-rce impact does NOT set chain_reached_rce (#R6.2)", () => {
   const base = (vs) => ({
     run: { run_id: "r", generated: "g", scope: [] },
