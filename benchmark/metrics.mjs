@@ -28,7 +28,7 @@ function validateLedger(ledger, truth) {
   const seen = new Set();
   const allowed = new Set(["test_id", "semgrep_flagged", "oswe_covered", "oswe_adjudication", "oswe_independent", "cwe",
     "oswe_attempted", "accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings",
-    "accepted_critical_chains", "proof_complete_critical_chains", "chain_reached_rce"]);
+    "accepted_critical_chains", "proof_complete_critical_chains", "chain_reached_rce", "hygiene_findings"]);
   for (const e of ledger.entries) {
     for (const k of Object.keys(e)) if (!allowed.has(k)) return `unknown ledger field: ${k}`;
     if (!/^BenchmarkTest\d{5}$/.test(e.test_id)) return `bad test_id: ${e.test_id}`;
@@ -97,7 +97,7 @@ export function computeMetrics(ledger, truth) {
   }
   // --- SP6 quality block: counter-based (proof/ce), attempt-aware (structural FN). Independent of the
   // m1/m2/m3 matrices, so un-run cases never inflate the structural diagnostic (#R2.2, #R2.3, #5). ---
-  let acc_high = 0, proof_high = 0, ce_high = 0, acc_chain = 0, proof_chain = 0;
+  let acc_high = 0, proof_high = 0, ce_high = 0, acc_chain = 0, proof_chain = 0, hygiene = 0;
   let real_total = 0, real_attempted = 0, real_independent = 0, real_not_found = 0, covered_fn = 0, structural_fn = 0;
   // Per-category real-case coverage: the revised SP6 gate reads structural_fn_share only once EVERY
   // category has enough attempted real cases (the declared stratified sample), not a global 0.80 share.
@@ -108,6 +108,7 @@ export function computeMetrics(ledger, truth) {
     ce_high += e.ce_resolved_high_findings || 0;
     acc_chain += e.accepted_critical_chains || 0;
     proof_chain += e.proof_complete_critical_chains || 0;
+    hygiene += e.hygiene_findings || 0;
     const t = truth.get(e.test_id);
     if (!t || !t.real) continue;
     real_total++;
@@ -131,7 +132,8 @@ export function computeMetrics(ledger, truth) {
     real_not_found, covered_fn, structural_fn,
     structural_fn_share: rate(structural_fn, real_not_found),
     attempted_per_category,
-    min_attempted_per_category: Object.keys(attempted_per_category).length ? Math.min(...Object.values(attempted_per_category)) : 0
+    min_attempted_per_category: Object.keys(attempted_per_category).length ? Math.min(...Object.values(attempted_per_category)) : 0,
+    hygiene_findings: hygiene
   };
 
   return {

@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const ADJ_FLAGGED = new Set(["promoted", "refuted", "inconclusive"]);
-const SP6_COUNTERS = ["accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings", "accepted_critical_chains", "proof_complete_critical_chains"];
+const SP6_COUNTERS = ["accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings", "accepted_critical_chains", "proof_complete_critical_chains", "hygiene_findings"];
 
 export function buildLedger(flagged, oswe, opts = {}) {
   const entries = [];

@@ -101,3 +101,14 @@ test("a missed case absent from the oswe map -> no-lead, not covered", () => {
   assert.equal(e3.oswe_covered, false);
   assert.equal(e3.oswe_independent, false);
 });
+
+test("SP7: hygiene_findings carried from map entry; absent case defaults to 0", () => {
+  const m = {
+    "BenchmarkTest00001": { adjudication: "promoted", oswe_attempted: true, accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0, accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false, hygiene_findings: 2 }
+  };
+  const ledger = buildLedger(flagged, m, {});
+  const e1 = ledger.entries.find((e) => e.test_id === "BenchmarkTest00001");
+  assert.equal(e1.hygiene_findings, 2, "map entry with hygiene_findings:2 must surface on ledger");
+  const e2 = ledger.entries.find((e) => e.test_id === "BenchmarkTest00002");
+  assert.equal(e2.hygiene_findings, 0, "absent map entry must default hygiene_findings to 0");
+});

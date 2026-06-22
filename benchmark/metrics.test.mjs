@@ -197,3 +197,19 @@ test("subset manifest is valid JSON with test_ids", () => {
   const m = JSON.parse(readFileSync(join(HERE, "subset-owasp.json"), "utf8"));
   assert.ok(Array.isArray(m.test_ids) && m.test_ids.length > 0);
 });
+
+test("SP7: quality.hygiene_findings sums hygiene_findings across ledger entries", () => {
+  const ledgerH = {
+    dataset: "d", subset: "s", generated: "2026-06-22",
+    entries: [
+      { test_id: "BenchmarkTest00001", semgrep_flagged: true, oswe_covered: true, oswe_adjudication: "promoted", oswe_independent: false, cwe: 89, oswe_attempted: true, accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0, accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false, hygiene_findings: 3 },
+      { test_id: "BenchmarkTest00002", semgrep_flagged: true, oswe_covered: false, oswe_adjudication: "not-analyzed", oswe_independent: false, cwe: 89, oswe_attempted: false, accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0, accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false, hygiene_findings: 1 }
+    ]
+  };
+  const truthH = parseTruthCsv(
+    "BenchmarkTest00001,sqli,true,89\nBenchmarkTest00002,sqli,false,89\n"
+  );
+  const r = computeMetrics(ledgerH, truthH);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.quality.hygiene_findings, 4, "sum of hygiene_findings across all entries");
+});

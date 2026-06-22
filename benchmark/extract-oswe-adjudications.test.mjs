@@ -117,3 +117,34 @@ test("an unrefuted counterexample does not count toward ce_resolved", () => {
   const map = extractAdjudications([r]);
   assert.equal(map.BenchmarkTest00008.ce_resolved_high_findings, 1);
 });
+
+test("hygiene_findings: accepted trust-boundary finding increments counter; non-trust-boundary does not", () => {
+  const report = {
+    run: { run_id: "r", generated: "g", scope: [] },
+    coverage: { analyzed: [], skipped: [], benchmark_cases: [
+      { test_id: "BenchmarkTest00042", status: "analyzed" },
+      { test_id: "BenchmarkTest00043", status: "analyzed" }
+    ] },
+    findings: [
+      // trust-boundary + accepted -> should count
+      {
+        finding_id: "OSWE-TB-1", vuln_class: "trust-boundary", verification_status: "accepted",
+        final_severity: "High", source: { file: "org/owasp/benchmark/testcode/BenchmarkTest00042.java", line: 10 }
+      },
+      // trust-boundary + rejected -> should NOT count
+      {
+        finding_id: "OSWE-TB-2", vuln_class: "trust-boundary", verification_status: "rejected",
+        final_severity: "High", source: { file: "org/owasp/benchmark/testcode/BenchmarkTest00042.java", line: 20 }
+      },
+      // non-trust-boundary + accepted -> should NOT count
+      {
+        finding_id: "OSWE-SQLI-1", vuln_class: "sqli", verification_status: "accepted",
+        final_severity: "High", source: { file: "org/owasp/benchmark/testcode/BenchmarkTest00043.java", line: 30 }
+      }
+    ],
+    chains: [], verdicts: [], lead_adjudications: []
+  };
+  const map = extractAdjudications([report]);
+  assert.equal(map.BenchmarkTest00042.hygiene_findings, 1, "one accepted trust-boundary finding on T42");
+  assert.equal(map.BenchmarkTest00043.hygiene_findings, 0, "non-trust-boundary finding must not increment hygiene_findings");
+});

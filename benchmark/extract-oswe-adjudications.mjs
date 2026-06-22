@@ -27,7 +27,8 @@ function initEntry() {
   return {
     oswe_attempted: false, covered: false, independent: false,
     accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0,
-    accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false
+    accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false,
+    hygiene_findings: 0
   };
 }
 
@@ -76,6 +77,9 @@ export function extractAdjudications(reports) {
             vd.counterexamples.every((c) => c.checked === true && c.refuted === true)) {
           e.ce_resolved_high_findings++;
         }
+      }
+      if (f.vuln_class === "trust-boundary" && f.verification_status === "accepted") {
+        e.hygiene_findings++;
       }
     }
 
