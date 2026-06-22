@@ -127,6 +127,25 @@ export function validateBoundBatch(batch, { findingById, chainById }) {
       const f = findingById.get(v.target_id);
       if (!notIncrease(f.provisional_severity, f.confidence, v.new_severity, v.new_confidence)) return bad(`downgraded finding ${v.target_id} raises severity/confidence`, "verifier-output");
     }
+    // SP6: counterexample checklist on FINDING verdicts.
+    //  - PRESENCE: accepted/downgraded findings MUST carry a non-empty counterexamples[] (the
+    //    refutation checklist — schema-required too, gated here so a hand-built batch can't bypass it).
+    //  - RESOLUTION: accepted ⇒ every checked counterexample refuted; rejected/downgraded (when any
+    //    counterexample is present) ⇒ at least one holds (refuted:false), i.e. cites why it is not real.
+    if (v.target_type === "finding") {
+      const ces = Array.isArray(v.counterexamples) ? v.counterexamples : [];
+      if ((v.verdict === "accepted" || v.verdict === "downgraded") && ces.length === 0)
+        return bad(`${v.verdict} finding ${v.target_id} has no counterexamples (refutation checklist required)`, "verifier-output");
+      if (ces.length) {
+        if (v.verdict === "accepted") {
+          if (!ces.every((c) => c.checked === true && c.refuted === true))
+            return bad(`accepted finding ${v.target_id} has an unrefuted counterexample`, "verifier-output");
+        } else if (v.verdict === "rejected" || v.verdict === "downgraded") {
+          if (!ces.some((c) => c.checked === true && c.refuted === false))
+            return bad(`${v.verdict} finding ${v.target_id} cites no holding counterexample`, "verifier-output");
+        }
+      }
+    }
     if (v.target_type === "chain") {
       const c = chainById.get(v.target_id);
       const tv = v.transition_verdicts || [];

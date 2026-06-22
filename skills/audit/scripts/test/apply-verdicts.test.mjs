@@ -24,6 +24,7 @@ const finding = (id, sev = "High") => ({
   provisional_severity: sev,
   confidence: "strong static proof",
   verification_status: "not-requested",
+  direct_flow: true, // SP6: accepted High final-findings need a complete proof; this is a raw source->sink
   partitions: ["auth"],
   source_finding_ids: ["src-" + id]
 });
@@ -71,9 +72,12 @@ function vresp(verdicts, opts = {}) {
   return out;
 }
 
+// SP6: accepted/downgraded finding verdicts must carry a counterexample checklist.
+const REFUTED = [{ hypothesis: "auth boundary blocks the path", checked: true, refuted: true }];
+const HOLDS = [{ hypothesis: "a real sanitizer weakens but does not block", checked: true, refuted: false }];
 const acceptBoth = [
-  { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "a.php:2" },
-  { target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "u.php:4" }
+  { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "a.php:2", counterexamples: REFUTED },
+  { target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "u.php:4", counterexamples: REFUTED }
 ];
 const acceptChain = {
   target_type: "chain", target_id: "CHAIN-1", verdict: "accepted",
@@ -95,8 +99,8 @@ test("fully accepted unauth-rce chain is promoted to Critical", () => {
 
 test("accepted chain with a downgraded member is NOT Critical", () => {
   const verdicts = [
-    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
-    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x", counterexamples: HOLDS },
     acceptChain
   ];
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp(verdicts) });
@@ -107,7 +111,7 @@ test("accepted chain with a downgraded member is NOT Critical", () => {
 test("chain whose member is rejected is itself rejected", () => {
   const verdicts = [
     { target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" },
-    { target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "accepted", justification: "x", counterexamples: REFUTED },
     acceptChain
   ];
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp(verdicts) });
@@ -210,7 +214,7 @@ test("status=error batch carrying verdicts is a verifier-output error (with batc
 });
 
 test("status=ok batch missing an expected target is a verifier-output error", () => {
-  const batches = [{ batch_id: "B7", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }, { target_type: "finding", target_id: "OSWE-2" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }] } }];
+  const batches = [{ batch_id: "B7", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }, { target_type: "finding", target_id: "OSWE-2" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED }] } }];
   const r = applyVerdicts({ findings: bothFindings(), chains: [], batches });
   assert.equal(r.ok, false);
   assert.match(r.error, /must cover all expected/);
@@ -235,7 +239,7 @@ test("a batch expecting an unknown target is an orchestrator-input error", () =>
 });
 
 test("overlapping expected_targets across batches is an orchestrator-input error", () => {
-  const mk = (bid) => ({ batch_id: bid, expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }] } });
+  const mk = (bid) => ({ batch_id: bid, expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED }] } });
   const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], batches: [mk("B1"), mk("B2")] });
   assert.equal(r.ok, false);
   assert.match(r.error, /multiple batches/);
@@ -244,7 +248,7 @@ test("overlapping expected_targets across batches is an orchestrator-input error
 
 test("duplicate verdict target within a batch is a verifier-output error", () => {
   const dup = [
-    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED },
     { target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" }
   ];
   // expected lists OSWE-1 once; the verifier returns two verdicts for it (a verifier bug).
@@ -330,7 +334,7 @@ test("rejecting a low-severity chain does not raise its severity", () => {
 });
 
 test("finding downgraded gets new final severity/confidence", () => {
-  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x" }];
+  const v = [{ target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x", counterexamples: HOLDS }];
   const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], batches: vresp(v) });
   const f = r.findings[0];
   assert.equal(f.verification_status, "downgraded");
@@ -399,8 +403,8 @@ test("a chain downgrade above the CANDIDATE severity is an error", () => {
 test("a 'likely' member caps the accepted chain confidence (no Critical, not strong)", () => {
   // OSWE-2 is downgraded to 'likely' confidence; chain must not become Critical nor claim strong proof.
   const verdicts = [
-    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" },
-    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "High", new_confidence: "likely", justification: "x" },
+    { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED },
+    { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "High", new_confidence: "likely", justification: "x", counterexamples: HOLDS },
     acceptChain
   ];
   const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp(verdicts) });
@@ -426,7 +430,7 @@ const fmap = (...fs) => new Map(fs.map((f) => [f.finding_id, f]));
 const cmap = (...cs) => new Map(cs.map((c) => [c.chain_id, c]));
 
 test("validateBoundBatch: ok batch covering its targets passes", () => {
-  const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
+  const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED }], [{ target_type: "finding", target_id: "OSWE-1" }]);
   assert.equal(validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() }).ok, true);
 });
 
@@ -495,6 +499,50 @@ test("validateBoundBatch: a rejected chain verdict STILL needs the exact transit
   assert.match(r.error, /transition_verdicts do not match/);
 });
 
+// --- SP6 Task 9: counterexample resolution (enforced when counterexamples are present) ---
+const ceFbatch = (verdict, counterexamples) => fbatch(
+  "ok",
+  [{ target_type: "finding", target_id: "OSWE-1", verdict, justification: "x", ...(verdict === "downgraded" ? { new_severity: "Medium", new_confidence: "likely" } : {}), counterexamples }],
+  [{ target_type: "finding", target_id: "OSWE-1" }]
+);
+const ceCheck = (b) => validateBoundBatch(b, { findingById: fmap(finding("OSWE-1")), chainById: cmap() });
+
+test("validateBoundBatch: accepted finding with an unrefuted counterexample is verifier-output", () => {
+  const r = ceCheck(ceFbatch("accepted", [{ hypothesis: "auth blocks", checked: true, refuted: false }]));
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "verifier-output");
+  assert.match(r.error, /counterexample/);
+});
+
+test("validateBoundBatch: accepted finding with every counterexample refuted passes", () => {
+  const r = ceCheck(ceFbatch("accepted", [{ hypothesis: "auth blocks", checked: true, refuted: true }]));
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("validateBoundBatch: rejected finding whose counterexamples are all refuted is contradictory (verifier-output)", () => {
+  const r = ceCheck(ceFbatch("rejected", [{ hypothesis: "auth blocks", checked: true, refuted: true }]));
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "verifier-output");
+});
+
+test("validateBoundBatch: rejected finding citing a holding counterexample passes", () => {
+  const r = ceCheck(ceFbatch("rejected", [{ hypothesis: "sanitizer breaks payload", checked: true, refuted: false }]));
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("validateBoundBatch: accepted finding with NO counterexamples is a verifier-output error (#R5.1)", () => {
+  const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
+  const r = ceCheck(b);
+  assert.equal(r.ok, false);
+  assert.equal(r.error_kind, "verifier-output");
+  assert.match(r.error, /counterexample/);
+});
+
+test("validateBoundBatch: a rejected finding with no counterexamples is fine (not required)", () => {
+  const b = fbatch("ok", [{ target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" }], [{ target_type: "finding", target_id: "OSWE-1" }]);
+  assert.equal(ceCheck(b).ok, true);
+});
+
 test("validateBoundBatch: finding downgrade-raise is caught pre-retry", () => {
   const v = { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "High", new_confidence: "strong static proof", justification: "x" };
   const b = fbatch("ok", [v], [{ target_type: "finding", target_id: "OSWE-1" }]);
@@ -516,7 +564,7 @@ test("CLI exits 0/1/2 (spawnSync)", () => {
   const dir = mkdtempSync(join(tmpdir(), "oswe-cli-"));
   const inOk = join(dir, "ok.json");
   const out = join(dir, "out.json");
-  writeFileSync(inOk, JSON.stringify({ findings: [finding("OSWE-1")], chains: [], batches: vresp([{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }]) }));
+  writeFileSync(inOk, JSON.stringify({ findings: [finding("OSWE-1")], chains: [], batches: vresp([{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED }]) }));
   const ok = spawnSync(process.execPath, [CLI, "--file", inOk, "--out", out]);
   assert.equal(ok.status, 0);
   assert.equal(JSON.parse(readFileSync(out, "utf8")).ok, true);
@@ -536,7 +584,7 @@ test("validate-batch.mjs CLI exits 0/1/2 (spawnSync)", () => {
   const okIn = join(dir, "ok.json");
   writeFileSync(okIn, JSON.stringify({
     findings: [finding("OSWE-1")], chains: [],
-    batch: { batch_id: "B1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }] } }
+    batch: { batch_id: "B1", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "ok", verdicts: [{ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: REFUTED }] } }
   }));
   assert.equal(spawnSync(process.execPath, [VB, "--file", okIn]).status, 0);
 

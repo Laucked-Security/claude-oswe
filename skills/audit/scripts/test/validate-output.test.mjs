@@ -99,8 +99,8 @@ test("verifier-response with multiple verdicts passes", () => {
   const r = validate("verifier-response", {
     status: "ok",
     verdicts: [
-      { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "src->sink confirmed login.php:15" },
-      { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "sanitizer partially blocks, upload.php:40" }
+      { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "src->sink confirmed login.php:15", counterexamples: [{ hypothesis: "auth blocks", checked: true, refuted: true }] },
+      { target_type: "finding", target_id: "OSWE-2", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "sanitizer partially blocks, upload.php:40", counterexamples: [{ hypothesis: "sanitizer blocks", checked: true, refuted: false }] }
     ]
   });
   assert.equal(r.valid, true, JSON.stringify(r.errors));
@@ -136,7 +136,7 @@ test("finding with invalid final_severity fails", () => {
 const finalBase = (overrides = {}) => baseFinding({ finding_id: "OSWE-3", partitions: ["auth"], source_finding_ids: ["auth-F001"], ...overrides });
 
 test("final-finding: accepted requires final fields", () => {
-  const ok = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
+  const ok = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", direct_flow: true }));
   assert.equal(ok.valid, true, JSON.stringify(ok.errors));
   const missing = validate("final-finding", finalBase({ verification_status: "accepted" }));
   assert.equal(missing.valid, false);
@@ -167,6 +167,64 @@ test("final-finding: non-canonical id fails", () => {
 test("final-finding: empty provenance arrays fail", () => {
   const r = validate("final-finding", finalBase({ partitions: [], source_finding_ids: [], verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
   assert.equal(r.valid, false);
+});
+
+// --- SP6 Task 8: structured counterexamples on a verdict ---
+const ceVerdict = (counterexamples) => ({ target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples });
+
+test("verdict: a well-formed counterexamples[] validates", () => {
+  const r = validate("verdict", ceVerdict([{ hypothesis: "auth blocks the path", checked: true, refuted: true, evidence: [{ file: "a", line: 1 }] }]));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("verdict: a counterexample missing hypothesis fails", () => {
+  const r = validate("verdict", ceVerdict([{ checked: true, refuted: true }]));
+  assert.equal(r.valid, false);
+});
+
+test("verdict: a counterexample with non-boolean checked fails", () => {
+  const r = validate("verdict", ceVerdict([{ hypothesis: "h", checked: "yes", refuted: true }]));
+  assert.equal(r.valid, false);
+});
+
+test("verdict: accepted finding REQUIRES non-empty counterexamples (#R5.1)", () => {
+  assert.equal(validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x" }).valid, false);
+  assert.equal(validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: [] }).valid, false);
+});
+
+test("verdict: downgraded finding REQUIRES non-empty counterexamples (#R5.1)", () => {
+  assert.equal(validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x" }).valid, false);
+});
+
+test("verdict: rejected finding does not require counterexamples", () => {
+  const r = validate("verdict", { target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" });
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("verdict: a chain verdict does not require counterexamples", () => {
+  const r = validate("verdict", { target_type: "chain", target_id: "CHAIN-1", verdict: "accepted", justification: "x", transition_verdicts: [{ from: "entry", to: "OSWE-1", verdict: "accepted", justification: "x" }] });
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+// --- SP6 Task 11: accepted High findings require a complete proof chain ---
+test("final-finding: accepted High without transformations or direct_flow fails", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof" }));
+  assert.equal(r.valid, false);
+});
+
+test("final-finding: accepted High with direct_flow:true passes", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", direct_flow: true }));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("final-finding: accepted High with a non-empty transformations passes", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", transformations: [{ file: "a", line: 1, desc: "decode then exec" }] }));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("final-finding: accepted Medium is exempt from proof-completeness", () => {
+  const r = validate("final-finding", finalBase({ verification_status: "accepted", final_severity: "Medium", final_confidence: "likely" }));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
 
 test("validate-output accepts a well-formed checkpoint-manifest", () => {

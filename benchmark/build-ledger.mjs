@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const ADJ_FLAGGED = new Set(["promoted", "refuted", "inconclusive"]);
+const SP6_COUNTERS = ["accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings", "accepted_critical_chains", "proof_complete_critical_chains"];
 
 export function buildLedger(flagged, oswe, opts = {}) {
   const entries = [];
@@ -37,6 +38,11 @@ export function buildLedger(flagged, oswe, opts = {}) {
       e.oswe_covered = o.covered === true;
       e.oswe_independent = e.oswe_covered && o.independent === true;
     }
+    // SP6: attempt status + finding/chain quality counters (from extract-oswe-adjudications.mjs).
+    // Absent map entry degrades safely to not-attempted with zero counters.
+    e.oswe_attempted = o.oswe_attempted === true;
+    for (const k of SP6_COUNTERS) e[k] = Number.isInteger(o[k]) ? o[k] : 0;
+    e.chain_reached_rce = o.chain_reached_rce === true;
     entries.push(e);
   }
   return {

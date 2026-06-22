@@ -92,3 +92,60 @@ node benchmark/metrics.mjs --ledger benchmark/results/ledger-11cat.json \
 ```
 
 Full procedure (corpus clone, Semgrep scan, oswe runs, ledger assembly) is in [`README.md`](README.md).
+
+## SP6 full-2740 baseline (in progress)
+
+SP6 moves the corpus from the saturated 88-case subset to the **full OWASP BenchmarkJava 2740**, where
+there is real headroom. The Semgrep baseline over all 2740 (from the existing `owasp-semgrep.sarif`):
+
+| matrix (2740) | tp | fp | fn | tn | precision | recall | fpr |
+|---|---|---|---|---|---|---|---|
+| `semgrep_raw` | 1248 | 552 | 167 | 773 | **0.693** | 0.882 | **0.417** |
+| `oswe_over_semgrep` (56 adjudicated) | 40 | 0 | 1 | 15 | **1.000** | 0.976 | 0.000 |
+
+**552 Semgrep false positives** are the headroom the adjudication layer must refute across the full
+corpus — the precision story the 88-subset could only hint at. Sanitized baseline:
+[`results/ledger-full.json`](results/ledger-full.json), [`results/baseline-sp6.json`](results/baseline-sp6.json).
+
+### Stratified-sample audit (24/cat, 11 categories audited)
+
+oswe was run over the declared 24-case/category sample (`subset-sp6.json`), emitting `report.json` per
+category, fed through `extract-oswe-adjudications.mjs` → `build-ledger` → `metrics`:
+
+| matrix | tp | fp | fn | tn | precision | recall |
+|---|---|---|---|---|---|---|
+| `oswe_over_semgrep` (152 adjudicated) | 104 | 0 | 8 | 40 | **1.000** | 0.929 |
+
+**Phase-1 quality gates: PASS.** `finding_proof_complete_rate` **1.000**, `chain_proof_complete_rate`
+**1.000**, `ce_resolved_rate` **1.000**, precision **1.000** (no regression) — every accepted High finding
+carried a complete proof chain **and** survived a resolved counterexample checklist. The SP6 thesis,
+demonstrated on real data across all 11 categories.
+
+**cmdi reached Critical:** 6 verified **unauthenticated-RCE chains** (BT00006/00015/00017/00077/00159/
+00176) — the only category whose sink is itself a shell. A 7th chain (BT00177) was verifier-**rejected**
+on dead-code grounds (`(7*42)-86 = 208 > 200`, always-true ternary) and correctly excluded.
+
+**Recall cost is 8, ALL in `trustbound`** (00031/00098/00251/00324/00325/00327/00424/00425) — oswe
+systematically over-refutes the trust-boundary class (tainted value used as a key / out-of-class
+constant). That is oswe's measured weak spot.
+
+**Phase-3 gate read (#R2.2, rev 6): OPEN** — `min_attempted_per_category` = **12** (all 11 categories'
+declared real sample audited). Decision: **`structural_fn_share` = 0.05** (1 structural miss vs 19 covered
+"reasoning" misses out of 20 real-not-found). **→ the residual misses are reasoning, not structural →
+Phase 2 (search passes + negative search + 2× verify, starting with `trustbound`), NOT the app graph
+(Phase 3).** The instrumented loop did its job: it answered the graph-vs-verifier question with evidence,
+and the answer is "not the graph — fix the reasoning."
+
+Sanitized data: [`results/ledger-full.json`](results/ledger-full.json),
+[`results/baseline-sp6.json`](results/baseline-sp6.json).
+
+Regenerate the Semgrep side + metrics:
+
+```bash
+node benchmark/score-semgrep.mjs --sarif external/owasp-semgrep.sarif \
+  --truth external/BenchmarkJava/expectedresults-1.2.csv --all --out external/flagged-full.json
+node benchmark/build-ledger.mjs --flagged external/flagged-full.json --oswe <oswe-adjudications.json> \
+  --out benchmark/results/ledger-full.json
+node benchmark/metrics.mjs --ledger benchmark/results/ledger-full.json \
+  --truth external/BenchmarkJava/expectedresults-1.2.csv --out benchmark/results/baseline-sp6.json
+```

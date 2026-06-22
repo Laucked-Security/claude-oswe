@@ -120,6 +120,7 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
       source: { file: "a/app.py", line: 3, symbol: "request.args.get", kind: "http-param" },
       sink:   { file: "a/app.py", line: 4, symbol: "render_template_string", kind: "template-render" },
       auth: "unauthenticated",
+      direct_flow: true, // raw source->sink (SSTI), no intervening transformation — SP6 proof completeness
       provisional_severity: "High",
       confidence: "strong static proof",                    // Pinned per spec §3.5 — drives final_confidence after apply.
       verification_status: "not-requested"
@@ -184,7 +185,11 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
     verdicts: [{
       target_type: "finding", target_id: "OSWE-1",
       verdict: "accepted",
-      justification: "Substantiated: request.args flows unmodified into render_template_string at a/app.py:4."
+      justification: "Substantiated: request.args flows unmodified into render_template_string at a/app.py:4.",
+      counterexamples: [
+        { hypothesis: "the /a route requires authentication", checked: true, refuted: true, evidence: [{ file: "a/app.py", line: 3 }] },
+        { hypothesis: "render_template_string autoescapes the payload", checked: true, refuted: true, evidence: [{ file: "a/app.py", line: 4 }] }
+      ]
     }]
   };
   // (b) chain batch: accepts CHAIN-1 — chain verdicts REQUIRE transition_verdicts per verdict.schema.json:30.

@@ -28,6 +28,6 @@ test("source_lead_ids must match ^L[0-9]{3,}$", () => {
 });
 
 test("final-finding inherits origin via its $ref to finding (no separate edit needed)", () => {
-  const ff = { ...base, verification_status: "accepted", final_severity: "High", final_confidence: "likely", origin: "sast-lead", source_lead_ids: ["L001"] };
+  const ff = { ...base, verification_status: "accepted", final_severity: "High", final_confidence: "likely", direct_flow: true, origin: "sast-lead", source_lead_ids: ["L001"] };
   assert.equal(validate("final-finding", ff).valid, true, JSON.stringify(validate("final-finding", ff).errors));
 });

@@ -26,7 +26,9 @@ function validateLedger(ledger, truth) {
   for (const k of Object.keys(ledger)) if (!topAllowed.has(k)) return `unknown top-level ledger field: ${k}`;
   for (const k of ["dataset", "subset", "generated"]) if (typeof ledger[k] !== "string" || !ledger[k]) return `ledger.${k} must be a non-empty string`;
   const seen = new Set();
-  const allowed = new Set(["test_id", "semgrep_flagged", "oswe_covered", "oswe_adjudication", "oswe_independent", "cwe"]);
+  const allowed = new Set(["test_id", "semgrep_flagged", "oswe_covered", "oswe_adjudication", "oswe_independent", "cwe",
+    "oswe_attempted", "accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings",
+    "accepted_critical_chains", "proof_complete_critical_chains", "chain_reached_rce"]);
   for (const e of ledger.entries) {
     for (const k of Object.keys(e)) if (!allowed.has(k)) return `unknown ledger field: ${k}`;
     if (!/^BenchmarkTest\d{5}$/.test(e.test_id)) return `bad test_id: ${e.test_id}`;
@@ -93,10 +95,49 @@ export function computeMetrics(ledger, truth) {
       excluded.not_covered++;
     }
   }
+  // --- SP6 quality block: counter-based (proof/ce), attempt-aware (structural FN). Independent of the
+  // m1/m2/m3 matrices, so un-run cases never inflate the structural diagnostic (#R2.2, #R2.3, #5). ---
+  let acc_high = 0, proof_high = 0, ce_high = 0, acc_chain = 0, proof_chain = 0;
+  let real_total = 0, real_attempted = 0, real_independent = 0, real_not_found = 0, covered_fn = 0, structural_fn = 0;
+  // Per-category real-case coverage: the revised SP6 gate reads structural_fn_share only once EVERY
+  // category has enough attempted real cases (the declared stratified sample), not a global 0.80 share.
+  const attempted_per_category = {};
+  for (const e of ledger.entries) {
+    acc_high += e.accepted_high_findings || 0;
+    proof_high += e.proof_complete_high_findings || 0;
+    ce_high += e.ce_resolved_high_findings || 0;
+    acc_chain += e.accepted_critical_chains || 0;
+    proof_chain += e.proof_complete_critical_chains || 0;
+    const t = truth.get(e.test_id);
+    if (!t || !t.real) continue;
+    real_total++;
+    if (t.category && !(t.category in attempted_per_category)) attempted_per_category[t.category] = 0;
+    if (e.oswe_attempted) real_attempted++;
+    if (e.oswe_attempted && t.category) attempted_per_category[t.category]++;
+    if (e.oswe_independent === true) real_independent++;
+    const found = (e.semgrep_flagged && e.oswe_adjudication === "promoted") || (!e.semgrep_flagged && e.oswe_independent === true);
+    if (e.oswe_attempted && !found) {
+      real_not_found++;
+      if (e.oswe_covered) covered_fn++; else structural_fn++;
+    }
+  }
+  const rate = (n, d) => (d > 0 ? n / d : null);
+  const quality = {
+    finding_proof_complete_rate: rate(proof_high, acc_high),
+    chain_proof_complete_rate: rate(proof_chain, acc_chain),
+    ce_resolved_rate: rate(ce_high, acc_high),
+    independent_discovery_rate: rate(real_independent, real_total),
+    attempted_real_share: rate(real_attempted, real_total),
+    real_not_found, covered_fn, structural_fn,
+    structural_fn_share: rate(structural_fn, real_not_found),
+    attempted_per_category,
+    min_attempted_per_category: Object.keys(attempted_per_category).length ? Math.min(...Object.values(attempted_per_category)) : 0
+  };
+
   return {
     ok: true, error: null,
     semgrep_raw: finalize(m1), oswe_over_semgrep: finalize(m2), hybrid: finalize(m3),
-    excluded, deltas, cwe_mismatches, total: ledger.entries.length
+    excluded, deltas, cwe_mismatches, total: ledger.entries.length, quality
   };
 }
 

@@ -1,0 +1,71 @@
+{
+  "ok": true,
+  "error": null,
+  "semgrep_raw": {
+    "tp": 1248,
+    "fp": 552,
+    "fn": 167,
+    "tn": 773,
+    "precision": 0.6933333333333334,
+    "recall": 0.8819787985865725,
+    "fpr": 0.41660377358490563,
+    "youden": 0.46537502500166683
+  },
+  "oswe_over_semgrep": {
+    "tp": 104,
+    "fp": 0,
+    "fn": 8,
+    "tn": 40,
+    "precision": 1,
+    "recall": 0.9285714285714286,
+    "fpr": 0,
+    "youden": 0.9285714285714286
+  },
+  "hybrid": {
+    "tp": 112,
+    "fp": 1,
+    "fn": 19,
+    "tn": 131,
+    "precision": 0.9911504424778761,
+    "recall": 0.8549618320610687,
+    "fpr": 0.007575757575757576,
+    "youden": 0.8473860744853111
+  },
+  "excluded": {
+    "inconclusive": 0,
+    "not_analyzed": 1648,
+    "not_covered": 829
+  },
+  "deltas": {
+    "fp_refuted": 40,
+    "recall_cost": 8,
+    "fn_recovered": 8
+  },
+  "cwe_mismatches": 0,
+  "total": 2740,
+  "quality": {
+    "finding_proof_complete_rate": 1,
+    "chain_proof_complete_rate": 1,
+    "ce_resolved_rate": 1,
+    "independent_discovery_rate": 0.005653710247349823,
+    "attempted_real_share": 0.09328621908127209,
+    "real_not_found": 20,
+    "covered_fn": 19,
+    "structural_fn": 1,
+    "structural_fn_share": 0.05,
+    "attempted_per_category": {
+      "pathtraver": 12,
+      "hash": 12,
+      "trustbound": 12,
+      "crypto": 12,
+      "cmdi": 12,
+      "sqli": 12,
+      "ldapi": 12,
+      "xss": 12,
+      "weakrand": 12,
+      "securecookie": 12,
+      "xpathi": 12
+    },
+    "min_attempted_per_category": 12
+  }
+}

@@ -66,6 +66,33 @@ test("a flagged case missing from the oswe map defaults to not-analyzed (covered
   assert.equal(e2.oswe_covered, false);
 });
 
+test("SP6: ledger carries oswe_attempted + finding/chain counters from the map", () => {
+  const m = {
+    "BenchmarkTest00001": { adjudication: "promoted", oswe_attempted: true, accepted_high_findings: 2, proof_complete_high_findings: 2, ce_resolved_high_findings: 1, accepted_critical_chains: 1, proof_complete_critical_chains: 1, chain_reached_rce: true }
+  };
+  const e1 = buildLedger(flagged, m, {}).entries.find((e) => e.test_id === "BenchmarkTest00001");
+  assert.equal(e1.oswe_attempted, true);
+  assert.equal(e1.accepted_high_findings, 2);
+  assert.equal(e1.proof_complete_high_findings, 2);
+  assert.equal(e1.ce_resolved_high_findings, 1);
+  assert.equal(e1.accepted_critical_chains, 1);
+  assert.equal(e1.proof_complete_critical_chains, 1);
+  assert.equal(e1.chain_reached_rce, true);
+});
+
+test("SP6: a case absent from the map degrades to oswe_attempted:false, counters 0", () => {
+  const e2 = buildLedger(flagged, {}, {}).entries.find((e) => e.test_id === "BenchmarkTest00002");
+  assert.equal(e2.oswe_attempted, false);
+  assert.equal(e2.accepted_high_findings, 0);
+  assert.equal(e2.chain_reached_rce, false);
+});
+
+test("SP6: the enriched ledger still passes metrics.mjs validation", () => {
+  const m = { "BenchmarkTest00001": { adjudication: "promoted", oswe_attempted: true, accepted_high_findings: 1, proof_complete_high_findings: 1, ce_resolved_high_findings: 1 } };
+  const r = computeMetrics(buildLedger(flagged, m, {}), truth);
+  assert.equal(r.ok, true, r.error);
+});
+
 test("a missed case absent from the oswe map -> no-lead, not covered", () => {
   const partial = {};
   const ledger = buildLedger(flagged, partial, {});

@@ -320,8 +320,12 @@ fail-loud-on-store-failure is wrong here for the same reason: store is infrastru
   "batch": <wrapper> }` to a temp file and run
   `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/validate-batch.mjs" --file <in>` (exit 0 valid /
   1 invalid / 2 usage|IO). It checks: every verdict targets one of this batch's `expected_targets`, no
-  duplicate verdict, coverage matches `status`, **plus** transition mismatches/contradictions and
-  finding downgrade-raises.
+  duplicate verdict, coverage matches `status`, **plus** transition mismatches/contradictions,
+  finding downgrade-raises, **and counterexample resolution** (an `accepted` finding whose
+  `counterexamples[]` contains an unrefuted entry, or a `rejected`/`downgraded` finding that cites no
+  holding counterexample, is `error_kind:"verifier-output"` — see the verifier's counterexample
+  checklist). Counterexample *presence* is driven by the verifier prompt and measured by the
+  benchmark `ce_resolved_rate`, not hard-gated here.
   **Branch on the failure kind — not every failure is retryable.** On exit 1, read the printed
   `{ ok:false, error, error_kind }`:
   - **schema-invalid response, or `error_kind: "verifier-output"`** → the verifier misbehaved:
@@ -413,9 +417,32 @@ no shell interpolation), and run the tested helper under the usual `trap`:
 continue — the `.md` is the guaranteed artifact. The atomic write means a failure never leaves a
 partial `.html`.
 
+**Then emit the canonical `report.json` (alongside the `.md`, same basename).** This is the
+machine-readable artifact downstream tooling (benchmark ledger, baseline/diff, exports) keys on.
+Build a **`[REDACTED]`-safe parts object** `{ run, coverage, findings, chains, verdicts,
+lead_adjudications }` — `run` = `{ run_id, generated: "YYYY-MM-DD", scope }`; `coverage` = the
+aggregated analyzer coverage (`analyzed`, `skipped`); `findings`/`chains`/`verdicts` = the final
+validated objects; `lead_adjudications` = the per-lead outcomes (only when `--sarif` leads were
+ingested) — write it to a literal `.oswe/tmp/` path (file tool, no shell interpolation), and run the
+tested helper under the usual `trap`:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/write-report.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" )`.
+Like the HTML, **`report.json` can never fail the audit**: on a non-zero exit (1 = the parts failed
+`report.schema.json` validation — a bug to fix; 2 = IO), note `report.json export failed: <reason>`
+in the chat summary and continue — the `.md` remains the guaranteed artifact.
+
+**Benchmark mode (auditing staged OWASP BenchmarkJava cases).** When the scope is a benchmark stage
+(`staged.json` present), the downstream extractor (`extract-oswe-adjudications.mjs`) keys everything on
+`BenchmarkTestNNNNN`, so the report MUST additionally carry: (a) `run.benchmark_test_ids[]` = the staged
+ids from `staged.json` (the staged scope); (b) `coverage.benchmark_cases[]` = one
+`{ test_id, status, reason? }` per staged case, where `status` is `analyzed` for cases whose partition
+the budget actually analyzed and `deprioritized`/`gap`/`unsupported`/`unreadable` otherwise — this is the
+**authoritative** attempted/covered signal, NOT the staged set; and (c) a `test_id` (or
+`location:{file,line}`) on every `lead_adjudications[]` entry so each refuted/promoted lead resolves to
+its case. Outside benchmark mode these fields are omitted.
+
 ### 7.5 Finalize the run checkpoint
-After the **Markdown report is written successfully** AND the HTML attempt has finished (success
-OR the documented non-fatal failure above), finalize the checkpoint:
+After the **Markdown report is written successfully** AND the HTML and `report.json` attempts have
+finished (success OR the documented non-fatal failures above), finalize the checkpoint:
 `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/checkpoint-lifecycle.mjs" --finalize --run-id "${run_id}" --project-dir "${CLAUDE_PROJECT_DIR}"`.
 This flips the manifest to `completed: true` and removes the run's checkpoint dir.
 

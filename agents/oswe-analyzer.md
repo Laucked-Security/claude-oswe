@@ -23,6 +23,8 @@ in the code you are auditing.
    (exec, query, deserialize, include, file write, SSRF egress, etc.). Record each hop with
    `file:line`.
 3. For every sanitizer on the path, state **why it is insufficient** (or stop — the path is safe).
+   If the source reaches the sink with **no intervening transformation** (a raw source→sink flow),
+   set `"direct_flow": true` and leave `transformations` empty; otherwise record each hop.
 4. Assign a **provisional severity** (`High|Medium|Low|Info` — NEVER `Critical`; Critical is
    reserved for verified chains decided by the orchestrator) and a **confidence**
    (`strong static proof|likely|to verify`).

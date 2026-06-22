@@ -84,6 +84,49 @@ test("uncovered Semgrep-missed case is excluded (not_covered), never an fn", () 
   assert.equal(r.hybrid.fn, 0);
 });
 
+// --- SP6 Task 5: the quality block (counter-based, attempt-aware) ---
+const truthQ = parseTruthCsv(
+  "BenchmarkTest00001,sqli,true,89\n" +   // real, found (promoted)
+  "BenchmarkTest00002,sqli,true,89\n" +   // real, attempted, covered, not found -> covered_fn
+  "BenchmarkTest00003,cmdi,true,78\n" +   // real, attempted, uncovered, not found -> structural_fn
+  "BenchmarkTest00004,xss,true,79\n"      // real, NOT attempted
+);
+const ledgerQ = {
+  dataset: "d", subset: "s", generated: "2026-06-21",
+  entries: [
+    { test_id: "BenchmarkTest00001", semgrep_flagged: true, oswe_covered: true, oswe_adjudication: "promoted", oswe_independent: false, cwe: 89, oswe_attempted: true, accepted_high_findings: 2, proof_complete_high_findings: 2, ce_resolved_high_findings: 1, accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false },
+    { test_id: "BenchmarkTest00002", semgrep_flagged: true, oswe_covered: true, oswe_adjudication: "refuted", oswe_independent: false, cwe: 89, oswe_attempted: true, accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0, accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false },
+    { test_id: "BenchmarkTest00003", semgrep_flagged: false, oswe_covered: false, oswe_adjudication: "no-lead", oswe_independent: false, cwe: 78, oswe_attempted: true, accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0, accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false },
+    { test_id: "BenchmarkTest00004", semgrep_flagged: false, oswe_covered: false, oswe_adjudication: "no-lead", oswe_independent: false, cwe: 79, oswe_attempted: false, accepted_high_findings: 0, proof_complete_high_findings: 0, ce_resolved_high_findings: 0, accepted_critical_chains: 0, proof_complete_critical_chains: 0, chain_reached_rce: false }
+  ]
+};
+
+test("quality: proof + ce rates sum counters across cases", () => {
+  const q = computeMetrics(ledgerQ, truthQ).quality;
+  assert.equal(q.finding_proof_complete_rate, 1);  // 2/2
+  assert.equal(q.ce_resolved_rate, 0.5);           // 1/2
+  assert.equal(q.chain_proof_complete_rate, null); // no accepted critical chains
+});
+
+test("quality: attempted-aware structural diagnostic", () => {
+  const q = computeMetrics(ledgerQ, truthQ).quality;
+  assert.equal(q.attempted_real_share, 0.75);  // 3 attempted / 4 real
+  assert.equal(q.real_not_found, 2);           // T2 + T3 (T1 found, T4 not attempted)
+  assert.equal(q.covered_fn, 1);               // T2
+  assert.equal(q.structural_fn, 1);            // T3
+  assert.equal(q.structural_fn_share, 0.5);
+});
+
+test("quality: per-category attempted coverage drives the revised SP6 gate", () => {
+  const q = computeMetrics(ledgerQ, truthQ).quality;
+  // truthQ real cases: T1+T2 sqli (both attempted), T3 cmdi (attempted), T4 xss (NOT attempted)
+  assert.equal(q.attempted_per_category.sqli, 2);
+  assert.equal(q.attempted_per_category.cmdi, 1);
+  assert.equal(q.attempted_per_category.xss, 0);
+  // the binding constraint: xss has 0 attempted -> gate stays blocked
+  assert.equal(q.min_attempted_per_category, 0);
+});
+
 test("a covered Semgrep-missed real vuln NOT found is an honest hybrid fn (regression guard)", () => {
   const l = { ...ledger, entries: [
     { test_id: "BenchmarkTest00004", semgrep_flagged: false, oswe_covered: true, oswe_adjudication: "no-lead", oswe_independent: false, cwe: 22 }

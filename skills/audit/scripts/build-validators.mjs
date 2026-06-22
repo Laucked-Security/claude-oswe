@@ -24,6 +24,7 @@ const EXPORT_NAME = {
   "verdict.schema.json": "verdict",
   "verifier-response.schema.json": "verifierResponse",
   "report-summary.schema.json": "reportSummary",
+  "report.schema.json": "report",
   "sarif-lead.schema.json": "sarifLead",
   "checkpoint-manifest.schema.json": "checkpointManifest"
 };
