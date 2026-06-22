@@ -48,6 +48,29 @@ down. **Accept only when every checked hypothesis is `refuted:true`.** If any hy
 counterexample in the verdict's `justification`. (An `accepted` verdict carrying an unrefuted
 counterexample is a contradiction and will be rejected and retried by the orchestrator.)
 
+### Trust-boundary findings (`vuln_class:"trust-boundary"`)
+A trust-boundary finding (CWE-501) is confirmed **only when the crossing is direct**: an
+attacker-controlled value is written, unguarded, into trusted/session/server state (e.g.
+`HttpSession.setAttribute`, `putValue`, `response.addCookie`, equivalent constructs in other
+frameworks). The counterexample checklist for this class is exactly four hypotheses — check all four:
+
+1. **Constant / literal** — the written value is a hard-coded constant, not derived from input.
+2. **Already server-side** — the value originates from server state or a trusted internal source,
+   not from the attacker.
+3. **Sanitized / validated** — the value passes through a sufficient sanitizer or validator before
+   the write (e.g. allowlist match, type coercion that removes payload).
+4. **Source not attacker-controlled** — the declared source is not actually reachable by the
+   attacker at this call site (e.g. a helper returns a fixed string regardless of input).
+
+**Accept (at `Low` or `Info`) only if every one of these is `refuted:true`.** If ANY holds
+(`refuted:false`) — the classic case being a helper that always returns a constant regardless of its
+argument — you MUST `reject` (or downgrade to `Info`) and cite the holding hypothesis.
+
+**Severity ceiling:** a trust-boundary finding is **never** above `Low`. There is no
+`Medium`/`High`/`Critical` trust-boundary verdict. Do **not** add it as a member of a chain and do
+**not** assert downstream RCE or privilege-escalation consequences for this finding. If you believe
+genuine downstream exploitability exists, that is a separate finding or chain — not this one.
+
 ## Output — RAW JSON ONLY
 Output a single JSON object conforming to `verifier-response.schema.json`. **No Markdown fences,
 no prose outside the JSON.** `status` is exactly one of `"ok"`, `"partial"`, `"error"`. Below are
@@ -77,6 +100,18 @@ A **findings batch** response (1–5 finding verdicts, no chain):
       "justification": "extension check present but bypassable, public/upload.php:8",
       "counterexamples": [
         { "hypothesis": "MIME allowlist blocks the upload", "checked": true, "refuted": false, "note": "allowlist holds for .php but .phtml passes" }
+      ]
+    },
+    {
+      "target_type": "finding",
+      "target_id": "OSWE-3",
+      "verdict": "accepted",
+      "justification": "user-supplied role param written directly into session attribute, src/AuthController.java:47; all four trust-boundary counterexamples refuted",
+      "counterexamples": [
+        { "hypothesis": "value is a constant/literal", "checked": true, "refuted": true, "evidence": [{ "file": "src/AuthController.java", "line": 47 }] },
+        { "hypothesis": "value is already server-side / not attacker-derived", "checked": true, "refuted": true, "evidence": [{ "file": "src/AuthController.java", "line": 44 }] },
+        { "hypothesis": "value is sanitized or validated before the write", "checked": true, "refuted": true, "evidence": [{ "file": "src/AuthController.java", "line": 45 }] },
+        { "hypothesis": "source is not attacker-controlled at this call site", "checked": true, "refuted": true, "evidence": [{ "file": "src/AuthController.java", "line": 44 }] }
       ]
     }
   ]
