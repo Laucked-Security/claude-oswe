@@ -28,6 +28,12 @@
     "origin": { "enum": ["llm-discovered", "sast-lead", "both"] },
     "source_lead_ids": { "type": "array", "items": { "type": "string", "pattern": "^L[0-9]{3,}$" } }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "vuln_class": { "const": "trust-boundary" } }, "required": ["vuln_class"] },
+      "then": { "properties": { "provisional_severity": { "enum": ["Low", "Info"] } } }
+    }
+  ],
   "$defs": {
     "fileline": {
       "type": "object", "additionalProperties": false,

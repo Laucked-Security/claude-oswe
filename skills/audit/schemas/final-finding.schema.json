@@ -26,6 +26,11 @@
           { "properties": { "direct_flow": { "const": true } }, "required": ["direct_flow"] }
         ]
       }
+    },
+    {
+      "$comment": "SP7: trust-boundary findings are hygiene-lane only — final_severity must be Low or Info (never Medium/High). Rejected findings have no final_severity so the invariant does not apply.",
+      "if": { "properties": { "vuln_class": { "const": "trust-boundary" }, "verification_status": { "not": { "const": "rejected" } } }, "required": ["vuln_class"] },
+      "then": { "properties": { "final_severity": { "enum": ["Low", "Info"] } } }
     }
   ]
 }
