@@ -107,13 +107,35 @@ there is real headroom. The Semgrep baseline over all 2740 (from the existing `o
 corpus — the precision story the 88-subset could only hint at. Sanitized baseline:
 [`results/ledger-full.json`](results/ledger-full.json), [`results/baseline-sp6.json`](results/baseline-sp6.json).
 
-**SP6 quality metrics + the Phase-1 gate are intentionally NOT yet readable.** `attempted_real_share`
-is ~0 because the only oswe data so far is the pre-SP6 88-case runs (no `report.json`, hence
-`finding_proof_complete_rate` / `ce_resolved_rate` are `null`). Per the design, the Phase-3 gate read is
-**blocked until `attempted_real_share ≥ 0.80`** (#R2.2) — i.e. it requires the oswe-audit campaign
-(per-case `/oswe:audit` emitting `report.json`, fed through `extract-oswe-adjudications.mjs`). The
-deterministic pipeline (`score-semgrep --all` → `stage-cases --all` → audit → `extract-oswe-adjudications`
-→ `build-ledger` → `metrics`) is wired and tested end-to-end; the remaining step is the audit campaign.
+### Stratified-sample audit (24/cat, 11 categories audited)
+
+oswe was run over the declared 24-case/category sample (`subset-sp6.json`), emitting `report.json` per
+category, fed through `extract-oswe-adjudications.mjs` → `build-ledger` → `metrics`:
+
+| matrix | tp | fp | fn | tn | precision | recall |
+|---|---|---|---|---|---|---|
+| `oswe_over_semgrep` (135 adjudicated) | 98 | 1 | 8 | 36 | **0.990** | 0.925 |
+
+**Phase-1 quality gates:** `finding_proof_complete_rate` **1.000**, `chain_proof_complete_rate` **1.000**,
+`ce_resolved_rate` **1.000** — every accepted High finding carried a complete proof chain **and** survived
+a resolved counterexample checklist. This is the SP6 thesis demonstrated on real data.
+
+**Precision did NOT fully generalize from the 88-subset's 1.000:** one false positive,
+`BenchmarkTest00861` (ldapi). Recall cost is **8, all in `trustbound`** (00031/00098/00251/00324/00325/
+00327/00424/00425) — oswe systematically over-refutes the trust-boundary class (tainted value used as a
+key/out-of-class constant). That is oswe's measured weak spot.
+
+**Phase-3 gate read (#R2.2, rev 6):** `min_attempted_per_category` = **4** (`cmdi` ran on the old 8-case
+staging, not the 24/cat sample) — so the gate is **formally BLOCKED**; re-audit `cmdi` on
+`bench-stage-sp6/cmdi` to open it. The directional signal is already unambiguous, though:
+**`structural_fn_share` = 0.056** (1 structural miss vs 17 covered "reasoning" misses out of 18
+real-not-found). **→ the residual misses are reasoning, not structural → Phase 2 (search passes +
+negative search + 2× verify, starting with `trustbound`), NOT the app graph (Phase 3).** The instrumented
+loop did its job: it answered the graph-vs-verifier question with evidence, and the answer is "not the
+graph — yet."
+
+Sanitized data: [`results/ledger-full.json`](results/ledger-full.json),
+[`results/baseline-sp6.json`](results/baseline-sp6.json).
 
 Regenerate the Semgrep side + metrics:
 

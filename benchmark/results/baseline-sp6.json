@@ -12,34 +12,34 @@
     "youden": 0.46537502500166683
   },
   "oswe_over_semgrep": {
-    "tp": 4,
-    "fp": 0,
-    "fn": 0,
-    "tn": 3,
-    "precision": 1,
-    "recall": 1,
-    "fpr": 0,
-    "youden": 1
+    "tp": 98,
+    "fp": 1,
+    "fn": 8,
+    "tn": 36,
+    "precision": 0.98989898989899,
+    "recall": 0.9245283018867925,
+    "fpr": 0.02702702702702703,
+    "youden": 0.8975012748597655
   },
   "hybrid": {
-    "tp": 4,
-    "fp": 0,
-    "fn": 0,
-    "tn": 4,
-    "precision": 1,
-    "recall": 1,
-    "fpr": 0,
-    "youden": 1
+    "tp": 106,
+    "fp": 2,
+    "fn": 17,
+    "tn": 122,
+    "precision": 0.9814814814814815,
+    "recall": 0.8617886178861789,
+    "fpr": 0.016129032258064516,
+    "youden": 0.8456595856281144
   },
   "excluded": {
     "inconclusive": 0,
-    "not_analyzed": 1793,
-    "not_covered": 939
+    "not_analyzed": 1657,
+    "not_covered": 836
   },
   "deltas": {
-    "fp_refuted": 3,
-    "recall_cost": 0,
-    "fn_recovered": 0
+    "fp_refuted": 36,
+    "recall_cost": 8,
+    "fn_recovered": 8
   },
   "cwe_mismatches": 0,
   "total": 2740,
@@ -47,11 +47,25 @@
     "finding_proof_complete_rate": 1,
     "chain_proof_complete_rate": 1,
     "ce_resolved_rate": 1,
-    "independent_discovery_rate": 0,
-    "attempted_real_share": 0.0028268551236749115,
-    "real_not_found": 0,
-    "covered_fn": 0,
-    "structural_fn": 0,
-    "structural_fn_share": null
+    "independent_discovery_rate": 0.005653710247349823,
+    "attempted_real_share": 0.08763250883392226,
+    "real_not_found": 18,
+    "covered_fn": 17,
+    "structural_fn": 1,
+    "structural_fn_share": 0.05555555555555555,
+    "attempted_per_category": {
+      "pathtraver": 12,
+      "hash": 12,
+      "trustbound": 12,
+      "crypto": 12,
+      "cmdi": 4,
+      "sqli": 12,
+      "ldapi": 12,
+      "xss": 12,
+      "weakrand": 12,
+      "securecookie": 12,
+      "xpathi": 12
+    },
+    "min_attempted_per_category": 4
   }
 }
