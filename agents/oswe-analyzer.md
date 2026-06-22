@@ -29,6 +29,25 @@ in the code you are auditing.
    reserved for verified chains decided by the orchestrator) and a **confidence**
    (`strong static proof|likely|to verify`).
 
+### Trust-boundary hygiene findings (CWE-501)
+
+When attacker-controlled data is written into trusted/session/server state — e.g.
+`HttpSession.setAttribute(...)`, `putValue(...)`, `response.addCookie(...)` — with **no**
+further dangerous sink (no exec/query/deserialize/template/file write) reachable from that
+stored value in this partition, emit it as a **hygiene** finding:
+
+- `vuln_class: "trust-boundary"`
+- `provisional_severity: "Low"` (use `"Info"` only if you cannot qualify any security impact)
+- Title naming CWE-501, e.g. `"Trust-boundary violation (CWE-501): untrusted data stored in session"`
+- Populate `source` and `sink` (the proof fields) as normal; set `direct_flow: true` if the
+  value reaches the store with no intervening transformation, otherwise record `transformations`.
+- **Do NOT** build, join, or propose an exploit chain for it, and never escalate it above `Low`.
+  It is hygiene, not an exploit path.
+- This lane covers only the *bare* trust-boundary write. If the stored value later flows into a
+  dangerous sink, that downstream flow is the real finding (or chain candidate) — analyze it on
+  its own merits and emit it separately; the trust-boundary write itself remains a standalone
+  `Low` hygiene finding and must **never** appear as a chain member.
+
 ## Output — RAW JSON ONLY
 Output a single JSON object conforming to `analyzer-response.schema.json`. **No Markdown fences,
 no prose, no text before or after the JSON.** Every finding MUST have
