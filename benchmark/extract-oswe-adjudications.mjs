@@ -84,7 +84,9 @@ export function extractAdjudications(reports) {
       const tid = resolveTid(c.entry_point && c.entry_point.file, report);
       if (!tid) continue;
       const e = ensure(tid);
-      if (c.final_impact === "unauth-rce") e.chain_reached_rce = true;
+      // Only an ACCEPTED unauth-rce chain counts as reaching RCE — a rejected chain that merely *claimed*
+      // unauth-rce impact must not (e.g. a dead-code chain the verifier threw out). (#R6.2)
+      if (c.final_impact === "unauth-rce" && c.verification_status === "accepted") e.chain_reached_rce = true;
       if (c.verification_status === "accepted" && c.severity === "Critical") {
         e.accepted_critical_chains++;
         const allProof = (c.finding_ids || []).every((id) => {
@@ -95,13 +97,20 @@ export function extractAdjudications(reports) {
       }
     }
 
-    // 4. Lead adjudications: resolve each to its own case (promoted wins).
+    // 4. Lead adjudications: resolve each to its own case (promoted wins). A lead the analyzer
+    // "promoted" but whose finding the VERIFIER rejected is a net dismissal → score it "refuted",
+    // not a false positive against oswe (#R6.1).
     for (const la of report.lead_adjudications || []) {
       const tid = la.test_id || resolveTid(la.location && la.location.file, report);
       if (!tid) continue;
+      let outcome = la.outcome;
+      if (outcome === "promoted" && la.finding_id) {
+        const f = findingById.get(la.finding_id);
+        if (f && f.verification_status === "rejected") outcome = "refuted";
+      }
       const e = ensure(tid);
       const prev = e.adjudication;
-      if (!prev || (ADJ_RANK[la.outcome] || 0) > (ADJ_RANK[prev] || 0)) e.adjudication = la.outcome;
+      if (!prev || (ADJ_RANK[outcome] || 0) > (ADJ_RANK[prev] || 0)) e.adjudication = outcome;
     }
   }
   return map;

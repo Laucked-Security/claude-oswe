@@ -86,6 +86,29 @@ test("a case is refuted only when every lead is refuted; promoted always wins (#
   assert.equal(withPromoted.BenchmarkTest00021.adjudication, "promoted");
 });
 
+test("a promoted lead whose finding the verifier rejected is net 'refuted' (#R6.1)", () => {
+  const report = {
+    run: { run_id: "r", generated: "g", scope: [], benchmark_test_ids: ["BenchmarkTest00177"] },
+    coverage: { analyzed: [], skipped: [], benchmark_cases: [{ test_id: "BenchmarkTest00177", status: "analyzed" }] },
+    findings: [{ finding_id: "OSWE-11", verification_status: "rejected", source: { file: "x/BenchmarkTest00177.java", line: 1 } }],
+    chains: [], verdicts: [],
+    lead_adjudications: [{ lead_id: "L022", outcome: "promoted", finding_id: "OSWE-11", test_id: "BenchmarkTest00177", reason: "analyzer promoted but verifier rejected" }]
+  };
+  const m = extractAdjudications([report]);
+  assert.equal(m.BenchmarkTest00177.adjudication, "refuted"); // oswe ultimately dismissed it
+});
+
+test("a rejected chain with unauth-rce impact does NOT set chain_reached_rce (#R6.2)", () => {
+  const base = (vs) => ({
+    run: { run_id: "r", generated: "g", scope: [] },
+    coverage: { analyzed: [], skipped: [], benchmark_cases: [{ test_id: "BenchmarkTest00177", status: "analyzed" }] },
+    findings: [], verdicts: [], lead_adjudications: [],
+    chains: [{ chain_id: "CHAIN-7", entry_point: { file: "x/BenchmarkTest00177.java", line: 1 }, final_impact: "unauth-rce", severity: "Critical", verification_status: vs, finding_ids: [] }]
+  });
+  assert.equal(extractAdjudications([base("rejected")]).BenchmarkTest00177.chain_reached_rce, false);
+  assert.equal(extractAdjudications([base("accepted")]).BenchmarkTest00177.chain_reached_rce, true);
+});
+
 test("an unrefuted counterexample does not count toward ce_resolved", () => {
   const r = { ...REPORT, verdicts: [
     { target_type: "finding", target_id: "OSWE-1", verdict: "accepted", justification: "x", counterexamples: [{ hypothesis: "h", checked: true, refuted: false }] },

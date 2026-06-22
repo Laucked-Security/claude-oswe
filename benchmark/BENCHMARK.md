@@ -114,25 +114,27 @@ category, fed through `extract-oswe-adjudications.mjs` → `build-ledger` → `m
 
 | matrix | tp | fp | fn | tn | precision | recall |
 |---|---|---|---|---|---|---|
-| `oswe_over_semgrep` (135 adjudicated) | 98 | 1 | 8 | 36 | **0.990** | 0.925 |
+| `oswe_over_semgrep` (152 adjudicated) | 104 | 0 | 8 | 40 | **1.000** | 0.929 |
 
-**Phase-1 quality gates:** `finding_proof_complete_rate` **1.000**, `chain_proof_complete_rate` **1.000**,
-`ce_resolved_rate` **1.000** — every accepted High finding carried a complete proof chain **and** survived
-a resolved counterexample checklist. This is the SP6 thesis demonstrated on real data.
+**Phase-1 quality gates: PASS.** `finding_proof_complete_rate` **1.000**, `chain_proof_complete_rate`
+**1.000**, `ce_resolved_rate` **1.000**, precision **1.000** (no regression) — every accepted High finding
+carried a complete proof chain **and** survived a resolved counterexample checklist. The SP6 thesis,
+demonstrated on real data across all 11 categories.
 
-**Precision did NOT fully generalize from the 88-subset's 1.000:** one false positive,
-`BenchmarkTest00861` (ldapi). Recall cost is **8, all in `trustbound`** (00031/00098/00251/00324/00325/
-00327/00424/00425) — oswe systematically over-refutes the trust-boundary class (tainted value used as a
-key/out-of-class constant). That is oswe's measured weak spot.
+**cmdi reached Critical:** 6 verified **unauthenticated-RCE chains** (BT00006/00015/00017/00077/00159/
+00176) — the only category whose sink is itself a shell. A 7th chain (BT00177) was verifier-**rejected**
+on dead-code grounds (`(7*42)-86 = 208 > 200`, always-true ternary) and correctly excluded.
 
-**Phase-3 gate read (#R2.2, rev 6):** `min_attempted_per_category` = **4** (`cmdi` ran on the old 8-case
-staging, not the 24/cat sample) — so the gate is **formally BLOCKED**; re-audit `cmdi` on
-`bench-stage-sp6/cmdi` to open it. The directional signal is already unambiguous, though:
-**`structural_fn_share` = 0.056** (1 structural miss vs 17 covered "reasoning" misses out of 18
-real-not-found). **→ the residual misses are reasoning, not structural → Phase 2 (search passes +
-negative search + 2× verify, starting with `trustbound`), NOT the app graph (Phase 3).** The instrumented
-loop did its job: it answered the graph-vs-verifier question with evidence, and the answer is "not the
-graph — yet."
+**Recall cost is 8, ALL in `trustbound`** (00031/00098/00251/00324/00325/00327/00424/00425) — oswe
+systematically over-refutes the trust-boundary class (tainted value used as a key / out-of-class
+constant). That is oswe's measured weak spot.
+
+**Phase-3 gate read (#R2.2, rev 6): OPEN** — `min_attempted_per_category` = **12** (all 11 categories'
+declared real sample audited). Decision: **`structural_fn_share` = 0.05** (1 structural miss vs 19 covered
+"reasoning" misses out of 20 real-not-found). **→ the residual misses are reasoning, not structural →
+Phase 2 (search passes + negative search + 2× verify, starting with `trustbound`), NOT the app graph
+(Phase 3).** The instrumented loop did its job: it answered the graph-vs-verifier question with evidence,
+and the answer is "not the graph — fix the reasoning."
 
 Sanitized data: [`results/ledger-full.json`](results/ledger-full.json),
 [`results/baseline-sp6.json`](results/baseline-sp6.json).
