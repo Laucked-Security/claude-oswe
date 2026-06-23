@@ -8,7 +8,7 @@
 
 [![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Tests: 346 passing](https://img.shields.io/badge/tests-346%20passing-brightgreen)
+![Tests: 375 passing](https://img.shields.io/badge/tests-375%20passing-brightgreen)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
@@ -30,8 +30,8 @@ positives on safe code, no exploit chain, no proof, no reproducibility. That's n
 `oswe` is built to **not do that**:
 
 - **Determinism where it matters.** Severity, dedup, and the "is this a Critical unauth-RCE?" decision
-  are **not** left to the model — they run in tested, dependency-free Node helpers with **346 unit
-  tests** (291 pipeline + 55 benchmark, including two end-to-end replay tests that drive the full
+  are **not** left to the model — they run in tested, dependency-free Node helpers with **375 unit
+  tests** (320 pipeline + 55 benchmark, including two end-to-end replay tests that drive the full
   helper chain via real CLIs with pre-baked responses — one for the no-cache path, one for the
   kill-then-resume cache path). The model *finds*; the helpers *decide*.
 - **A verifier that pushes back — by refutation.** Every candidate chain and high-severity finding is
@@ -73,9 +73,36 @@ self-contained, zero-dependency file (AJV is a **dev-only** tool used to regener
 ```
 
 The audit **never auto-runs** (`disable-model-invocation: true`) — it triggers only on the explicit
-command. A timestamped report is written to `.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.{md,html,json}` —
+command. A timestamped report is written to `.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.{md,html,json,sarif,xml}` —
 the `.json` is a schema-validated, canonical machine artifact (SP6) that downstream tooling (benchmark
-ledger, baseline/diff, exports) keys on.
+ledger, baseline/diff, exports) keys on; the `.sarif` and `.xml` are CI-ready exports derived from it.
+
+### CI integration
+
+oswe runs in CI and uploads the emitted SARIF to GitHub or GitLab code scanning. The **validation-layer
+differentiator**: SAST leads that oswe refuted (false positives Semgrep/CodeQL flagged but the
+validation layer ruled out) appear as SARIF *suppressions* — so your code-scanning dashboard learns
+which alerts oswe assessed as false positives, without leaving them as open noise.
+
+```yaml
+# After your audit job writes .oswe/reports/oswe-report-*.{sarif,xml}:
+- name: Upload SARIF to code scanning
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: .oswe/reports/oswe-report-*.sarif
+
+- name: Publish JUnit test results
+  uses: EnricoMi/publish-unit-test-result-action@v2
+  with:
+    files: .oswe/reports/oswe-report-*.xml
+```
+
+The exports are also a **standalone transform** — run anytime on a saved `report.json`:
+
+```bash
+node skills/audit/scripts/export-sarif.mjs --file <report.json> --out out.sarif
+node skills/audit/scripts/export-junit.mjs --file <report.json> --out junit.xml --fail-on high
+```
 
 **Proof-graph findings + counterexamples** (SP6). Every accepted High finding now carries a complete
 source→sink proof chain, and every accept/downgrade verdict carries a structured `counterexamples[]`
@@ -244,7 +271,7 @@ The runtime validator [`skills/audit/scripts/validators.mjs`](skills/audit/scrip
 helper inlined). Run the suites (Node ≥ 20 only, no install):
 
 ```bash
-( cd skills/audit/scripts && node --test )          # 291 pipeline tests
+( cd skills/audit/scripts && node --test )          # 320 pipeline tests
 ( cd benchmark && node --test )                     # 55 benchmark-engine tests
 node .github/scripts/check-structure.mjs            # stacks / references / fixtures-markers gate
 ```

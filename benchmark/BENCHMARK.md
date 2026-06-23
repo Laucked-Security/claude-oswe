@@ -156,6 +156,18 @@ without re-auditing.
 Sanitized data: [`results/ledger-full.json`](results/ledger-full.json),
 [`results/baseline-sp6.json`](results/baseline-sp6.json).
 
+### SP8 — CI exports validated on the trustbound run
+
+`export-sarif.mjs` / `export-junit.mjs` were run against the real trustbound `report.json` (deterministic
+transforms, no re-audit):
+- **SARIF 2.1.0**, byte-identical across runs, parses back through `ingest-sarif.mjs` (round-trip); 12
+  trust-boundary findings each with a stable 16-hex `partialFingerprints["oswe/v1"]`; **14 refuted Semgrep
+  leads emitted as `sast-lead-refuted` results with SARIF `suppressions`** — the validation-layer signal
+  ("oswe assessed these SAST alerts as not exploitable") working on real data.
+- **JUnit**: `--fail-on high` and `--fail-on medium` both yield **0 failures** (the run is hygiene-only,
+  all Low) and **14 `<skipped>`** for the refuted leads — i.e. a hygiene-only audit does not break the
+  build, while the refutations stay visible.
+
 Regenerate the Semgrep side + metrics:
 
 ```bash

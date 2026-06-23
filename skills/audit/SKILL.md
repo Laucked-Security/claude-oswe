@@ -430,6 +430,23 @@ Like the HTML, **`report.json` can never fail the audit**: on a non-zero exit (1
 `report.schema.json` validation — a bug to fix; 2 = IO), note `report.json export failed: <reason>`
 in the chat summary and continue — the `.md` remains the guaranteed artifact.
 
+**Then emit the SARIF 2.1.0 export** (reading the `report.json` just written):
+`( trap 'true' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/export-sarif.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.sarif" )`.
+**Best-effort, like the HTML and report.json**: on a non-zero exit (1 = transform error; 2 = IO), note
+`SARIF export failed: <reason>` in the chat summary and continue — the `.md` remains the guaranteed
+artifact. The `.sarif` is `[REDACTED]`-safe (it carries `file:line` + messages, the same content
+already in the `.md`). Refuted SAST leads appear as `sast-lead-refuted` results with SARIF
+`suppressions`, so a code-scanning dashboard learns which alerts oswe assessed as false positives.
+Hygiene trust-boundary findings are tagged `properties.lane="hygiene"`.
+
+**Then emit the JUnit XML export** (reading the same `report.json`):
+`( trap 'true' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/export-junit.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.xml" )`.
+**Best-effort**: on a non-zero exit (1 = transform error; 2 = IO), note `JUnit export failed: <reason>`
+in the chat summary and continue. The `.xml` is also `[REDACTED]`-safe. Accepted High+/Critical
+findings become `<failure>` elements; hygiene Low/refuted leads become `<skipped>` and never fail
+a CI job. The default `--fail-on` threshold is `high`; omit it here (use the default) so the emitted
+XML reflects the same threshold a downstream CI consumer would apply.
+
 **Benchmark mode (auditing staged OWASP BenchmarkJava cases).** When the scope is a benchmark stage
 (`staged.json` present), the downstream extractor (`extract-oswe-adjudications.mjs`) keys everything on
 `BenchmarkTestNNNNN`, so the report MUST additionally carry: (a) `run.benchmark_test_ids[]` = the staged
@@ -441,16 +458,16 @@ the budget actually analyzed and `deprioritized`/`gap`/`unsupported`/`unreadable
 its case. Outside benchmark mode these fields are omitted.
 
 ### 7.5 Finalize the run checkpoint
-After the **Markdown report is written successfully** AND the HTML and `report.json` attempts have
-finished (success OR the documented non-fatal failures above), finalize the checkpoint:
+After the **Markdown report is written successfully** AND the HTML, `report.json`, SARIF, and JUnit
+attempts have all finished (success OR the documented non-fatal failures above), finalize the checkpoint:
 `node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/checkpoint-lifecycle.mjs" --finalize --run-id "${run_id}" --project-dir "${CLAUDE_PROJECT_DIR}"`.
 This flips the manifest to `completed: true` and removes the run's checkpoint dir.
 
-**Finalize-trigger contract.** Tying §7.5 to "MD written + HTML attempted" rather than "both
-written successfully" is deliberate: per §7 "the HTML can never fail the audit", so an HTML failure
-is **not** an abort — the audit is clean and the checkpoint (which holds NOT-yet-redacted
-intermediates) MUST be purged. Otherwise a recurring HTML failure (e.g. a broken summary the user
-can't fix) would leave secrets on disk indefinitely.
+**Finalize-trigger contract.** Tying §7.5 to "MD written + all best-effort exports attempted" rather
+than "all written successfully" is deliberate: per §7 none of the exports (HTML, report.json, SARIF,
+JUnit) can fail the audit, so any export failure is **not** an abort — the audit is clean and the
+checkpoint (which holds NOT-yet-redacted intermediates) MUST be purged. Otherwise a recurring export
+failure (e.g. a broken summary the user can't fix) would leave secrets on disk indefinitely.
 
 **On any REAL abort** earlier in the pipeline (Node missing, confine-path escape, ambiguous resume,
 analyzer/verifier retry budget exhausted, orchestrator-input bug at §6/§6b, etc.), **DO NOT
