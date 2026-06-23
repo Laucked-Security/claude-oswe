@@ -138,7 +138,6 @@ export function buildSarif(report) {
             justification: la.reason || "oswe assessed not exploitable",
           },
         ],
-        partialFingerprints: { "oswe/v1": la.lead_id || "0000000000000000" },
       };
       if (la.location) {
         entry.locations = [physLoc(la.location.file, la.location.line)];
@@ -150,7 +149,6 @@ export function buildSarif(report) {
         ruleId: "sast-lead-inconclusive",
         level: "note",
         message: { text: la.reason || "inconclusive" },
-        partialFingerprints: { "oswe/v1": la.lead_id || "0000000000000000" },
       };
       if (la.location) {
         entry.locations = [physLoc(la.location.file, la.location.line)];

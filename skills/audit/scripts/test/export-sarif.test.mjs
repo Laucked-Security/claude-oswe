@@ -88,3 +88,14 @@ test("inconclusive lead -> sast-lead-inconclusive note, no suppression", () => {
   assert.equal(r.level, "note");
   assert.ok(!r.suppressions);
 });
+test("lead-adjudication results carry NO partialFingerprints (reserved for finding/chain content fps)", () => {
+  const s = buildSarif(reportWithLeads);
+  const leadResults = s.runs[0].results.filter(r => String(r.ruleId).startsWith("sast-lead"));
+  assert.ok(leadResults.length >= 1);
+  for (const r of leadResults) assert.ok(!("partialFingerprints" in r), `lead result ${r.ruleId} must not have partialFingerprints`);
+});
+test("finding & chain results still DO carry a 16-hex partialFingerprint", () => {
+  const s = buildSarif(reportWithLeads);
+  const fps = s.runs[0].results.filter(r => r.ruleId === "sqli" || r.ruleId === "trust-boundary" || r.ruleId === "exploit-chain");
+  for (const r of fps) assert.match(r.partialFingerprints["oswe/v1"], /^[0-9a-f]{16}$/);
+});
