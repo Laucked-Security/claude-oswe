@@ -61,3 +61,30 @@ test("output parses back through ingest-sarif without throwing (round-trip)", ()
 test("deterministic: same report -> identical SARIF", () => {
   assert.equal(JSON.stringify(buildSarif(report)), JSON.stringify(buildSarif(report)));
 });
+
+const reportWithLeads = {
+  ...report,
+  lead_adjudications: [
+    { lead_id:"L1", outcome:"refuted", reason:"input is a constant", test_id:"BenchmarkTest00001", location:{file:"a.js",line:9} },
+    { lead_id:"L2", outcome:"promoted", finding_id:"OSWE-1", test_id:"BenchmarkTest00002", location:{file:"a.js",line:10} },
+    { lead_id:"L3", outcome:"inconclusive", reason:"cannot resolve", location:{file:"e.js",line:3} }
+  ]
+};
+test("refuted lead -> sast-lead-refuted note with a suppression carrying the reason", () => {
+  const s = buildSarif(reportWithLeads);
+  const r = s.runs[0].results.find(x => x.ruleId === "sast-lead-refuted");
+  assert.equal(r.level, "note");
+  assert.equal(r.suppressions[0].kind, "external");
+  assert.match(r.message.text, /constant/);
+});
+test("promoted lead is NOT double-emitted (no sast-lead-promoted result)", () => {
+  const s = buildSarif(reportWithLeads);
+  assert.equal(s.runs[0].results.filter(x => String(x.ruleId).startsWith("sast-lead") && x.ruleId !== "sast-lead-refuted" && x.ruleId !== "sast-lead-inconclusive").length, 0);
+  assert.ok(!s.runs[0].results.some(x => x.ruleId === "sast-lead-promoted"));
+});
+test("inconclusive lead -> sast-lead-inconclusive note, no suppression", () => {
+  const s = buildSarif(reportWithLeads);
+  const r = s.runs[0].results.find(x => x.ruleId === "sast-lead-inconclusive");
+  assert.equal(r.level, "note");
+  assert.ok(!r.suppressions);
+});

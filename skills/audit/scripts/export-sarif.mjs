@@ -122,6 +122,44 @@ export function buildSarif(report) {
     });
   }
 
+  // --- Lead adjudications ---
+  for (const la of report.lead_adjudications || []) {
+    if (la.outcome === "promoted") continue; // already represented by a finding
+
+    if (la.outcome === "refuted") {
+      ensureRule("sast-lead-refuted", "note");
+      const entry = {
+        ruleId: "sast-lead-refuted",
+        level: "note",
+        message: { text: la.reason || "refuted by oswe" },
+        suppressions: [
+          {
+            kind: "external",
+            justification: la.reason || "oswe assessed not exploitable",
+          },
+        ],
+        partialFingerprints: { "oswe/v1": la.lead_id || "0000000000000000" },
+      };
+      if (la.location) {
+        entry.locations = [physLoc(la.location.file, la.location.line)];
+      }
+      results.push(entry);
+    } else if (la.outcome === "inconclusive") {
+      ensureRule("sast-lead-inconclusive", "note");
+      const entry = {
+        ruleId: "sast-lead-inconclusive",
+        level: "note",
+        message: { text: la.reason || "inconclusive" },
+        partialFingerprints: { "oswe/v1": la.lead_id || "0000000000000000" },
+      };
+      if (la.location) {
+        entry.locations = [physLoc(la.location.file, la.location.line)];
+      }
+      results.push(entry);
+    }
+    // unknown outcomes: skip gracefully
+  }
+
   // Build rules list from emittedRuleIds (stable insertion order)
   const rules = [];
   for (const [id, level] of emittedRuleIds) {
