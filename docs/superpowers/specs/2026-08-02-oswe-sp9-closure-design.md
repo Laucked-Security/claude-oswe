@@ -65,7 +65,7 @@ without evidence of structural misses.
 ## Documentation and repository state
 
 `benchmark/BENCHMARK.md` will gain the complete SP9 table, extra-finding triage, limitations, and decision.
-`README.md` will update the test count from 375 to 382 (320 pipeline plus 62 benchmark tests) and will not
+`README.md` will update the test count from 375 to 383 (320 pipeline plus 63 benchmark tests) and will not
 claim that NodeGoat demonstrated a multi-file exploit chain.
 
 The canonical baseline and supplementary data score will be tracked. The temporary
@@ -86,7 +86,7 @@ Closure requires fresh evidence for all of the following:
 1. Re-score the routes report and compare it byte-for-byte with the canonical baseline.
 2. Re-score the data report and compare it byte-for-byte with the supplementary score.
 3. Run `node --test` in `skills/audit/scripts` (320 tests).
-4. Run `node --test` in `benchmark` (62 tests).
+4. Run `node --test` in `benchmark` (63 tests).
 5. Run `node .github/scripts/check-structure.mjs`.
 6. Run `git diff --check` and confirm that only intended SP9 artifacts remain changed.
 

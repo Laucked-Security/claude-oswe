@@ -29,7 +29,7 @@
 - Modify `benchmark/BENCHMARK.md`: publish SP9 metrics, extra-finding triage, limitations, and architecture decision.
 - Modify `benchmark/score-nodegoat.test.mjs`: add the two negative matcher regression tests.
 - Modify `benchmark/score-nodegoat.mjs`: apply only the approved class and path matcher hardening.
-- Modify `README.md`: update the verified test count from 375 to 382 and the benchmark-suite count from 55 to 62.
+- Modify `README.md`: update the verified test count from 375 to 383 and the benchmark-suite count from 55 to 63.
 
 ### Task 1: Canonicalize the campaign artifacts
 
@@ -203,10 +203,10 @@ contain no source code, secrets, or exploit payloads.
 Make these exact replacements:
 
 ```text
-375 passing -> 382 passing
-375 unit tests -> 382 unit tests
-320 pipeline + 55 benchmark -> 320 pipeline + 62 benchmark
-55 benchmark-engine tests -> 62 benchmark-engine tests
+375 passing -> 383 passing
+375 unit tests -> 383 unit tests
+320 pipeline + 55 benchmark -> 320 pipeline + 63 benchmark
+55 benchmark-engine tests -> 63 benchmark-engine tests
 ```
 
 Do not change the existing NodeGoat RCE description beyond avoiding any new multi-file-chain claim.
@@ -216,7 +216,7 @@ Do not change the existing NodeGoat RCE description beyond avoiding any new mult
 Run:
 
 ```powershell
-rg -n '375|55 benchmark' README.md benchmark/BENCHMARK.md
+rg -n '375|382|55 benchmark|62 benchmark' README.md benchmark/BENCHMARK.md
 rg -n 'multi-file|multi_file|App Graph|SP10|1\.000' benchmark/BENCHMARK.md
 git diff --check
 ```
@@ -271,7 +271,7 @@ Run from `benchmark`:
 node --test
 ```
 
-Expected: 62 tests, 62 pass, 0 fail.
+Expected: 63 tests, 63 pass, 0 fail.
 
 - [ ] **Step 4: Run repository consistency checks**
 
