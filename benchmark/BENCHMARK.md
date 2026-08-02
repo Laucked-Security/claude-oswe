@@ -178,3 +178,52 @@ node benchmark/build-ledger.mjs --flagged external/flagged-full.json --oswe <osw
 node benchmark/metrics.mjs --ledger benchmark/results/ledger-full.json \
   --truth external/BenchmarkJava/expectedresults-1.2.csv --out benchmark/results/baseline-sp6.json
 ```
+
+### SP9 — NodeGoat real-app validation
+
+**Outcome: mixed.** The canonical run is
+`.oswe/reports/oswe-report-2026-06-23-1059-nodegoat-routes.json`; its raw canonical score is
+[`results/nodegoat-baseline.json`](results/nodegoat-baseline.json). The data-only run is retained as a
+scope control in [`results/nodegoat-data-supplemental.json`](results/nodegoat-data-supplemental.json),
+not as a second headline baseline.
+
+| signal | result |
+|---|---:|
+| documented source-to-sink set | 7 |
+| found | 7 |
+| recall | **1.000** |
+| extra findings | 6 |
+| accepted chains | 1 |
+| multi-file chains | **0** |
+| structural misses | 0 |
+| reasoning misses | 0 |
+
+The six extra findings were triaged without changing the score:
+
+| class / sink | triage | reason |
+|---|---|---|
+| `authorization` / `allocations-dao.js` | confirmed, outside declared set | NodeGoat A4 documents the route-param IDOR; `allocations.js` uses `req.params.userId` instead of the session id. |
+| `idor` / `benefits-dao.js` | overlap | Same A7 missing-function-level-access-control root cause already represented by `ng-a7-missing-access-control`; this finding follows it to the arbitrary-user update sink. |
+| `xss` / `memos.html` | noisy as reported | `server.js` globally sets `marked({sanitize:true})`; the finding omitted that sanitizer. NodeGoat still documents an A9 vulnerable-`marked` risk, but this report did not prove the required sanitizer bypass and was only downgraded to `likely`. |
+| `xss` / `research.js` | confirmed, outside declared set | Attacker-selected upstream HTML is written to a `text/html` response; distinct impact on the documented SSRF flow. |
+| `nosql-injection` / `user-dao.js` | confirmed primitive, impact overstated | JSON bodies allow a Mongo operator as `userName`, but the separate plaintext-password equality remains; query manipulation is present while an authentication bypass is not proven. |
+| `weak-crypto` / `user-dao.js` | confirmed, outside declared set | NodeGoat A2 explicitly documents plaintext password storage and the inactive bcrypt fix. |
+
+The precision read is four confirmed additional primitives/issues, one overlap, and one noisy proof. No
+precision is computed against the deliberately incomplete seven-entry denominator.
+
+Gate read and SP10 decision:
+
+- Real-app recall on the declared set is validated at 1.000.
+- Cross-file findings exist, including route-to-DAO flows.
+- The only accepted chain is the same-file contributions eval chain, so multi-file proof-graph engagement is not validated.
+- No misses exist to support a structural-miss diagnosis; SP10 App Graph is not justified by this campaign.
+
+Reproduce the two score artifacts deterministically:
+
+```powershell
+node benchmark/score-nodegoat.mjs --report .oswe/reports/oswe-report-2026-06-23-1059-nodegoat-routes.json --truth benchmark/nodegoat-truth.json --out benchmark/results/nodegoat-baseline.json
+node benchmark/score-nodegoat.mjs --report .oswe/reports/oswe-report-2026-06-23-1110-nodegoat-data.json --truth benchmark/nodegoat-truth.json --out benchmark/results/nodegoat-data-supplemental.json
+```
+
+The checked-in score artifacts contain no source code, secrets, or exploit payloads.
