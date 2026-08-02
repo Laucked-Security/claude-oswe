@@ -1,0 +1,109 @@
+{
+  "total": 7,
+  "found": [
+    {
+      "id": "ng-a1-nosql-injection",
+      "vuln_class": "nosql-injection",
+      "file": "app/data/allocations-dao.js"
+    }
+  ],
+  "missed": [
+    {
+      "id": "ng-a1-code-injection",
+      "vuln_class": "code-injection",
+      "file": "app/routes/contributions.js"
+    },
+    {
+      "id": "ng-a3-stored-xss",
+      "vuln_class": "xss",
+      "file": "app/routes/profile.js"
+    },
+    {
+      "id": "ng-redos",
+      "vuln_class": "redos",
+      "file": "app/routes/profile.js"
+    },
+    {
+      "id": "ng-ssrf",
+      "vuln_class": "ssrf",
+      "file": "app/routes/research.js"
+    },
+    {
+      "id": "ng-a10-open-redirect",
+      "vuln_class": "open-redirect",
+      "file": "app/routes/index.js"
+    },
+    {
+      "id": "ng-a7-missing-access-control",
+      "vuln_class": "access-control",
+      "file": "app/routes/index.js"
+    }
+  ],
+  "recall": 0.14285714285714285,
+  "extra": [
+    {
+      "vuln_class": "idor",
+      "file": "external/NodeGoat/app/data/allocations-dao.js"
+    },
+    {
+      "vuln_class": "authorization",
+      "file": "external/NodeGoat/app/data/benefits-dao.js"
+    },
+    {
+      "vuln_class": "xss",
+      "file": "external/NodeGoat/app/data/memos-dao.js"
+    },
+    {
+      "vuln_class": "xss",
+      "file": "external/NodeGoat/app/data/profile-dao.js"
+    },
+    {
+      "vuln_class": "weak-crypto",
+      "file": "external/NodeGoat/app/data/user-dao.js"
+    },
+    {
+      "vuln_class": "weak-crypto",
+      "file": "external/NodeGoat/app/data/user-dao.js"
+    },
+    {
+      "vuln_class": "nosql-injection",
+      "file": "external/NodeGoat/app/data/user-dao.js"
+    }
+  ],
+  "chains": 0,
+  "multi_file_chains": 0,
+  "structural_missed": [
+    {
+      "id": "ng-a1-code-injection",
+      "vuln_class": "code-injection",
+      "file": "app/routes/contributions.js"
+    },
+    {
+      "id": "ng-a3-stored-xss",
+      "vuln_class": "xss",
+      "file": "app/routes/profile.js"
+    },
+    {
+      "id": "ng-redos",
+      "vuln_class": "redos",
+      "file": "app/routes/profile.js"
+    },
+    {
+      "id": "ng-ssrf",
+      "vuln_class": "ssrf",
+      "file": "app/routes/research.js"
+    },
+    {
+      "id": "ng-a10-open-redirect",
+      "vuln_class": "open-redirect",
+      "file": "app/routes/index.js"
+    },
+    {
+      "id": "ng-a7-missing-access-control",
+      "vuln_class": "access-control",
+      "file": "app/routes/index.js"
+    }
+  ],
+  "reasoning_missed": [],
+  "structural_missed_share": 1
+}

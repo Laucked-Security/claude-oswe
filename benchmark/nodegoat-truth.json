@@ -1,7 +1,7 @@
 {
   "app": "NodeGoat",
   "source": "https://github.com/OWASP/NodeGoat (app/views/tutorial a1..a10 + redos.html + ssrf.html), anchored to the actual app/ source at audit time",
-  "note": "Documented, code-anchored vulnerability set oswe (a source->sink + exploit-chain auditor) is designed to find. Each entry is anchored to the file where the dangerous SINK lives; route_file is the Express entry point (routes are wired in app/routes/index.js, so the route and the sink live in DIFFERENT files — the cross-file reachability BenchmarkJava lacks). Scope is honest: classes oswe is NOT designed to detect via source->sink are intentionally EXCLUDED from this recall denominator (A5 security misconfig, A8 CSRF token absence, A9 vulnerable components/deps). The recall claim is 'on this documented source->sink set'.",
+  "note": "Documented, code-anchored vulnerability set oswe (a source->sink + exploit-chain auditor) is designed to find. Each entry is anchored to the file where the dangerous SINK lives; route_file is the Express entry point. Five entries have distinct route_file and sink file values and exercise cross-file reachability. The open-redirect and missing-access-control entries are both routed and sunk in app/routes/index.js. Scope is honest: classes oswe is NOT designed to detect via source->sink are intentionally EXCLUDED from this recall denominator (A5 security misconfig, A8 CSRF token absence, A9 vulnerable components/deps). The recall claim is 'on this documented source->sink set'.",
   "excluded_classes": ["csrf", "vulnerable-components", "security-misconfiguration"],
   "vulns": [
     {
