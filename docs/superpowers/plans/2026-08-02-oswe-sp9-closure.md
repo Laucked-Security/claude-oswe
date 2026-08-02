@@ -295,8 +295,8 @@ git diff --stat master...HEAD
 git diff --check master...HEAD
 ```
 
-Expected: six SP9 commits (truth, scorer, closure design, implementation plan, canonical artifacts,
-published result), no unrelated files, and no whitespace errors.
+Expected: seven branch commits (truth, scorer, closure design, implementation plan, worktree setup,
+canonical artifacts, published result), no unrelated files, and no whitespace errors.
 
 - [ ] **Step 7: Finish the branch and merge locally**
 

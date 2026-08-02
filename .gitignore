@@ -5,3 +5,6 @@ external/
 # Python bytecode from static-only fixture verification (py_compile) — never commit.
 __pycache__/
 *.pyc
+
+# Local isolated implementation worktrees.
+.worktrees/
