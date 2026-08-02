@@ -4,13 +4,14 @@
 
 **Goal:** Publish the existing NodeGoat campaign as a reproducible canonical SP9 baseline, triage its six extra findings, record the mixed gate result, and merge the completed branch locally.
 
-**Architecture:** Preserve `score-nodegoat.mjs` and the audit reports unchanged. Promote the routes-run score to the single canonical baseline, keep the data-run score as a named supplementary artifact, and explain the observed zero multi-file-chain signal instead of changing the measurement after the run.
+**Architecture:** Preserve the audit reports unchanged. Preserve scorer behavior except for the explicitly approved post-review matcher hardening: SQL and generic injection cannot satisfy NoSQL truth, and path suffixes require a segment boundary. Promote the routes-run score to the single canonical baseline, keep the data-run score as a named supplementary artifact, and explain the observed zero multi-file-chain signal instead of changing the measurement after the run.
 
 **Tech Stack:** Node.js >= 20, zero-dependency ESM helpers, `node:test`, JSON benchmark artifacts, Markdown documentation, PowerShell, Git.
 
 ## Global Constraints
 
-- Do not change auditor, schema, prompt, or scorer behavior.
+- Do not change auditor, schema, or prompt. The only scorer-behavior exception is the approved post-review
+  matcher hardening, protected by two negative tests and required to leave both saved SP9 scores unchanged.
 - Do not run a new NodeGoat audit or perform dynamic exploitation.
 - Do not aggregate the routes and data reports after observation.
 - Keep the canonical scorer output unedited and reproducible from the saved routes report.
@@ -26,7 +27,9 @@
 - Create `benchmark/results/nodegoat-data-supplemental.json`: non-canonical scorer output for the data report.
 - Retire `benchmark/results/nodegoat-routes-baseline.json` and `benchmark/results/nodegoat-data-baseline.json` after equality checks.
 - Modify `benchmark/BENCHMARK.md`: publish SP9 metrics, extra-finding triage, limitations, and architecture decision.
-- Modify `README.md`: update the verified test count from 375 to 380 and the benchmark-suite count from 55 to 60.
+- Modify `benchmark/score-nodegoat.test.mjs`: add the two negative matcher regression tests.
+- Modify `benchmark/score-nodegoat.mjs`: apply only the approved class and path matcher hardening.
+- Modify `README.md`: update the verified test count from 375 to 382 and the benchmark-suite count from 55 to 62.
 
 ### Task 1: Canonicalize the campaign artifacts
 
@@ -116,7 +119,7 @@ Get-Content -Raw benchmark/results/nodegoat-data-supplemental.json | ConvertFrom
 node --test benchmark/score-nodegoat.test.mjs
 ```
 
-Expected: JSON parsing exits 0 and all 5 NodeGoat scorer tests pass.
+Expected: JSON parsing exits 0 and all 7 NodeGoat scorer tests pass.
 
 - [ ] **Step 7: Commit the truth correction and score artifacts**
 
@@ -187,9 +190,12 @@ No misses exist to support a structural-miss diagnosis; SP10 App Graph is not ju
 
 Label the outcome `mixed`, not an unconditional pass.
 
-- [ ] **Step 4: Add deterministic reproduction commands**
+- [ ] **Step 4: Add maintainer-only deterministic reproduction commands**
 
-Document both exact `score-nodegoat.mjs` commands from Task 1. Clarify that the checked-in score artifacts
+Document both exact `score-nodegoat.mjs` commands from Task 1 as maintainer-only reproduction from saved
+local reports, not clone-clean reproduction. State that `.oswe/` is gitignored, publish the SHA-256 hash
+of each required report, and record the local NodeGoat checkout commit if its own Git metadata exposes
+one; otherwise state that no checkout commit was recorded. Clarify that the checked-in score artifacts
 contain no source code, secrets, or exploit payloads.
 
 - [ ] **Step 5: Update every README test count**
@@ -197,10 +203,10 @@ contain no source code, secrets, or exploit payloads.
 Make these exact replacements:
 
 ```text
-375 passing -> 380 passing
-375 unit tests -> 380 unit tests
-320 pipeline + 55 benchmark -> 320 pipeline + 60 benchmark
-55 benchmark-engine tests -> 60 benchmark-engine tests
+375 passing -> 382 passing
+375 unit tests -> 382 unit tests
+320 pipeline + 55 benchmark -> 320 pipeline + 62 benchmark
+55 benchmark-engine tests -> 62 benchmark-engine tests
 ```
 
 Do not change the existing NodeGoat RCE description beyond avoiding any new multi-file-chain claim.
@@ -265,7 +271,7 @@ Run from `benchmark`:
 node --test
 ```
 
-Expected: 60 tests, 60 pass, 0 fail.
+Expected: 62 tests, 62 pass, 0 fail.
 
 - [ ] **Step 4: Run repository consistency checks**
 
@@ -295,11 +301,12 @@ git diff --stat master...HEAD
 git diff --check master...HEAD
 ```
 
-Expected: seven branch commits (truth, scorer, closure design, implementation plan, worktree setup,
-canonical artifacts, published result), no unrelated files, and no whitespace errors.
+Expected: eight branch commits (truth, scorer, closure design, implementation plan, worktree setup,
+canonical artifacts, published result, final-review matcher/reproduction fix), no unrelated files, and no
+whitespace errors.
 
 - [ ] **Step 7: Finish the branch and merge locally**
 
 Invoke `superpowers:finishing-a-development-branch`, select local merge, then merge
-`feat/oswe-sp9-nodegoat-validation` into `master`. Re-run the full verification commands required by that
+`feat/oswe-sp9-closure-execution` into `master`. Re-run the full verification commands required by that
 skill after the merge. Do not push unless separately authorized.

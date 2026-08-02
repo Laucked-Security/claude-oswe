@@ -13,7 +13,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 // ---------------------------------------------------------------------------
 const SYNONYMS = [
   ["code-injection","ssjs","rce","eval-injection","remote-code-execution"],
-  ["nosql-injection","nosqli","injection","sql-injection","sqli"],
+  ["nosql-injection","nosqli"],
+  ["sql-injection","sqli"],
   ["xss","cross-site-scripting","stored-xss","reflected-xss"],
   ["redos","regex-dos","regular-expression-dos"],
   ["ssrf","server-side-request-forgery"],
@@ -46,10 +47,12 @@ function norm(p) {
  * Returns true if a report path matches a truth file path.
  * Truth files are repo-root-relative (e.g. "app/routes/contributions.js").
  * Report paths may be staging-prefixed (e.g. "external/NodeGoat/app/routes/contributions.js").
- * Simple endsWith after normalization handles both cases.
+ * A segment-bounded suffix after normalization handles both cases.
  */
 function pathMatch(reportPath, truthFile) {
-  return norm(reportPath).endsWith(norm(truthFile));
+  const report = norm(reportPath);
+  const truth = norm(truthFile);
+  return report === truth || report.endsWith(`/${truth}`);
 }
 
 /**

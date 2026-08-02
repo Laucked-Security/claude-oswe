@@ -4,9 +4,10 @@
 
 ## Goal
 
-Close SP9 without changing the auditor or the scoring method after observing the campaign. Publish the
-result actually produced by the existing NodeGoat runs, including the negative multi-file-chain signal,
-and make the architectural decision from that evidence.
+Close SP9 without changing the auditor or the scoring method after observing the campaign, except for
+the explicitly approved post-review matcher hardening described below. Publish the result actually
+produced by the existing NodeGoat runs, including the negative multi-file-chain signal, and make the
+architectural decision from that evidence.
 
 ## Campaign artifacts
 
@@ -64,12 +65,19 @@ without evidence of structural misses.
 ## Documentation and repository state
 
 `benchmark/BENCHMARK.md` will gain the complete SP9 table, extra-finding triage, limitations, and decision.
-`README.md` will update the test count from 375 to 380 (320 pipeline plus 60 benchmark tests) and will not
+`README.md` will update the test count from 375 to 382 (320 pipeline plus 62 benchmark tests) and will not
 claim that NodeGoat demonstrated a multi-file exploit chain.
 
 The canonical baseline and supplementary data score will be tracked. The temporary
 `nodegoat-routes-baseline.json` name will be retired after its byte-equivalent canonical replacement is
 verified.
+
+## Approved post-review matcher exception
+
+The no-scorer-change rule has one narrow exception: harden class matching so SQL and generic injection
+cannot satisfy NoSQL truth, and harden path matching so a suffix must start at a `/` segment boundary.
+Two negative regression tests cover these cases. This correction does not change either saved SP9 score;
+both regenerated artifacts must remain byte-identical to their checked-in baselines.
 
 ## Verification
 
@@ -78,13 +86,14 @@ Closure requires fresh evidence for all of the following:
 1. Re-score the routes report and compare it byte-for-byte with the canonical baseline.
 2. Re-score the data report and compare it byte-for-byte with the supplementary score.
 3. Run `node --test` in `skills/audit/scripts` (320 tests).
-4. Run `node --test` in `benchmark` (60 tests).
+4. Run `node --test` in `benchmark` (62 tests).
 5. Run `node .github/scripts/check-structure.mjs`.
 6. Run `git diff --check` and confirm that only intended SP9 artifacts remain changed.
 
 ## Non-goals
 
-- No auditor, schema, prompt, or scorer behavior change.
+- No auditor, schema, or prompt change; no scorer behavior change beyond the approved post-review matcher
+  hardening above.
 - No new NodeGoat audit run.
 - No dynamic exploitation.
 - No post-hoc aggregation of the two campaign reports.

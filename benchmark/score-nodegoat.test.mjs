@@ -57,3 +57,39 @@ test("a rejected finding does not satisfy recall", () => {
   assert.equal(r.recall, 0);
   assert.equal(r.reasoning_missed.length, 1); // a.js analyzed, only a rejected finding
 });
+
+test("SQL injection does not satisfy a NoSQL injection truth entry", () => {
+  const sqlTruth = { vulns:[{ id:"v-nosql", vuln_class:"nosql-injection", file:"app/data/user-dao.js" }] };
+  const sqlReport = {
+    coverage:{ analyzed:["app/data/user-dao.js"], skipped:[] },
+    findings:[{
+      finding_id:"SQL-1",
+      vuln_class:"sql-injection",
+      verification_status:"accepted",
+      source:{ file:"app/data/user-dao.js", line:1 },
+      sink:{ file:"app/data/user-dao.js", line:2 }
+    }],
+    chains:[]
+  };
+
+  const r = scoreNodegoat(sqlReport, sqlTruth);
+  assert.equal(r.recall, 0);
+});
+
+test("path matching requires a segment boundary before a truth path suffix", () => {
+  const pathTruth = { vulns:[{ id:"v-path", vuln_class:"xss", file:"app/data/user-dao.js" }] };
+  const pathReport = {
+    coverage:{ analyzed:["notapp/data/user-dao.js"], skipped:[] },
+    findings:[{
+      finding_id:"PATH-1",
+      vuln_class:"xss",
+      verification_status:"accepted",
+      source:{ file:"notapp/data/user-dao.js", line:1 },
+      sink:{ file:"notapp/data/user-dao.js", line:2 }
+    }],
+    chains:[]
+  };
+
+  const r = scoreNodegoat(pathReport, pathTruth);
+  assert.equal(r.recall, 0);
+});

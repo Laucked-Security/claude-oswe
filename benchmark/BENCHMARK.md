@@ -219,7 +219,17 @@ Gate read and SP10 decision:
 - The only accepted chain is the same-file contributions eval chain, so multi-file proof-graph engagement is not validated.
 - No misses exist to support a structural-miss diagnosis; SP10 App Graph is not justified by this campaign.
 
-Reproduce the two score artifacts deterministically:
+Maintainer-only reproduction from saved local reports (not clone-clean):
+
+`.oswe/` is gitignored, so these commands require the exact local inputs below. Their SHA-256 hashes are:
+
+| required local input | SHA-256 |
+|---|---|
+| `.oswe/reports/oswe-report-2026-06-23-1059-nodegoat-routes.json` | `8F2099F0A02A8B7B3032886E0FA9F9ACB457CA2A0611DFD9F3C255E39DF1A1D4` |
+| `.oswe/reports/oswe-report-2026-06-23-1110-nodegoat-data.json` | `EA326BC59854F94ADA06881DF4B27320066E19DA3E0F0D02374208554FAC9356` |
+
+The local `external/NodeGoat` checkout did not expose its own Git metadata, so no checkout commit was
+recorded as a campaign input.
 
 ```powershell
 node benchmark/score-nodegoat.mjs --report .oswe/reports/oswe-report-2026-06-23-1059-nodegoat-routes.json --truth benchmark/nodegoat-truth.json --out benchmark/results/nodegoat-baseline.json
