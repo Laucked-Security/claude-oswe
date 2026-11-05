@@ -159,7 +159,7 @@ test("enclosing_fn: end_byte is exclusive; a sink in an arrow inside a method be
 
 // ---- (4) invalid UTF-8 ----------------------------------------------------------------------------
 
-test("(4) a file with invalid UTF-8 is parse_status error; the rest of the graph is built", async (t) => {
+test("(4) invalid UTF-8 is decoded leniently (M2): garbage bytes are a syntax error, the partial tree is still extracted, the rest is built", async (t) => {
   const dir = tempDir(t);
   put(dir, "bad.js", Buffer.concat([Buffer.from([0xff, 0xfe, 0x00]), Buffer.from("function x() {}\n")]));
   put(dir, "good.js", "function y() {}\n");
@@ -170,7 +170,7 @@ test("(4) a file with invalid UTF-8 is parse_status error; the rest of the graph
   assert.deepEqual(files, { "bad.js": "error", "good.js": "ok" });
   assert.equal(graph.stats.files_error, 1);
   assert.ok(fnNamed(graph, "good.js", "y"));
-  assert.ok(!nodesOf(graph, "function").some((n) => n.file === "bad.js"));
+  assert.ok(fnNamed(graph, "bad.js", "x")); // decoded to U+FFFD, not dropped: like any syntax-error file
 });
 
 test("a syntax error still extracts the partial tree; CRLF and LF checkouts give the same ids", async (t) => {
@@ -662,4 +662,75 @@ test("I4: with a SecurityFilterChain config, unauthenticated Spring routes are u
   assert.deepEqual(nodesOf(secured, "route").map((r) => [r.path_pattern, r.auth]).sort(), [["/admin", "authenticated"], ["/open", "unknown"]]);
   assert.deepEqual(secured.stats.routes_by_auth, { unauthenticated: 0, authenticated: 1, unknown: 1 });
   assert.ok(secured.stats.coverage_matrix.java.not_extracted.includes("SecurityFilterChain matchers"));
+});
+
+// ---- I9: NodeGoat-shaped JavaScript ---------------------------------------------------------------
+
+test("I9: NodeGoat-shaped app — the route handler resolves to SessionHandler.handleSignup and a /signup -> eval candidate path exists", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "app/routes/session.js", [
+    "function SessionHandler(db) {",
+    "  \"use strict\";",
+    "  const userDAO = new UserDAO(db);",
+    "  this.handleSignup = (req, res, next) => {",
+    "    const payload = req.body.x;",
+    "    eval(req.body.x);",
+    "    return userDAO.addUser(payload);",
+    "  };",
+    "}",
+    "module.exports = SessionHandler;",
+    ""
+  ].join("\n"));
+  put(dir, "app/routes/index.js", [
+    "const SessionHandler = require('./session');",
+    "const index = (app, db) => {",
+    "  const sessionHandler = new SessionHandler(db);",
+    "  app.post('/signup', sessionHandler.handleSignup);",
+    "};",
+    "module.exports = index;",
+    ""
+  ].join("\n"));
+  const { graph } = await build(dir);
+  const handler = fnNamed(graph, "app/routes/session.js", "SessionHandler.handleSignup");
+  assert.ok(handler, "SessionHandler.handleSignup is a function node");
+  assert.equal(handler.kind, "method");
+  const [route] = nodesOf(graph, "route");
+  assert.deepEqual([route.http_method, route.path_pattern, route.handler], ["POST", "/signup", handler.id]);
+  const { enumeratePaths } = await import("../../enumerate-paths.mjs");
+  const { partitionGraph } = await import("../../partition-graph.mjs");
+  const [partition] = partitionGraph({ graph, fallback_partitions: [] }).partitions;
+  const paths = enumeratePaths({ graph, partition }).candidate_paths;
+  assert.deepEqual(paths.map((c) => [c.route.path_pattern, c.hops.map((h) => h.function), c.sink.class, c.sink.callee]), [
+    ["/signup", ["SessionHandler.handleSignup"], "eval", "eval"]
+  ]);
+});
+
+// ---- M2: non-fatal UTF-8 decoding ---------------------------------------------------------------------
+
+test("M2: a Latin-1 file (invalid UTF-8 bytes) still parses: parse_status ok, its functions extracted", async (t) => {
+  const dir = tempDir(t);
+  const latin1 = Buffer.concat([Buffer.from("// caf"), Buffer.from([0xe9]), Buffer.from(" cr\xe8me\nfunction handler(req, res) { return 1; }\n", "latin1")]);
+  writeFileSync(join(dir, "legacy.js"), latin1);
+  const { graph } = await build(dir);
+  assert.deepEqual(nodesOf(graph, "file").map((f) => [f.path, f.parse_status]), [["legacy.js", "ok"]]);
+  assert.ok(fnNamed(graph, "legacy.js", "handler"));
+  assert.equal(graph.stats.files_error, 0);
+});
+
+test("Task 10 minor: a route removing a marker-matching middleware (withoutMiddleware('auth')) is unknown, never authenticated", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "routes.php", [
+    "<?php",
+    "Route::middleware('auth')->group(function () {",
+    "    Route::get('/a', fn () => 1);",
+    "    Route::get('/b', fn () => 1)->withoutMiddleware('auth');",
+    "    Route::get('/c', fn () => 1)->withoutMiddleware('throttle');",
+    "});",
+    "Route::get('/d', fn () => 1)->withoutMiddleware('auth');",
+    ""
+  ].join("\n"));
+  const { graph } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["php"], frameworks: ["laravel"], referencesDir: REFERENCES_DIR });
+  const routes = Object.fromEntries(nodesOf(graph, "route").map((r) => [r.path_pattern, r.auth]));
+  assert.deepEqual(routes, { "/a": "authenticated", "/b": "unknown", "/c": "authenticated", "/d": "unknown" });
+  assert.ok(graph.stats.coverage_matrix.php.not_extracted.includes("withoutMiddleware"));
 });

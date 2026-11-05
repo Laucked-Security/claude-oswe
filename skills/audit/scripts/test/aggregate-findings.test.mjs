@@ -229,3 +229,17 @@ test("candidate_path_ids rides along on the CLI output (spawnSync)", () => {
   assert.equal(spawnSync(process.execPath, [CLI, "--file", inP, "--out", outP]).status, 0);
   assert.deepEqual(JSON.parse(readFileSync(outP, "utf8")).findings[0].candidate_path_ids, ["CP-p-1", "CP-p-2"]);
 });
+
+// --- I5: a raw finding's candidate_path_id must name a path of ITS partition ---
+test("I5: a candidate_path_id not starting with CP-<that finding's partition_id>- is dropped", () => {
+  const ok = raw("auth-F001", "auth", { candidate_path_id: "CP-auth-3" });
+  const foreign = raw("api-F003", "api", { candidate_path_id: "CP-auth-1" }); // another partition's path
+  const prefixOnly = raw("api-F004", "api", { candidate_path_id: "CP-api2-1" }); // "CP-api2-" is not "CP-api-"
+  const r = aggregateFindings([ok, foreign, prefixOnly]);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.findings[0].candidate_path_ids, ["CP-auth-3"]);
+  const none = aggregateFindings([foreign]);
+  assert.equal("candidate_path_ids" in none.findings[0], false);
+  const g = aggregateFindings([raw("auth-F001", "g-node-unauthenticated-root", { candidate_path_id: "CP-g-node-unauthenticated-root-12" })]);
+  assert.deepEqual(g.findings[0].candidate_path_ids, ["CP-g-node-unauthenticated-root-12"]);
+});

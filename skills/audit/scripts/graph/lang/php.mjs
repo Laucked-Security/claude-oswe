@@ -421,17 +421,20 @@ function routeChain(node) {
   return links;
 }
 
-// The middleware names / prefixes / controller a run of chain links sets (`group([...])` options too).
+// The middleware names / prefixes / controller a run of chain links sets (`group([...])` options too),
+// and the middleware names it removes (`->withoutMiddleware(...)`, `without_middleware` group option).
 function routeAttributes(links) {
-  const attrs = { middleware: [], prefix: [], controller: null };
+  const attrs = { middleware: [], without: [], prefix: [], controller: null };
+  const names = (value) => (value?.type === "class_constant_access_expression" ? [classRef(value)].filter(Boolean) : stringList(value));
   const set = (key, value) => {
-    if (key === "middleware") attrs.middleware.push(...(value?.type === "class_constant_access_expression" ? [classRef(value)].filter(Boolean) : stringList(value)));
+    if (key === "middleware") attrs.middleware.push(...names(value));
+    else if (key === "withoutMiddleware" || key === "without_middleware") attrs.without.push(...names(value));
     else if (key === "prefix") attrs.prefix.push(...[stringValue(value)].filter((p) => p !== null));
     else if (key === "controller") attrs.controller = classRef(value) ?? attrs.controller;
   };
   for (const { name, args } of links) {
     if (name === "group") for (const { key, value } of arrayEntries(args[0]?.value)) set(key, value);
-    else if (name === "middleware") for (const { value } of args) set(name, value);
+    else if (name === "middleware" || name === "withoutMiddleware") for (const { value } of args) set(name, value);
     else set(name, args[0]?.value);
   }
   return attrs;
@@ -481,13 +484,19 @@ function laravelRoute(node, links, verbAt, st) {
   const controller = groups.findLast((g) => g.controller)?.controller ?? null;
   const handler = verb.args[pathAt + 1] ? routeHandler(verb.args[pathAt + 1].value, controller, st) : null;
   if (!handler) return void st.notExtracted.add("route(non-literal handler)");
+  const own = routeAttributes(links.slice(verbAt + 1));
+  // removed middlewares are not modelled as such: build-graph makes a route that removes an auth
+  // marker `unknown`, and the construct is noted
+  const without = [...groups.flatMap((g) => g.without), ...own.without];
+  if (without.length) st.notExtracted.add("withoutMiddleware");
   st.routes.push({
     line: lineOf(node),
     start_byte: node.startIndex,
     http_method: LARAVEL_VERBS[verb.name],
     path_pattern: laravelPath([...groups.flatMap((g) => g.prefix), path]),
     handler_text: handler,
-    middleware_texts: [...groups.flatMap((g) => g.middleware), ...routeAttributes(links.slice(verbAt + 1)).middleware],
+    middleware_texts: [...groups.flatMap((g) => g.middleware), ...own.middleware],
+    ...(without.length ? { without_middleware_texts: without } : {}),
     framework: "laravel"
   });
 }

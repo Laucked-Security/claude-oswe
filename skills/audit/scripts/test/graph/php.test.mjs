@@ -414,3 +414,18 @@ test("C1b: classes carry implements (class_interface_clause; an interface's extr
   assert.deepEqual(bodiless, { "IR.run": true, "A.run": true, "A.y": false, "C.z": false });
   assert.equal(x.not_extracted.includes("implements clause"), false);
 });
+
+test("Task 10 minor: ->withoutMiddleware(...) is noted and carried as without_middleware_texts (route or group level)", async () => {
+  const x = await extract(php(
+    "Route::middleware('auth')->group(function () {\n" +
+      "    Route::get('/a', fn () => 1);\n" +
+      "    Route::get('/b', fn () => 1)->withoutMiddleware('auth');\n" +
+      "    Route::get('/c', fn () => 1)->withoutMiddleware(['throttle', 'csrf']);\n" +
+      "});\n" +
+      "Route::withoutMiddleware('auth:api')->group(function () { Route::get('/d', fn () => 1); });\n"
+  ));
+  assert.deepEqual(x.routes.map((r) => [r.path_pattern, r.middleware_texts, r.without_middleware_texts ?? []]), [
+    ["/a", ["auth"], []], ["/b", ["auth"], ["auth"]], ["/c", ["auth"], ["throttle", "csrf"]], ["/d", [], ["auth:api"]]
+  ]);
+  assert.ok(x.not_extracted.includes("withoutMiddleware"));
+});

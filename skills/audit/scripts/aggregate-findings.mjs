@@ -27,6 +27,8 @@ const uniqSortedObjects = (arr) => {
   return [...m.values()].sort(cmpCanon);
 };
 const uniqSortedStrings = (arr) => [...new Set(arr)].sort(cmp);
+const ownCandidatePath = (f) =>
+  typeof f.candidate_path_id === "string" && typeof f.partition_id === "string" && f.candidate_path_id.startsWith(`CP-${f.partition_id}-`);
 
 export function aggregateFindings(rawFindings) {
   const seen = new Set();
@@ -52,7 +54,9 @@ export function aggregateFindings(rawFindings) {
         : (origins.has("both") ? "both" : [...origins].sort()[0]);
     const leadIds = uniqSortedStrings(group.flatMap((f) => f.source_lead_ids || []));
     // SP10: raw findings cite one candidate_path_id; the merged finding carries the union as candidate_path_ids.
-    const candidatePathIds = uniqSortedStrings(group.flatMap((f) => (f.candidate_path_id ? [f.candidate_path_id] : [])));
+    // An id is kept only when it names a path of the citing finding's own partition (CP-<partition_id>-<n>):
+    // the analyzer only ever saw that partition's candidate list, so any other id is invented or copied.
+    const candidatePathIds = uniqSortedStrings(group.flatMap((f) => (ownCandidatePath(f) ? [f.candidate_path_id] : [])));
     merged.push({
       finding_id: "PENDING",
       partition_id: rep.partition_id,

@@ -410,3 +410,39 @@ test("C1b (TS): implements clauses and interfaces are classes; interface method 
   const js = await extract("class A extends B {}\n");
   assert.deepEqual(js.classes.map((c) => c.implements), [[]]);
 });
+
+// ---- I9: NodeGoat-shaped constructor-style classes ---------------------------------------------------
+
+test("I9: a function whose body assigns this.<m> = function / arrow is a constructor-style class; F.prototype.<m> adds methods", async () => {
+  const x = await extract(
+    "function SessionHandler(db) {\n  this.handleSignup = (req, res) => { eval(req.body.x); };\n  this.login = function (req, res) { this.helper(); };\n  this.count = 0;\n}\n" +
+      "SessionHandler.prototype.logout = function (req, res) {};\n" +
+      "const Profile = function (db) { this.show = (req, res) => {}; };\n" +
+      "function plain() { const self = {}; self.x = () => {}; }\n" +
+      "const sessionHandler = new SessionHandler(db);\n" +
+      "app.post('/signup', sessionHandler.handleSignup);\napp.get('/logout', sessionHandler.logout);\napp.get('/p', plainObj.show);\n" +
+      "module.exports = SessionHandler;\n"
+  );
+  const ctor = x.functions.find((f) => f.qualified_name === "SessionHandler");
+  const profile = x.functions.find((f) => f.qualified_name === "Profile");
+  assert.deepEqual(x.classes.map((c) => [c.name, c.extends, c.implements, c.methods, c.start_byte]), [
+    ["SessionHandler", null, [], ["handleSignup", "login", "logout"], ctor.start_byte],
+    ["Profile", null, [], ["show"], profile.start_byte]
+  ]);
+  const methods = x.functions.filter((f) => f.class).map((f) => [f.qualified_name, f.name, f.kind, f.class, f.exported]);
+  assert.deepEqual(methods, [
+    ["SessionHandler.handleSignup", "handleSignup", "method", "SessionHandler", true],
+    ["SessionHandler.login", "login", "method", "SessionHandler", true],
+    ["SessionHandler.logout", "logout", "method", "SessionHandler", true],
+    ["Profile.show", "show", "method", "Profile", false]
+  ]);
+  assert.equal(x.functions.find((f) => f.qualified_name === "SessionHandler.handleSignup").class_start_byte, undefined);
+  // this.helper() inside a constructor-style method acts for that class
+  assert.deepEqual(x.calls.filter((c) => c.callee_text === "this.helper").map((c) => c.receiver), ["this"]);
+  // routes on obj.method carry the receiver's class when obj is demonstrably bound (new F())
+  assert.deepEqual(x.routes.map((r) => [r.path_pattern, r.handler_text, r.handler_receiver_class ?? null]), [
+    ["/signup", "sessionHandler.handleSignup", "SessionHandler"],
+    ["/logout", "sessionHandler.logout", "SessionHandler"],
+    ["/p", "plainObj.show", null]
+  ]);
+});

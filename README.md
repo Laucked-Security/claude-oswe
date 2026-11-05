@@ -8,7 +8,7 @@
 
 [![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Tests: 933 passing, 4 environment skips](https://img.shields.io/badge/tests-933%20passing%2C%204%20env%20skips-brightgreen)
+![Tests: 978 passing, 4 environment skips](https://img.shields.io/badge/tests-978%20passing%2C%204%20env%20skips-brightgreen)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
@@ -30,8 +30,8 @@ positives on safe code, no exploit chain, no proof, no reproducibility. That's n
 `oswe` is built to **not do that**:
 
 - **Determinism where it matters.** Severity, dedup, and the "is this a Critical unauth-RCE?" decision
-  are **not** left to the model — they run in tested, dependency-free Node helpers with **937 unit
-  tests** (862 pipeline + 75 benchmark, including two end-to-end replay tests that drive the full
+  are **not** left to the model — they run in tested, dependency-free Node helpers with **982 unit
+  tests** (907 pipeline + 75 benchmark, including two end-to-end replay tests that drive the full
   helper chain via real CLIs with pre-baked responses — one for the no-cache path, one for the
   kill-then-resume cache path; 4 pipeline symlink tests skip where the OS denies symlink creation,
   e.g. unprivileged Windows). The model *finds*; the helpers *decide*.
@@ -294,7 +294,7 @@ The runtime validator [`skills/audit/scripts/validators.mjs`](skills/audit/scrip
 helper inlined). Run the suites (Node ≥ 20 only, no install):
 
 ```bash
-( cd skills/audit/scripts && node --test )          # 862 pipeline tests (4 symlink tests skip without symlink privileges)
+( cd skills/audit/scripts && node --test )          # 907 pipeline tests (4 symlink tests skip without symlink privileges)
 ( cd benchmark && node --test )                     # 75 benchmark-engine tests
 node .github/scripts/check-structure.mjs            # stacks / references / fixtures / graph extractors + goldens gate
 node .github/scripts/check-vendor.mjs               # vendored tree-sitter: MANIFEST.json hashes + 10 MiB budget

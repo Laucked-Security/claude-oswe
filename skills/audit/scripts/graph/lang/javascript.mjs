@@ -122,6 +122,7 @@ function newState(path, surface) {
     anonNames: new Map(), // function start index -> qualified name given by a route argument
     requireImports: new Set(), // start index of require() calls already recorded by their declarator
     topLevel: new Map(), // module-level function / class name -> start byte of its definition
+    ctorClasses: new Map(), // constructor-style class name -> { start: its function's start | null, methods: [] }
     module: newFrame(null, null),
     fnStack: [],
     classStack: []
@@ -233,13 +234,50 @@ function functionName(node, ctx) {
   return null;
 }
 
+// ---- constructor-style classes (NodeGoat: `function F(db) { this.m = (req, res) => {...}; }`) -----
+
+const CTOR_METHOD_VALUES = new Set(["function_expression", "function", "arrow_function", "generator_function"]);
+const PROTOTYPE_METHOD = /^([A-Za-z_$][\w$]*)\.prototype\.([A-Za-z_$][\w$]*)$/;
+
+// A top-level `function F(...)` / `const F = function (...)` whose body assigns `this.<m> = <function |
+// arrow>` (a direct statement of its body) is a constructor-style class F.
+function isConstructorStyle(node, ctx, enclosing) {
+  if (enclosing || !(node.type === "function_declaration" || ((node.type === "function_expression" || node.type === "function") && ctx.parentType === "variable_declarator"))) return false;
+  return namedOf(field(node, "body")).some((statement) => {
+    const assignment = statement.type === "expression_statement" ? namedOf(statement)[0] : null;
+    const left = assignment?.type === "assignment_expression" ? field(assignment, "left") : null;
+    return left?.type === "member_expression" && field(left, "object")?.type === "this" && CTOR_METHOD_VALUES.has(field(assignment, "right")?.type);
+  });
+}
+
+// The constructor-style method a function defines, as { cls, name }: the value of `this.<m> = ...` in a
+// constructor-style function's own body, or of a module-level `F.prototype.<m> = ...`; else null.
+function constructorMethod(node, ctx, st, enclosing) {
+  if (ctx.parentType !== "assignment_expression" || ctx.field !== "right") return null;
+  const left = field(node.parent, "left");
+  if (left?.type !== "member_expression") return null;
+  const property = field(left, "property")?.text;
+  if (field(left, "object")?.type === "this") return enclosing?.ctorName && property ? { cls: enclosing.ctorName, name: property } : null;
+  const prototype = enclosing ? null : PROTOTYPE_METHOD.exec(textOf(left));
+  return prototype ? { cls: prototype[1], name: prototype[2] } : null;
+}
+
+const ctorClass = (st, name) => (st.ctorClasses.has(name) ? st.ctorClasses.get(name) : st.ctorClasses.set(name, { start: null, methods: [] }).get(name));
+
 function onFunction(node, st, ctx) {
   const enclosing = st.fnStack.at(-1) ?? null;
   const isMethod = node.type === "method_definition";
-  const cls = isMethod && ctx.parentType === "class_body" ? st.classStack.at(-1)?.name ?? null : null;
-  let name = functionName(node, ctx);
+  const ctorMethod = constructorMethod(node, ctx, st, enclosing);
+  const cls = isMethod && ctx.parentType === "class_body" ? st.classStack.at(-1)?.name ?? null : ctorMethod?.cls ?? null;
+  let name = ctorMethod?.name ?? functionName(node, ctx);
+  if (ctorMethod) {
+    const entry = ctorClass(st, ctorMethod.cls);
+    if (!entry.methods.includes(ctorMethod.name)) entry.methods.push(ctorMethod.name);
+  }
   let qualifiedName;
-  if (st.anonNames.has(node.startIndex)) {
+  if (ctorMethod) {
+    qualifiedName = `${cls}.${name}`;
+  } else if (st.anonNames.has(node.startIndex)) {
     name = "<anon>";
     qualifiedName = st.anonNames.get(node.startIndex);
   } else if (!name) {
@@ -262,13 +300,17 @@ function onFunction(node, st, ctx) {
     start_byte: node.startIndex,
     end_byte: node.endIndex,
     param_count: parameterCount(node),
-    kind: isMethod ? "method" : node.type === "arrow_function" ? "arrow" : "function",
+    kind: isMethod || ctorMethod ? "method" : node.type === "arrow_function" ? "arrow" : "function",
     exported: false,
     class: cls,
     // an arrow's lexical class body: resolve.mjs inherits a containing method's class only within it
-    ...(node.type === "arrow_function" ? { class_start_byte: st.classStack.at(-1)?.start ?? null } : {})
+    ...(node.type === "arrow_function" && !ctorMethod ? { class_start_byte: st.classStack.at(-1)?.start ?? null } : {})
   });
   const frame = newFrame(node.startIndex, qualifiedName);
+  if (isConstructorStyle(node, ctx, enclosing)) {
+    frame.ctorName = name;
+    ctorClass(st, name).start = node.startIndex;
+  }
   addParameters(node, frame);
   st.fnStack.push(frame);
   return () => st.fnStack.pop();
@@ -486,6 +528,13 @@ function argTexts(node, st) {
   }
 }
 
+// The class of `obj` for an `obj.method` handler argument, from the scopes' bindings; null otherwise.
+function handlerReceiverClass(arg, st) {
+  if (arg?.type !== "member_expression") return null;
+  const object = field(arg, "object");
+  return object?.type === "identifier" ? receiverClass(object.text, st.fnStack, st.module) : null;
+}
+
 function expressRoute(call, fn, args, st) {
   const verb = lookup(EXPRESS_VERBS, field(fn, "property")?.text);
   if (!verb) return;
@@ -506,6 +555,7 @@ function expressRoute(call, fn, args, st) {
   if (rest.length === 0) return;
   const last = argTexts(rest.at(-1), st); // a handler must be function-ish (not an options object)
   if (last.length === 0) return;
+  const receiverCls = handlerReceiverClass(rest.at(-1), st);
   st.routes.push({
     line: lineOf(call),
     start_byte: call.startIndex,
@@ -513,7 +563,10 @@ function expressRoute(call, fn, args, st) {
     path_pattern: path,
     handler_text: last.at(-1),
     middleware_texts: [...rest.slice(0, -1).flatMap((a) => argTexts(a, st)), ...last.slice(0, -1)],
-    framework: "express"
+    framework: "express",
+    // `obj.method` on a receiver of a demonstrable class (`const obj = new F(...)`, a typed parameter):
+    // build-graph resolves the handler as a call on that class (`F.method`)
+    ...(receiverCls ? { handler_receiver_class: receiverCls } : {})
   });
 }
 
@@ -719,7 +772,20 @@ function finishCall({ anchor, calleeText, argCount, receiver, receiverName, fiel
   };
 }
 
+// Constructor-style classes become classes[] entries anchored at their function's start byte (so a
+// default export of the function anchors the class too); a `F.prototype.m` target needs F to be a
+// module-level definition of this file, and a real `class F` keeps its own entry.
+function pushConstructorClasses(st) {
+  const declared = new Set(st.classes.map((c) => c.name));
+  for (const [name, { start, methods }] of st.ctorClasses) {
+    const start_byte = start ?? st.topLevel.get(name) ?? null;
+    if (start_byte === null || declared.has(name)) continue;
+    st.classes.push({ name, extends: null, implements: [], methods, start_byte });
+  }
+}
+
 function finish(st) {
+  pushConstructorClasses(st);
   for (const { entry, name } of st.defaultRefs) if (st.topLevel.has(name)) entry.start_byte = st.topLevel.get(name);
   const exported = new Set(st.exports.map((e) => e.name));
   const defaultStarts = new Set(st.exports.filter((e) => e.name === "default").map((e) => e.start_byte));

@@ -348,3 +348,18 @@ test("C1b: python classes carry an empty implements list", async () => {
   const x = await extract("class A(B):\n    def m(self):\n        pass\n");
   assert.deepEqual(x.classes.map((c) => [c.name, c.implements]), [["A", []]]);
 });
+
+test("I8: urlpatterns = [...] + static(...) + [...] takes every list operand; a non-list operand or value is noted urlpatterns(non-literal)", async () => {
+  const x = await extract(
+    "from django.urls import path\nfrom django.conf.urls.static import static\n" +
+      "urlpatterns = [path('a/', va)] + static(settings.MEDIA_URL) + [path('b/', vb)]\n" +
+      "urlpatterns += [path('c/', vc)] + extra\n"
+  );
+  assert.deepEqual(x.routes.map((r) => [r.path_pattern, r.handler_text]), [["/a/", "va"], ["/b/", "vb"], ["/c/", "vc"]]);
+  assert.ok(x.not_extracted.includes("urlpatterns(non-literal)"));
+  const y = await extract("urlpatterns = router.urls\n");
+  assert.deepEqual(y.routes, []);
+  assert.deepEqual(y.not_extracted, ["urlpatterns(non-literal)"]);
+  const z = await extract("urlpatterns = [path('a/', va)]\n");
+  assert.equal(z.not_extracted.includes("urlpatterns(non-literal)"), false);
+});

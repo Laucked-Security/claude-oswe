@@ -186,7 +186,9 @@ export function versionDigest(files, { graphDir = GRAPH_DIR } = {}) {
 
 // ---- stage 3: decode + parse + extract ------------------------------------------------------------
 
-const UTF8 = new TextDecoder("utf-8", { fatal: true });
+// Non-fatal: an invalid byte sequence (a Latin-1 / cp1252 legacy file) decodes to U+FFFD instead of
+// dropping the whole file as a parse error; identifiers and offsets stay consistent within the text.
+const UTF8 = new TextDecoder("utf-8");
 
 const frameworksOf = (o, stack) => sortedUnique(o.frameworks.filter((f) => FRAMEWORK_STACK[f] === stack));
 
@@ -225,6 +227,10 @@ async function extractAll({ o, files, langModules }, surfaceOf) {
 const importKey = (fromPath, specifier) => `${fromPath}\u0000${specifier}`;
 const siteKey = (path, x) => `${path}\u0000${x}`;
 const routeSiteKey = (path, startByte) => `${path}\u0001${startByte}`;
+// A route's handler text resolution key: the text, plus its receiver class when the extractor knows one
+// (two `obj.m` handlers on receivers of different classes are different functions).
+const handlerKey = (path, route) =>
+  route.handler_receiver_class ? siteKey(path, `${route.handler_text}\u0002${route.handler_receiver_class}`) : siteKey(path, route.handler_text);
 const fnRef = (path, fn) => ({ path, qualified_name: fn.qualified_name, start_byte: fn.start_byte });
 
 // The function a route handler / middleware text names in its file: `<anon>@l:c` and `Class.method`
@@ -245,8 +251,9 @@ function resolveRouteTexts(parsed, importMap, classIndex, langModules) {
         const innermost = containing.reduce((a, f) => (a && a.start_byte > f.start_byte ? a : f), null);
         resolved.set(routeSiteKey(file.path, route.start_byte), innermost && fnRef(file.path, innermost));
       }
-      for (const text of [route.handler_text, ...route.middleware_texts]) {
-        const key = siteKey(file.path, text);
+      const texts = [[route.handler_text, route.handler_receiver_class ?? null], ...route.middleware_texts.map((t) => [t, null])];
+      for (const [text, receiverClass] of texts) {
+        const key = receiverClass ? handlerKey(file.path, route) : siteKey(file.path, text);
         if (resolved.has(key)) continue;
         const direct = /[.@]/.test(text) ? file.extract.functions.filter((f) => f.qualified_name === text) : [];
         if (direct.length === 1) {
@@ -256,7 +263,9 @@ function resolveRouteTexts(parsed, importMap, classIndex, langModules) {
         resolved.set(key, null);
         const calls = pseudo.get(file.path) ?? [];
         bySeq.set(siteKey(file.path, calls.length), key);
-        calls.push({ line: route.line, start_byte: calls.length, callee_text: text, enclosing_start_byte: null, receiver: null, receiver_class: null, scope_names: [] });
+        // an `obj.method` handler on a receiver of a known class (JS handler_receiver_class) resolves
+        // like the call `obj.method()` would: rule 1b on that class
+        calls.push({ line: route.line, start_byte: calls.length, callee_text: text, enclosing_start_byte: null, receiver: null, receiver_class: receiverClass, scope_names: [] });
         pseudo.set(file.path, calls);
       }
     }
@@ -335,7 +344,7 @@ function classifyUses(parsed, resolved, importMap, notExtracted) {
       const mws = route.middleware_texts.filter((text) => !isBenignMiddleware(text)).map((text) => ({ file: file.path, text }));
       const own = isBenignMiddleware(route.handler_text) ? [] : [{ file: file.path, text: route.handler_text }];
       const global = { path_pattern: route.path_pattern, start_byte: route.start_byte, mws: [...mws, ...own] };
-      if (resolved.get(siteKey(file.path, route.handler_text))) {
+      if (resolved.get(handlerKey(file.path, route))) {
         pushTo(globals, file.path, global);
         continue;
       }
@@ -431,9 +440,12 @@ function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
       const mws = [...ctx.mws, ...globalsBefore(uses.globals, file.path, route.start_byte, route.path_pattern), ...own]
         .map((m) => ({ ...m, ref: resolved.get(siteKey(m.file, m.text)) ?? null }));
       const overloadKey = routeSiteKey(file.path, route.start_byte);
-      const handlerRef = resolved.get(overloadKey) ?? resolved.get(siteKey(file.path, route.handler_text)) ?? null;
+      const handlerRef = resolved.get(overloadKey) ?? resolved.get(handlerKey(file.path, route)) ?? null;
       if (!handlerRef && resolved.has(overloadKey)) notExtracted(file.stack).add("route(overloaded handler)");
-      const auth = routeAuth(mws, surfaceOfPath);
+      // a route removing an auth-marker middleware (Laravel `->withoutMiddleware('auth')`) is unknown:
+      // the graph cannot tell which middlewares are left
+      const removesAuth = (route.without_middleware_texts ?? []).some((text) => isAuthMarker(text, surfaceOfPath(file.path)));
+      const auth = removesAuth ? "unknown" : routeAuth(mws, surfaceOfPath);
       routes.push({
         handlerRef,
         mws,

@@ -27,7 +27,9 @@
 //   routes     Flask `@<x>.route(path, methods=[...])` / `@<x>.<verb>(path)`; FastAPI the same
 //              verbs on a FastAPI / APIRouter receiver (or in a file importing fastapi), plus
 //              `Depends.<name>` middleware texts; Django module-level `urlpatterns` `path()` /
-//              `re_path()` items (method "ANY"), `include("a.urls")` as a "USE" mount backed by a
+//              `re_path()` items (method "ANY") of each list literal, also `+`-joined (`[...] +
+//              static(...)`; a non-list operand is noted "urlpatterns(non-literal)"),
+//              `include("a.urls")` as a "USE" mount backed by a
 //              namespace import of "a.urls" so build-graph prefixes the included file's routes.
 //
 // Same TreeCursor walk as the JavaScript module (see its header for why not tree-sitter queries).
@@ -338,14 +340,26 @@ function onAssignment(node, st) {
     const names = namedOf(right).map(stringValue);
     if (names.every((n) => n !== null)) st.allNames = names;
   }
-  if (left.text === "urlpatterns" && right?.type === "list") djangoRoutes(right, st);
+  if (left.text === "urlpatterns") urlpatterns(right, st);
+}
+
+// `urlpatterns = [...]`, also as the operands of a `+` chain (`[...] + static(...) + [...]`): every
+// list operand's routes; any operand (or value) that is not a list literal is noted
+// "urlpatterns(non-literal)" — its routes are not extracted.
+function urlpatterns(value, st) {
+  if (value?.type === "list") return djangoRoutes(value, st);
+  if (value?.type === "binary_operator" && field(value, "operator")?.type === "+") {
+    urlpatterns(field(value, "left"), st);
+    return urlpatterns(field(value, "right"), st);
+  }
+  st.notExtracted.add("urlpatterns(non-literal)");
 }
 
 function onAugmentedAssignment(node, st) {
   const left = field(node, "left");
   for (const name of patternNames(left)) bind(st, name, { assignment: true });
   const right = field(node, "right");
-  if (atModule(st) && left?.type === "identifier" && left.text === "urlpatterns" && right?.type === "list") djangoRoutes(right, st);
+  if (atModule(st) && left?.type === "identifier" && left.text === "urlpatterns") urlpatterns(right, st);
 }
 
 function onWalrus(node, st) {

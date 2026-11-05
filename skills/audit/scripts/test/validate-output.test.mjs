@@ -357,3 +357,14 @@ test("the new SP10 finding fields stay optional (a plain finding is unchanged)",
   const r = validate("finding", baseFinding());
   assert.equal(r.valid, true, JSON.stringify(r.errors));
 });
+
+// --- I5: orchestration-only SP10 fields are forbidden in analyzer output ---
+test("I5: analyzer-response rejects findings carrying candidate_path_ids, structural_path or verification_notes", () => {
+  for (const extra of [{ candidate_path_ids: ["CP-auth-1"] }, { structural_path: "proven" }, { verification_notes: ["structural: absent"] }]) {
+    const r = validate("analyzer-response", analyzerResponse([baseFinding(extra)]));
+    assert.equal(r.valid, false, JSON.stringify(extra));
+  }
+  // the same fields stay valid on a finding / final-finding (the orchestrator sets them)
+  assert.equal(validate("finding", baseFinding({ candidate_path_ids: ["CP-p-1"], structural_path: "n/a", verification_notes: ["x"] })).valid, true);
+  assert.equal(validate("analyzer-response", analyzerResponse([baseFinding({ candidate_path_id: "CP-auth-1" })])).valid, true);
+});
