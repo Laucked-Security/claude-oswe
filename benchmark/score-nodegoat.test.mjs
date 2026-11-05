@@ -93,3 +93,47 @@ test("path matching requires a segment boundary before a truth path suffix", () 
   const r = scoreNodegoat(pathReport, pathTruth);
   assert.equal(r.recall, 0);
 });
+
+// --- SP10: graph metrics surface only for a report that carries SP10 data, so re-scoring the saved SP9
+// reports stays byte-identical to the checked-in baselines. ---
+const SP9_SCORE_KEYS = ["total", "found", "missed", "recall", "extra", "chains", "multi_file_chains",
+  "structural_missed", "reasoning_missed", "structural_missed_share"];
+const spFinding = (id, verification_status, extra) => ({
+  finding_id: id, vuln_class: "xss", verification_status,
+  source: { file: "app/routes/profile.js", line: 1 }, sink: { file: "app/routes/profile.js", line: 2 }, ...extra
+});
+
+test("SP10: a report without SP10 fields yields exactly the pre-SP10 keys", () => {
+  assert.deepEqual(Object.keys(scoreNodegoat(report, truth)), SP9_SCORE_KEYS);
+});
+
+test("SP10: 4 accepted findings, 3 proven, 2 with candidate ids -> 0.75 / 0.5, call_resolution_ratio from app_graph.stats", () => {
+  const sp10 = {
+    ...report,
+    app_graph: { available: true, multi_file_chain_count: 1, stats: { calls_total: 20, calls_exact: 15 } },
+    findings: [
+      spFinding("OSWE-1", "accepted", { structural_path: "proven", candidate_path_ids: ["CP-p01-1"] }),
+      spFinding("OSWE-2", "accepted", { structural_path: "proven", candidate_path_ids: ["CP-p01-2"] }),
+      spFinding("OSWE-3", "accepted", { structural_path: "proven" }),
+      spFinding("OSWE-4", "accepted", { structural_path: "absent" }),
+      spFinding("OSWE-5", "rejected", { structural_path: "proven", candidate_path_ids: ["CP-p01-3"] })
+    ]
+  };
+  const r = scoreNodegoat(sp10, truth);
+  assert.deepEqual(Object.keys(r), [...SP9_SCORE_KEYS, "structural_proof_rate", "candidate_path_hit_rate", "call_resolution_ratio"]);
+  assert.equal(r.structural_proof_rate, 0.75);
+  assert.equal(r.candidate_path_hit_rate, 0.5);
+  assert.equal(r.call_resolution_ratio, 0.75);
+  assert.equal(r.multi_file_chains, 1); // unchanged: still counted from accepted chains' evidence files
+});
+
+test("SP10: graph-unavailable report -> rates over its findings, call_resolution_ratio null; no active findings -> null rates", () => {
+  const r = scoreNodegoat({ ...report, app_graph: { available: false, reason: "parser unavailable", multi_file_chain_count: 0 } }, truth);
+  assert.equal(r.structural_proof_rate, 0);
+  assert.equal(r.candidate_path_hit_rate, 0);
+  assert.equal(r.call_resolution_ratio, null);
+  const none = scoreNodegoat({ ...report, findings: [spFinding("OSWE-1", "rejected", { candidate_path_ids: ["CP-p01-1"] })] }, truth);
+  assert.equal(none.structural_proof_rate, null);
+  assert.equal(none.candidate_path_hit_rate, null);
+  assert.equal(none.call_resolution_ratio, null);
+});

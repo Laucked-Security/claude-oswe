@@ -161,3 +161,29 @@ test("hygiene_findings: accepted trust-boundary finding increments counter; non-
   assert.equal(map.BenchmarkTest00042.hygiene_findings, 1, "one accepted trust-boundary finding on T42");
   assert.equal(map.BenchmarkTest00043.hygiene_findings, 0, "non-trust-boundary finding must not increment hygiene_findings");
 });
+
+// --- SP10: per-finding graph fields + per-report graph stats, only for a report that carries SP10 data. ---
+test("SP10: a report without SP10 data adds no findings[] and no app_graph_stats", () => {
+  const map = extractAdjudications([REPORT]);
+  assert.equal("app_graph_stats" in map, false);
+  for (const e of Object.values(map)) assert.equal("findings" in e, false);
+});
+
+test("SP10: an SP10 report records each resolved finding's graph fields and the report's app_graph.stats", () => {
+  const stats = { calls_total: 10, calls_exact: 7 };
+  const sp10 = {
+    ...REPORT,
+    app_graph: { available: true, multi_file_chain_count: 0, stats },
+    findings: [
+      { ...f8("OSWE-1"), structural_path: "proven", candidate_path_ids: ["CP-p01-1"], verification_notes: ["note"] },
+      { ...f8("OSWE-2"), verification_status: "downgraded" }
+    ]
+  };
+  const map = extractAdjudications([sp10, REPORT]);
+  assert.deepEqual(map.BenchmarkTest00008.findings, [
+    { finding_id: "OSWE-1", verification_status: "accepted", structural_path: "proven", candidate_path_ids: ["CP-p01-1"], verification_notes: ["note"] },
+    { finding_id: "OSWE-2", verification_status: "downgraded", structural_path: null, candidate_path_ids: [], verification_notes: [] }
+  ]);
+  assert.deepEqual(map.BenchmarkTest00010.findings, []); // analyzed in the SP10 report, no finding
+  assert.deepEqual(map.app_graph_stats, [stats]);
+});

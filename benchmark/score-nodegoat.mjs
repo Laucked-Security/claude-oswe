@@ -4,8 +4,11 @@
 // CLI:
 //   node benchmark/score-nodegoat.mjs --report <report.json> --truth <nodegoat-truth.json> --out <score.json>
 //   exit 0 ok / 2 IO|usage.
+// SP10: a report carrying graph data also gets structural_proof_rate, candidate_path_hit_rate and
+// call_resolution_ratio (definitions in metrics.mjs); an SP9 report scores exactly as before.
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
+import { carriesGraphData, graphFindingRates, callResolutionRatio } from "./metrics.mjs";
 
 // ---------------------------------------------------------------------------
 // vuln_class synonym groups (lowercased). A finding class compatible with a
@@ -138,7 +141,7 @@ export function scoreNodegoat(report, truth) {
   const structural_missed_share =
     missed.length > 0 ? structural_missed.length / missed.length : null;
 
-  return {
+  const result = {
     total,
     found,
     missed,
@@ -150,6 +153,15 @@ export function scoreNodegoat(report, truth) {
     reasoning_missed,
     structural_missed_share
   };
+
+  // --- SP10 graph metrics: only for a report carrying graph data (an app_graph key, or a finding with
+  // structural_path / candidate_path_ids), so re-scoring an SP9 report stays byte-identical. ---
+  if (carriesGraphData(report)) {
+    Object.assign(result, graphFindingRates(report.findings));
+    const stats = report.app_graph && report.app_graph.stats;
+    result.call_resolution_ratio = callResolutionRatio(stats ? [stats] : []);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,13 +6,19 @@
 //   3. Every test-fixtures/<stack>/vulnerable has EXPECTED.md AND at least one "VULN" marker.
 //   4. Every test-fixtures/<stack>/safe exists and has NO EXPECTED.md (it is a negative control).
 //   5. Each plugin schema has a matching validator name exported by validators.mjs (sanity).
+//   6. references/sarif-rule-map.json is valid.  7. Each stack reference has exactly one valid ```surface block.
+//   8. Every stack has its graph extractor skills/audit/scripts/graph/lang/<module>.mjs whose lang.stack is the stack.
+//   9. Every stack has test-fixtures/graph/<stack>/graph.expected.json, valid against the graph schema.
+//  10. vendor/tree-sitter/MANIFEST.json lists exactly one tree-sitter-<id>.wasm.gz per graph/parser.mjs LANG_IDS entry.
 // Exit 0 = all good; exit 1 = a violation (printed); exit 2 = the gate itself failed to run.
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const STACKS = ["php", "node", "python", "java", "dotnet"];
+// SP10: the graph extractor module (skills/audit/scripts/graph/lang/<module>.mjs) of each stack.
+const STACK_TO_LANG = { node: "javascript", python: "python", java: "java", php: "php", dotnet: "csharp" };
 const errors = [];
 const ok = (m) => console.log(`  ok  ${m}`);
 const bad = (m) => { errors.push(m); console.log(`  XX  ${m}`); };
@@ -128,6 +134,47 @@ for (const s of STACKS) {
     ? ok(`${s}.md surface.sinks linked to a vulnerable fixture`)
     : bad(`${refPath}: no surface.sinks token appears in test-fixtures/${s}/vulnerable (block drifted from reality?)`);
 }
+
+const importRepo = (p) => import(pathToFileURL(join(ROOT, p)).href);
+
+console.log("8) graph extractors (SP10): one graph/lang module per stack, lang.stack matches");
+for (const s of STACKS) {
+  const mod = `skills/audit/scripts/graph/lang/${STACK_TO_LANG[s]}.mjs`;
+  if (!STACK_TO_LANG[s] || !existsSync(join(ROOT, mod))) { bad(`missing graph extractor for stack "${s}": ${mod}`); continue; }
+  try {
+    const { lang } = await importRepo(mod);
+    lang && lang.stack === s ? ok(`${mod} (lang.stack "${s}")`) : bad(`${mod}: lang.stack is ${JSON.stringify(lang && lang.stack)}, expected "${s}"`);
+  } catch (e) { bad(`${mod}: cannot be imported: ${e.message}`); }
+}
+
+console.log("9) graph goldens (SP10): test-fixtures/graph/<stack>/graph.expected.json, schema-valid");
+let validate = null;
+try { ({ validate } = await importRepo("skills/audit/scripts/validate-output.mjs")); }
+catch (e) { bad(`skills/audit/scripts/validate-output.mjs cannot be imported: ${e.message}`); }
+for (const s of STACKS) {
+  const dir = `test-fixtures/graph/${s}`;
+  const golden = `${dir}/graph.expected.json`;
+  if (!existsSync(join(ROOT, dir))) { bad(`missing graph fixture dir: ${dir}`); continue; }
+  if (!existsSync(join(ROOT, golden))) { bad(`${dir} missing graph.expected.json`); continue; }
+  let g;
+  try { g = JSON.parse(read(golden)); } catch (e) { bad(`${golden} is not valid JSON: ${e.message}`); continue; }
+  if (!validate) continue;
+  const r = validate("graph", g);
+  r.valid ? ok(`${golden} (graph schema)`) : bad(`${golden} fails the graph schema: ${r.errors.map((x) => `${x.instancePath || "/"} ${x.message}`).join("; ")}`);
+}
+
+console.log("10) vendored grammars (SP10): MANIFEST.json <-> graph/parser.mjs LANG_IDS");
+try {
+  const { LANG_IDS } = await importRepo("skills/audit/scripts/graph/parser.mjs");
+  const manifest = JSON.parse(read("skills/audit/vendor/tree-sitter/MANIFEST.json"));
+  const grammarId = (f) => (/^tree-sitter-(.+)\.wasm\.gz$/.exec(f) || [])[1];
+  const listed = Object.keys(manifest).map(grammarId).filter(Boolean);
+  for (const id of LANG_IDS) {
+    const n = listed.filter((x) => x === id).length;
+    n === 1 ? ok(`MANIFEST.json lists tree-sitter-${id}.wasm.gz`) : bad(`MANIFEST.json lists tree-sitter-${id}.wasm.gz ${n} time(s), expected exactly 1`);
+  }
+  for (const id of listed) if (!LANG_IDS.includes(id)) bad(`MANIFEST.json lists tree-sitter-${id}.wasm.gz, which is not a LANG_IDS entry`);
+} catch (e) { bad(`vendored grammar check could not run: ${e.message}`); }
 
 console.log("");
 if (errors.length) {
