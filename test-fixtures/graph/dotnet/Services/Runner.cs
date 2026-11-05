@@ -2,7 +2,7 @@ namespace Demo.Services;
 
 using System.Diagnostics;
 
-public class Runner
+public class Runner : IRunner
 {
     public void Run(string cmd)
     {

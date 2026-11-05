@@ -358,10 +358,11 @@ function onType(node, st) {
   const first = bases[0]?.type === "primary_constructor_base_type" ? namedOf(bases[0])[0] : bases[0];
   const firstClass = first ? declaredClass(first) : null;
   const superclass = firstClass && !/^I[A-Z]/.test(firstClass) ? firstClass : null;
-  if (bases.length > (superclass ? 1 : 0)) st.notExtracted.add("implements clause");
+  // every base but the superclass is an interface (C# allows one base class, listed first)
+  const interfaces = bases.slice(superclass ? 1 : 0).map((b) => declaredClass(b)).filter(Boolean);
   const methods = members.filter((m) => m.type === "method_declaration");
   if (name) {
-    st.classes.push({ name, extends: superclass, methods: [...new Set(methods.map((m) => field(m, "name")?.text).filter(Boolean))], start_byte: node.startIndex });
+    st.classes.push({ name, extends: superclass, implements: interfaces, methods: [...new Set(methods.map((m) => field(m, "name")?.text).filter(Boolean))], start_byte: node.startIndex });
     if (!outer && isPublic) st.exports.push({ name, start_byte: node.startIndex });
   }
   const attributes = attributesOf(node);
@@ -450,7 +451,10 @@ function onFunction(node, st) {
     exported: fn.exported,
     class: fn.class,
     // a lambda's lexical class body: resolve.mjs inherits a containing method's class only within it
-    ...(fn.kind === "lambda" ? { class_start_byte: fn.classStart } : {})
+    ...(fn.kind === "lambda" ? { class_start_byte: fn.classStart } : {}),
+    // an interface method without a default body, an abstract / extern / partial declaration:
+    // resolve.mjs never grades a call to it exact
+    ...(node.type === "method_declaration" && !childrenOfType(node, "block").length && !childrenOfType(node, "arrow_expression_clause").length ? { bodiless: true } : {})
   });
   if (node.type === "method_declaration" && owner?.name) attributeRoutes(node, owner, fn, st);
   const frame = newFrame(node.startIndex, fn.qualified_name);

@@ -121,7 +121,7 @@ test("functions: constructors, nested / interface / enum / record methods, anony
   assert.deepEqual(x.exports, [{ name: "K", start_byte: 0 }]);
 });
 
-test("classes: extends is the superclass base name; implements is only noted; nested types listed by simple name", async () => {
+test("classes: extends is the superclass base name; implements is extracted; nested types listed by simple name", async () => {
   const x = await extract(
     "public class K<T> extends base.Base<T> implements I, J {\n  void m() {}\n  void m(int a) {}\n  static class Nested extends K<String> { void n() {} }\n}\n" +
       "interface I { void i(); }\nenum E { A; void e() {} }\nrecord R(int x) { void r() {} }\n"
@@ -131,7 +131,7 @@ test("classes: extends is the superclass base name; implements is only noted; ne
     [["K", "Base", ["m"]], ["Nested", "K", ["n"]], ["I", null, ["i"]], ["E", null, ["e"]], ["R", null, ["r"]]]
   );
   assert.equal(x.classes[0].start_byte, 0);
-  assert.ok(x.not_extracted.includes("implements clause"));
+  assert.deepEqual(x.classes[0].implements, ["I", "J"]); // C1b: extracted, no longer noted
   const y = await extractFixture("service/AdminService.java");
   assert.deepEqual(y.classes.map((c) => [c.name, c.extends, c.methods]), [["AdminService", "UserService", ["exec"]]]);
 });
@@ -387,7 +387,7 @@ test("the java fixture through build-graph: route auth, implicit-this override g
   const { graph, reason } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["java"], frameworks: ["spring"], referencesDir: REFERENCES_DIR });
   assert.ok(graph, reason);
   const routes = graph.nodes.filter((n) => n.type === "route").map((r) => [r.http_method, r.path_pattern, r.auth]);
-  assert.deepEqual(routes.sort(), [["GET", "/api/health", "unauthenticated"], ["POST", "/api/run", "authenticated"]]);
+  assert.deepEqual(routes.sort(), [["GET", "/api/health", "unauthenticated"], ["POST", "/api/run", "authenticated"], ["POST", "/di/run", "unauthenticated"]]);
   const fn = (file, qn) => graph.nodes.filter((n) => n.type === "function" && n.file === `${SRC}/${file}` && n.qualified_name === qn);
   const [run1, run2] = fn("service/UserService.java", "UserService.run").sort((a, b) => a.line_start - b.line_start);
   assert.ok(run1 && run2 && run1.id !== run2.id, "two UserService.run overloads with distinct ids");
@@ -398,13 +398,32 @@ test("the java fixture through build-graph: route auth, implicit-this override g
   assert.deepEqual([bareExec.to, bareExec.confidence], [exec.id, "name-only"]); // AdminService overrides exec
   const lambdaExec = calls.find((e) => e.from === lambda.id && e.callee_text === "exec");
   assert.deepEqual([lambdaExec.to, lambdaExec.confidence], [exec.id, "name-only"]); // the lambda acts for UserService
-  const svcRun = calls.find((e) => e.callee_text === "userService.run");
-  assert.deepEqual([svcRun.to, svcRun.confidence], [run1.id, "exact"]); // the 1-parameter overload
-  const cmd = graph.nodes.find((n) => n.type === "sink" && n.class === "cmd-exec");
+  const svcRun = calls.find((e) => e.from === fn("Api.java", "Api.run")[0].id && e.callee_text === "userService.run");
+  assert.deepEqual([svcRun.to, svcRun.confidence], [run1.id, "exact"]); // the 1-parameter overload of the concrete class
+  // C1b: an @Autowired interface field resolves through the DI hint to its one implementation, name-only
+  const diRun = calls.find((e) => e.from === fn("di/DiApi.java", "DiApi.run")[0].id && e.callee_text === "userService.run");
+  assert.deepEqual([diRun.to, diRun.confidence], [fn("di/DiApi.java", "UserServiceImpl.run")[0].id, "name-only"]);
+  const cmd = graph.nodes.find((n) => n.type === "sink" && n.class === "cmd-exec" && n.file === `${SRC}/service/UserService.java`);
   assert.equal(cmd.enclosing_fn, exec.id);
   const sql = graph.nodes.find((n) => n.type === "sink" && n.class === "sql");
   assert.deepEqual([sql.callee, sql.enclosing_fn], ["st.execute", fn("Dao.java", "Dao.find")[0].id]);
   assert.ok(graph.stats.coverage_matrix.java.not_extracted.includes("SecurityFilterChain matchers"));
   const imports = graph.edges.filter((e) => e.type === "imports" && e.specifier === "com.ex.service.UserService");
   assert.deepEqual(imports.map((e) => e.confidence), ["exact"]);
+});
+
+// ---- C1b: implements and bodiless ------------------------------------------------------------------
+
+test("C1b: classes carry implements (class implements list, interface extends list); interface / abstract methods are bodiless", async () => {
+  const x = await extract(
+    "public class K extends Base implements I, pkg.J<String> {\n  void m() {}\n}\n" +
+      "interface I extends L, M { void i(); default void d() {} }\n" +
+      "abstract class A implements I { abstract void a(); void b() {} }\nenum E implements I { X; public void i() {} }\nrecord R(int x) implements I { public void i() {} }\n"
+  );
+  assert.deepEqual(x.classes.map((c) => [c.name, c.extends, c.implements]), [
+    ["K", "Base", ["I", "J"]], ["I", null, ["L", "M"]], ["A", null, ["I"]], ["E", null, ["I"]], ["R", null, ["I"]]
+  ]);
+  const bodiless = Object.fromEntries(x.functions.map((f) => [f.qualified_name, f.bodiless === true]));
+  assert.deepEqual(bodiless, { "K.m": false, "I.i": true, "I.d": false, "A.a": true, "A.b": false, "E.i": false, "R.i": false });
+  assert.equal(x.not_extracted.includes("implements clause"), false);
 });

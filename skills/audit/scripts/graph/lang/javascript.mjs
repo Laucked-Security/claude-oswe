@@ -24,7 +24,7 @@ const FUNCTION_TYPES = ["function_declaration", "generator_function_declaration"
 const DECLARATION_FUNCTIONS = new Set(["function_declaration", "generator_function_declaration"]);
 const CLASS_TYPES = ["class_declaration", "class", "abstract_class_declaration"];
 const DEFINITION_VALUES = new Set(["arrow_function", "function_expression", "function", "generator_function", "class"]);
-const EXPORTABLE_DECLARATIONS = new Set(["function_declaration", "generator_function_declaration", "class_declaration", "abstract_class_declaration"]);
+const EXPORTABLE_DECLARATIONS = new Set(["function_declaration", "generator_function_declaration", "class_declaration", "abstract_class_declaration", "interface_declaration"]);
 
 // A node in one of these (parent type, field) slots is part of a callee / member chain: the
 // enclosing chain node is the candidate, so the part never yields a source or sink on its own.
@@ -310,6 +310,15 @@ function classHeritage(node) {
   return target ? textOf(target) : null;
 }
 
+// The TypeScript `implements` targets of a class (`implements Repo, ns.K<X>` -> Repo, K), or the
+// `extends` targets of an interface.
+function implementedTypes(node) {
+  const clause = node.type === "interface_declaration"
+    ? childrenOfType(node, "extends_type_clause")[0]
+    : childrenOfType(childrenOfType(node, "class_heritage")[0], "implements_clause")[0];
+  return namedOf(clause).map(typeName).filter(Boolean);
+}
+
 function onClass(node, st, ctx) {
   let name = field(node, "name")?.text ?? null;
   if (!name && ctx.parentType === "variable_declarator" && ctx.field === "value") {
@@ -318,13 +327,51 @@ function onClass(node, st, ctx) {
   }
   const body = field(node, "body");
   if (name) {
-    const methods = childrenOfType(body, "method_definition").map((m) => field(m, "name")?.text).filter(Boolean);
-    st.classes.push({ name, extends: classHeritage(node), methods, start_byte: node.startIndex });
+    const methods = [...new Set(namedOf(body).filter((m) => m.type === "method_definition" || m.type === "abstract_method_signature").map((m) => field(m, "name")?.text).filter(Boolean))];
+    st.classes.push({ name, extends: classHeritage(node), implements: implementedTypes(node), methods, start_byte: node.startIndex });
     if (!st.fnStack.length) st.topLevel.set(name, node.startIndex);
     nestRoutes(node, name, body, st);
   }
   st.classStack.push({ name, start: node.startIndex, fieldTypes: fieldTypes(body) });
   return () => st.classStack.pop();
+}
+
+// A TypeScript interface is a class whose methods are all bodiless signatures (resolve.mjs: a call
+// to one is name-only, to its single implementation when it has one).
+function onInterface(node, st) {
+  const name = field(node, "name")?.text ?? null;
+  const body = field(node, "body");
+  if (name) {
+    const methods = [...new Set(childrenOfType(body, "method_signature").map((m) => field(m, "name")?.text).filter(Boolean))];
+    st.classes.push({ name, extends: null, implements: implementedTypes(node), methods, start_byte: node.startIndex });
+    if (!st.fnStack.length) st.topLevel.set(name, node.startIndex);
+  }
+  st.classStack.push({ name, start: node.startIndex, fieldTypes: new Map() });
+  return () => st.classStack.pop();
+}
+
+// A bodiless method: an interface's method signature, or a class's abstract method. (A class body's
+// own `method_signature` is an overload signature of the method_definition that follows it, which
+// stays the method's one definition.)
+function onSignature(node, st, ctx) {
+  const inInterface = node.type === "method_signature" && ctx.parentType === "interface_body";
+  const isAbstract = node.type === "abstract_method_signature" && ctx.parentType === "class_body";
+  const cls = st.classStack.at(-1)?.name ?? null;
+  const name = field(node, "name")?.text ?? null;
+  if (!(inInterface || isAbstract) || !cls || !name) return;
+  st.functions.push({
+    name,
+    qualified_name: `${cls}.${name}`,
+    line_start: lineOf(node),
+    line_end: node.endPosition.row + 1,
+    start_byte: node.startIndex,
+    end_byte: node.endIndex,
+    param_count: parameterCount(node),
+    kind: "method",
+    exported: false,
+    class: cls,
+    bodiless: true
+  });
 }
 
 // Declared class of each `this.<prop>` receiver, first source wins: (i) a typed property declaration
@@ -633,6 +680,9 @@ function onAssignment(node, st) {
 const HANDLERS = new Map([
   ...FUNCTION_TYPES.map((t) => [t, onFunction]),
   ...CLASS_TYPES.map((t) => [t, onClass]),
+  ["interface_declaration", onInterface],
+  ["method_signature", onSignature],
+  ["abstract_method_signature", onSignature],
   ["variable_declarator", onDeclarator],
   ["catch_clause", onCatchOrForIn],
   ["for_in_statement", onCatchOrForIn],

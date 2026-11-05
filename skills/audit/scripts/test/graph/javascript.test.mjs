@@ -389,3 +389,24 @@ test("redefinitions (no lang.overloads): a function or method defined twice in o
   const { results } = await resolveSource("src/r.js", "function f(a) {}\nfunction f(a, b) {}\nclass K {\n  m(a) {}\n  m(a, b) {}\n  run() { this.m(1); f(1); }\n}\n");
   assert.deepEqual(results.map((r) => [r.callee_text, r.to, r.confidence]), [["this.m", null, "unresolved"], ["f", null, "unresolved"]]);
 });
+
+// ---- C1b: implements and bodiless ------------------------------------------------------------------
+
+test("C1b (TS): implements clauses and interfaces are classes; interface method signatures and abstract methods are bodiless", async () => {
+  const x = await extract(
+    "export interface Repo extends Base<T>, ns.Other { find(id: string): User; }\n" +
+      "export abstract class B implements Repo, ns.K<X> { abstract run(c: string): void; go() {} }\n" +
+      "class C extends B { run(c: string) {} }\nclass O { m(x: string): void; m(x: any) {} }\n",
+    { langId: "typescript", path: "a.ts" }
+  );
+  assert.deepEqual(x.classes.map((c) => [c.name, c.extends, c.implements, c.methods]), [
+    ["Repo", null, ["Base", "Other"], ["find"]], ["B", null, ["Repo", "K"], ["run", "go"]], ["C", "B", [], ["run"]], ["O", null, [], ["m"]]
+  ]);
+  const fns = x.functions.map((f) => [f.qualified_name, f.kind, f.class, f.bodiless === true, f.param_count]);
+  assert.deepEqual(fns, [
+    ["Repo.find", "method", "Repo", true, 1], ["B.run", "method", "B", true, 1], ["B.go", "method", "B", false, 0], ["C.run", "method", "C", false, 1], ["O.m", "method", "O", false, 1]
+  ]);
+  assert.deepEqual(x.exports.map((e) => e.name), ["Repo", "B"]);
+  const js = await extract("class A extends B {}\n");
+  assert.deepEqual(js.classes.map((c) => c.implements), [[]]);
+});

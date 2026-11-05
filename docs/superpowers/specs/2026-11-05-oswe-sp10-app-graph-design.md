@@ -150,6 +150,15 @@ count is `exact`, otherwise the first overload is `name-only`; and a **lambda / 
 inherits the class of the innermost enclosing method for rule 3 and for implicit-`this` bare calls
 (a JavaScript `function` expression, whose `this` is dynamic, does not).
 
+**Interface and abstract dispatch.** Extractors mark interface methods and abstract methods
+`bodiless` (Java / C# / PHP / TypeScript) and list each class's implemented interfaces (`implements`).
+A call whose resolved target is bodiless is **never `exact`**: when the class declaring it has
+subclasses / implementors defining the method with a body, it resolves to the first of them by
+`(path, start_byte)` as `name-only` (the DI implementation hint: `@Autowired UserService` →
+`UserServiceImpl.run`, `IRunner` → `Runner.Run`), else to the bodiless method, `name-only`. A class
+whose `implements` names the target class counts as a subclass for rule 3's override check (by resolved
+identity, else by last name segment). Bodiless signatures are not rule-4 definitions.
+
 Explicit non-goals: type inference, virtual dispatch resolution beyond rule 3's conservative check,
 interprocedural taint summaries, dynamic requires / reflection. A homonymous function defined in two
 files is **never** resolved to either; it yields `unresolved` with a stats counter. Tests guard:
@@ -343,10 +352,13 @@ and writes its own artifact `structural.json` (schema `structural-check.schema.j
 | no forward path, but a **reverse** path `K → … → S` over `exact` edges — the source is read inside a callee and flows back through a return value (`handler() { eval(readInput()); }`) | `"n/a"` (return-value flow is real but not modelled; the graph must not contradict it) |
 | `S` and `K` connected only through `name-only` / `unresolved` edges, in either direction | `"n/a"` |
 | source or sink line maps to no graph node | `"n/a"` |
-| `S` and `K` both mapped, and **no** connection at all over any edge confidence within depth 6, forward or reverse | `"absent"` |
+| no connection, but a call reachable from `S` or from `K` (forward closure over `exact` / `name-only` edges within depth 6) is not `exact` — a `name-only` edge, or an `unresolved` edge with any `to`, `null` included | `"n/a"` (`"graph incomplete on the path"`) |
+| `S` and `K` both mapped, **no** connection at all over any edge confidence within depth 6, forward or reverse, and every call reachable from either end is `exact` | `"absent"` |
 
-`"absent"` is therefore a strong claim: the graph saw both ends and found nothing linking them. Every
-other uncertainty is `"n/a"`.
+`"absent"` is therefore a strong claim: the graph saw both ends, resolved every call around them
+exactly, and found nothing linking them — an unresolved call on the way (a DAO behind `this.dao.find()`,
+an interface method) could be the missing link, so it makes the result `"n/a"`. Every other
+uncertainty is `"n/a"`.
 
 **Per chain transition** — `chain.schema.json` gains an optional typed field on each transition:
 `kind: "call-path" | "shared-state" | "auth-gain"` plus optional anchors `from_anchor` / `to_anchor`

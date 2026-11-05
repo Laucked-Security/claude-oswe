@@ -42,8 +42,12 @@
 //   forward exact path of n edges                   -> proven "forward exact path (<n> edges)"
 //   reverse exact path                              -> n/a    "return-value flow not modelled"
 //   forward or reverse "any" path                   -> n/a    "only non-exact edges connect source and sink"
+//   a call reachable from S or from K is not exact  -> n/a    "graph incomplete on the path"
 //   otherwise                                       -> absent "no connection within <max_depth> edges"
-// "absent" is a strong claim: the graph saw both ends and found nothing linking them.
+// "Reachable" = the forward closure over exact and name-only edges within max_depth edges; a call is
+// checked when its caller lies fewer than max_depth edges from S (or K). Not exact = name-only, or
+// unresolved with any `to` (null included). "absent" is a strong claim: the graph saw both ends, every
+// call around them resolved exactly, and nothing links them.
 //
 // Per finding: the table between its source and its sink. Per chain transition (output in index order):
 // no kind -> n/a "transition has no kind"; kind other than call-path -> n/a "transition kind <kind> not
@@ -162,13 +166,16 @@ function indexGraph(graph) {
   }
   const exact = new Map(); // function id -> callee ids over exact edges
   const any = new Map(); // function id -> callee ids over exact and name-only edges
+  const incomplete = new Set(); // function ids with an outgoing call that is not exact (any `to`, null included)
   const push = (map, from, to) => (map.has(from) ? map.get(from).push(to) : map.set(from, [to]));
   for (const e of graph.edges) {
-    if (e.type !== "calls" || e.to === null) continue;
+    if (e.type !== "calls") continue;
+    if (e.confidence !== "exact") incomplete.add(e.from);
+    if (e.to === null) continue;
     if (e.confidence === "exact") push(exact, e.from, e.to);
     if (e.confidence === "exact" || e.confidence === "name-only") push(any, e.from, e.to);
   }
-  return { fnsByFile, exact, any };
+  return { fnsByFile, exact, any, incomplete };
 }
 
 const mapLocation = ({ fnsByFile }, { file, line }) => innermost(fnsByFile.get(pathKey(file)) ?? [], line);
@@ -196,6 +203,28 @@ function distance(adjacency, start, target, maxDepth) {
   return null;
 }
 
+// Is every call reachable from `start` exact? The forward closure over exact and name-only edges, at most
+// maxDepth edges deep: false as soon as a function on it at fewer than maxDepth edges from `start` (so its
+// own calls are within the horizon) has a call that is not exact — name-only, or unresolved with any `to`.
+function closureComplete(index, start, maxDepth) {
+  const seen = new Set([start]);
+  let frontier = [start];
+  for (let edges = 0; edges < maxDepth && frontier.length > 0; edges++) {
+    const next = [];
+    for (const from of frontier) {
+      if (index.incomplete.has(from)) return false;
+      for (const to of index.any.get(from) ?? []) {
+        if (!seen.has(to)) {
+          seen.add(to);
+          next.push(to);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return true;
+}
+
 // ---- decision table ---------------------------------------------------------------------------------
 
 function decide(index, fromLoc, toLoc, maxDepth) {
@@ -210,6 +239,7 @@ function decide(index, fromLoc, toLoc, maxDepth) {
   if (distance(index.any, s.id, k.id, maxDepth) !== null || distance(index.any, k.id, s.id, maxDepth) !== null) {
     return verdict("n/a", "only non-exact edges connect source and sink");
   }
+  if (!closureComplete(index, s.id, maxDepth) || !closureComplete(index, k.id, maxDepth)) return verdict("n/a", "graph incomplete on the path");
   return verdict("absent", `no connection within ${maxDepth} edges`);
 }
 

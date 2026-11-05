@@ -9,6 +9,11 @@
 //              (overloads, below) no definition is the only one matching the call's arity;
 //   unresolved `to: null` — shadowed names, unresolved imports, homonyms across files or classes,
 //              any other dotted callee.
+// Interface / abstract dispatch (functions[] `bodiless: true`, classes[] `implements`): a target that
+// is bodiless is never exact — it resolves name-only to the implementation hint (the first, by
+// (path, start_byte), of the subclasses / implementors of its class defining the method with a body)
+// or, without one, to the bodiless method; a class whose `implements` names the target class counts
+// for the override check like a subclass.
 // In a language declaring `lang.overloads`, same-named definitions in one file / class are overloads
 // told apart by arity: the single definition whose `param_count` equals the call's `arg_count`
 // (both non-null) is the target; elsewhere a second definition is a redefinition (unresolved). A call
@@ -26,7 +31,7 @@
 //     name the module pkg.sub), "<fromPath>\0<specifier>\0<imported>" entries for each named binding
 //     whose target does not export `imported` (or does not resolve) while the submodule specifier
 //     resolves; such a binding then acts as a namespace binding to that module.
-//   buildClassIndex(files, importMap) -> { byName: Map<name, [{ path, name, extends, methods,
+//   buildClassIndex(files, importMap) -> { byName: Map<name, [{ path, name, extends, implements, methods,
 //     start_byte }]>, byKey: Map<"<path>\0<start_byte>", entry>, parentOf: Map<key, { entry,
 //     confidence } | null>, childrenOf: Map<key, entry[]>, danglingByName: Map<name, entry[]> }
 //   resolveCalls(files, importMap, { classIndex, langModules }) -> [{ from_fn_start_byte,
@@ -267,15 +272,16 @@ function lookupClass(name, fromPath, ctx) {
 const pushTo = (map, key, value) => (map.has(key) ? map.get(key).push(value) : map.set(key, [value]));
 
 // byName / byKey index the classes; parentOf holds each class's resolved parent link; childrenOf
-// is its reverse; danglingByName lists the classes whose `extends` did not resolve, under the
-// last dotted segment of that text (for the conservative override check).
+// is its reverse, plus — for the override check and the implementation hint — every class whose
+// `implements` names the class; danglingByName lists the classes whose `extends` or an `implements`
+// entry did not resolve, under the last dotted segment of that text (conservative).
 export function buildClassIndex(files, importMap) {
   const byName = new Map();
   const byKey = new Map();
   for (const file of byPath(files)) {
     const classes = [...file.extract.classes].sort((a, b) => a.start_byte - b.start_byte);
     for (const c of classes) {
-      const entry = { path: file.path, name: c.name, extends: c.extends, methods: c.methods, start_byte: c.start_byte };
+      const entry = { path: file.path, name: c.name, extends: c.extends, implements: c.implements ?? [], methods: c.methods, start_byte: c.start_byte };
       pushTo(byName, c.name, entry);
       if (!byKey.has(classKey(entry))) byKey.set(classKey(entry), entry);
     }
@@ -289,6 +295,11 @@ export function buildClassIndex(files, importMap) {
       classIndex.parentOf.set(classKey(entry), parent);
       if (parent) pushTo(classIndex.childrenOf, classKey(parent.entry), entry);
       else if (entry.extends != null) pushTo(classIndex.danglingByName, lastSegment(entry.extends), entry);
+      for (const name of entry.implements) {
+        const iface = lookupClass(name, entry.path, ctx);
+        if (iface && iface.entry !== entry) pushTo(classIndex.childrenOf, classKey(iface.entry), entry);
+        else pushTo(classIndex.danglingByName, lastSegment(name), entry);
+      }
     }
   }
   return classIndex;
@@ -307,7 +318,7 @@ function findMethod(ref, method, ctx, maxDepth, argCount) {
     const picked = pickDefinition(methods, argCount, ctx.overloads.has(entry.path));
     if (methods.length && !picked) return fallback; // redefinitions: no target
     if (picked) {
-      const found = { path: entry.path, fn: picked.fn, confidence: weaker(current.confidence, picked.confidence) };
+      const found = { entry, path: entry.path, fn: picked.fn, confidence: weaker(current.confidence, picked.confidence) };
       if (!picked.arityMismatch) return found;
       fallback ??= found;
     }
@@ -317,11 +328,11 @@ function findMethod(ref, method, ctx, maxDepth, argCount) {
   return fallback;
 }
 
-// Rule 3's override check: does any subclass of `entry` (up to 10 levels down) redefine `method`?
-// Subclasses are found through the resolved parent links, so an aliased or dotted parent name
-// counts and an unrelated same-named class does not; a class whose `extends` did not resolve
-// counts when the last dotted segment of that text names a class on the way (conservative).
-function isOverridden(entry, method, classIndex) {
+// The subclasses of `entry` (up to 10 levels down), breadth-first: through the resolved parent links
+// and `implements` entries (childrenOf), so an aliased or dotted parent name counts and an unrelated
+// same-named class does not, plus a class whose `extends` / `implements` text did not resolve when its
+// last dotted segment names a class on the way (conservative). `visit(sub)` returning true stops the walk.
+function walkSubclasses(entry, classIndex, visit) {
   const seen = new Set([classKey(entry)]);
   let frontier = [entry];
   for (let depth = 0; frontier.length && depth < MAX_EXTENDS_DEPTH; depth++) {
@@ -330,7 +341,7 @@ function isOverridden(entry, method, classIndex) {
       const subclasses = [...(classIndex.childrenOf.get(classKey(node)) ?? []), ...(classIndex.danglingByName.get(node.name) ?? [])];
       for (const sub of subclasses) {
         if (seen.has(classKey(sub))) continue;
-        if (sub.methods.includes(method)) return true;
+        if (visit(sub)) return true;
         seen.add(classKey(sub));
         next.push(sub);
       }
@@ -340,10 +351,35 @@ function isOverridden(entry, method, classIndex) {
   return false;
 }
 
+// Rule 3's override check: does any subclass or implementor of `entry` redefine `method`?
+const isOverridden = (entry, method, classIndex) => walkSubclasses(entry, classIndex, (sub) => sub.methods.includes(method));
+
+// The implementation hint for a bodiless (interface / abstract) target: among the subclasses and
+// implementors of the class declaring it, those defining `method` with a body (overloads picked by
+// arity); the first by (path, start_byte) — one or several, the edge is name-only either way.
+function implementationOf(found, method, ctx, argCount) {
+  const candidates = [];
+  walkSubclasses(found.entry, ctx.classIndex, (sub) => {
+    const bodies = functionsIn(ctx, sub.path).filter((f) => f.class === sub.name && f.name === method && f.bodiless !== true);
+    const picked = pickDefinition(bodies, argCount, ctx.overloads.has(sub.path));
+    if (picked) candidates.push({ path: sub.path, fn: picked.fn });
+    return false;
+  });
+  candidates.sort((a, b) => compare(a.path, b.path) || a.fn.start_byte - b.fn.start_byte);
+  return candidates[0] ?? null;
+}
+
+// A bodiless target (an interface method, an abstract method) is never exact: dispatch picks an
+// implementation at run time. It resolves to the implementation hint when there is one, else to
+// the bodiless method itself, name-only in both cases.
 function methodTarget(ref, method, ctx, { maxDepth = MAX_EXTENDS_DEPTH, argCount = null } = {}) {
   if (!ref) return null;
   const found = findMethod(ref, method, ctx, maxDepth, argCount);
   if (!found) return null;
+  if (found.fn.bodiless === true) {
+    const impl = implementationOf(found, method, ctx, argCount);
+    return impl ? target(impl.path, impl.fn, "name-only") : target(found.path, found.fn, "name-only");
+  }
   return target(found.path, found.fn, isOverridden(ref.entry, method, ctx.classIndex) ? "name-only" : found.confidence);
 }
 
@@ -418,12 +454,15 @@ function resolveCall(site, ctx) {
 }
 
 // Rule 4's universe: top-level functions and methods across all files, by bare name (resolveBare
-// drops the methods for a call from a language without implicit `this`).
+// drops the methods for a call from a language without implicit `this`). A bodiless signature
+// (interface / abstract method) is not a definition: declaring an interface never turns a bare call
+// into a homonym.
 function definitionsByName(files) {
   const index = new Map();
   for (const file of byPath(files)) {
     for (const fn of file.extract.functions) {
       if (fn.class == null && !isTopLevel(fn)) continue; // nested and anonymous functions
+      if (fn.bodiless === true) continue;
       if (!index.has(fn.name)) index.set(fn.name, []);
       index.get(fn.name).push({ path: file.path, fn });
     }

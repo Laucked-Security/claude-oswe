@@ -343,3 +343,8 @@ test("arity: param_count without the receiver (splat / default / keyword-only â‡
   assert.deepEqual(x.functions.map((f) => [f.qualified_name, f.param_count]), [["f", 2], ["C.m", 1], ["C.s", 1], ["g", null], ["h", null], ["k", null], ["q", 2]]);
   assert.deepEqual(x.calls.map((c) => [c.callee_text, c.arg_count]), [["f", 2], ["f", null], ["f", null]]);
 });
+
+test("C1b: python classes carry an empty implements list", async () => {
+  const x = await extract("class A(B):\n    def m(self):\n        pass\n");
+  assert.deepEqual(x.classes.map((c) => [c.name, c.implements]), [["A", []]]);
+});

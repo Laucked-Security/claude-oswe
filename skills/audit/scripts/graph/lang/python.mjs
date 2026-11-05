@@ -397,7 +397,7 @@ function onClass(node, st) {
   if (bases.length > 1) st.notExtracted.add("multiple inheritance");
   if (name) {
     const methods = namedOf(body).map(definedFunction).filter((d) => d?.type === "function_definition").map((d) => field(d, "name")?.text).filter(Boolean);
-    st.classes.push({ name, extends: bases.length ? lastSegment(bases[0]) : null, methods, start_byte: node.startIndex });
+    st.classes.push({ name, extends: bases.length ? lastSegment(bases[0]) : null, implements: [], methods, start_byte: node.startIndex });
     if (!st.classBases.has(name)) st.classBases.set(name, bases);
     if (atModule(st)) st.topLevel.push([name, node.startIndex]);
     else bind(st, name);

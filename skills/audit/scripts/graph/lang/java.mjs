@@ -297,6 +297,13 @@ function mappingPaths(annotation) {
   return literals.every((l) => l.type === "string_literal") ? literals.map((l) => ({ path: stringContent(l), node: l })) : null;
 }
 
+// The base names a type implements: a class / enum / record's `implements` list, an interface's
+// `extends` list (`p.J<S>` -> `J`).
+function implementedTypes(node) {
+  const clause = field(node, "interfaces") ?? childrenOfType(node, "extends_interfaces")[0] ?? null;
+  return namedOf(childrenOfType(clause, "type_list")[0]).map((t) => declaredClass(t)).filter(Boolean);
+}
+
 function onType(node, st) {
   const name = field(node, "name")?.text ?? null;
   const body = field(node, "body");
@@ -305,10 +312,9 @@ function onType(node, st) {
   if (name) {
     const superclass = namedOf(field(node, "superclass"))[0];
     const methods = [...new Set(membersOf(body).filter((m) => m.type === "method_declaration").map((m) => field(m, "name")?.text).filter(Boolean))];
-    st.classes.push({ name, extends: superclass ? declaredClass(superclass) : null, methods, start_byte: node.startIndex });
+    st.classes.push({ name, extends: superclass ? declaredClass(superclass) : null, implements: implementedTypes(node), methods, start_byte: node.startIndex });
     if (!outer && isPublic) st.exports.push({ name, start_byte: node.startIndex });
   }
-  if (field(node, "interfaces")) st.notExtracted.add("implements clause");
   const annotations = annotationsOf(node);
   const mapping = annotations.find((a) => annotationName(a) === "RequestMapping");
   const prefixes = mapping ? mappingPaths(mapping) : [{ path: "" }];
@@ -379,7 +385,10 @@ function onFunction(node, st, ctx) {
     exported: fn.exported,
     class: fn.class,
     // a lambda's lexical class body: resolve.mjs inherits a containing method's class only within it
-    ...(fn.kind === "lambda" ? { class_start_byte: fn.classStart } : {})
+    ...(fn.kind === "lambda" ? { class_start_byte: fn.classStart } : {}),
+    // an interface method without a default body, an abstract (or native) method: resolve.mjs never
+    // grades a call to it exact
+    ...(node.type === "method_declaration" && !field(node, "body") ? { bodiless: true } : {})
   });
   if (node.type === "method_declaration" && owner?.name) springRoutes(node, owner, fn.qualified_name, st);
   const frame = newFrame(node.startIndex, fn.qualified_name);

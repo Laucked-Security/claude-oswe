@@ -160,13 +160,13 @@ test("functions: nested functions, closures (lambda) and arrows (arrow) with cla
   assert.deepEqual(x.exports.map((e) => e.name), ["outer", "K", "I"]);
 });
 
-test("classes: extends is the base name; implements and trait use are noted; interface / trait / enum listed", async () => {
+test("classes: extends is the base name; implements extracted, trait use noted; interface / trait / enum listed", async () => {
   const x = await extract(php(
     "class K extends \\Base\\P implements I, J {\n    use SomeTrait;\n    public function m() {}\n    public function m2() {}\n}\n" +
       "interface I extends Base { public function i(); }\ntrait T { public function t() {} }\nenum E { case A; public function e() {} }\n"
   ));
   assert.deepEqual(x.classes.map((c) => [c.name, c.extends, c.methods]), [["K", "P", ["m", "m2"]], ["I", "Base", ["i"]], ["T", null, ["t"]], ["E", null, ["e"]]]);
-  assert.ok(x.not_extracted.includes("implements clause"));
+  assert.deepEqual(x.classes.find((c) => c.name === "K").implements, ["I", "J"]); // C1b: extracted, no longer noted
   assert.ok(x.not_extracted.includes("trait use"));
   assert.deepEqual(x.exports.map((e) => e.name), ["K", "I", "T", "E"]);
   const y = await extractFixture("app/Services/AdminRunner.php");
@@ -399,4 +399,18 @@ test("the php fixture through build-graph: route auth, PSR-4 receiver resolution
   assert.deepEqual(imports.sort(), [["/extra.php", "exact"], ["App\\Http\\Controllers\\RunController", "exact"], ["App\\Services\\Runner", "exact"]].sort());
   assert.ok(graph.stats.coverage_matrix.php.not_extracted.includes("variable call"));
   assert.deepEqual(graph.stats.coverage_matrix.php.extractors_applied, ["laravel", "symfony"]);
+});
+
+// ---- C1b: implements and bodiless ------------------------------------------------------------------
+
+test("C1b: classes carry implements (class_interface_clause; an interface's extra parents); interface / abstract methods are bodiless", async () => {
+  const x = await extract(php(
+    "interface IR extends IB, IC { public function run($c); }\n" +
+      "abstract class A extends B implements IR, \\X\\Y { abstract public function run($c); public function y() {} }\n" +
+      "class C { public function z() {} }\n"
+  ));
+  assert.deepEqual(x.classes.map((c) => [c.name, c.extends, c.implements]), [["IR", "IB", ["IC"]], ["A", "B", ["IR", "Y"]], ["C", null, []]]);
+  const bodiless = Object.fromEntries(x.functions.map((f) => [f.qualified_name, f.bodiless === true]));
+  assert.deepEqual(bodiless, { "IR.run": true, "A.run": true, "A.y": false, "C.z": false });
+  assert.equal(x.not_extracted.includes("implements clause"), false);
 });

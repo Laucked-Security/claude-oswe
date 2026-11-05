@@ -36,7 +36,8 @@ evidence**, not a claim made by the analyzer — **never a counterexample to ref
 to copy into `counterexamples[]`.
 - `proven` — the graph links source and sink (same function, or a call path over exactly resolved
   edges). It supports a `strong static proof`; it says nothing about sanitizers or attacker control.
-- `absent` — the graph saw both ends and found **no** call path between them within six edges. Treat it
+- `absent` — the graph saw both ends, resolved every call around them exactly, and found **no** call path
+  between them within six edges. Treat it
   as a reason to **look harder** before accepting at `strong static proof`: find the real link in the
   source (dynamic dispatch, callback, framework wiring) or lower the confidence.
 - `n/a` — the graph could not decide (unmapped line, unresolved call, return-value flow,

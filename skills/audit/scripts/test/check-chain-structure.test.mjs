@@ -101,15 +101,44 @@ test("a source or sink line outside any function => n/a, the source checked firs
   assert.deepEqual(one(graph, ["a.js", 2], ["not-in-graph.js", 2]), { structural_path: "n/a", reason: "sink line maps to no function" });
 });
 
-test("both ends mapped and no connection in either direction => absent", () => {
+test("both ends mapped, no connection, every call reachable from either end exact => absent", () => {
   const graph = synth({ fns: LINE, calls: [["a", "b", "exact"], ["c", "d", "name-only"]] });
   assert.deepEqual(one(graph, ["a.js", 2], ["e.js", 2]), { structural_path: "absent", reason: "no connection within 6 edges" });
-  assert.deepEqual(one(graph, ["a.js", 6], ["a.js", 10]), { structural_path: "absent", reason: "no connection within 6 edges" });
 });
 
-test("unresolved edges are never followed, even one that carries a target; null targets are skipped", () => {
+test("no connection, but a name-only call in the sink's forward closure => n/a (graph incomplete on the path)", () => {
+  const graph = synth({ fns: LINE, calls: [["a", "b", "exact"], ["c", "d", "name-only"]] });
+  assert.deepEqual(one(graph, ["a.js", 6], ["a.js", 10]), { structural_path: "n/a", reason: "graph incomplete on the path" });
+});
+
+test("unresolved edges are never followed; any unresolved call reachable from either end (to null or not) => n/a", () => {
   const graph = synth({ fns: LINE, calls: [["a", "b", "unresolved"], ["a", null, "unresolved"]] });
-  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 6]), { structural_path: "absent", reason: "no connection within 6 edges" });
+  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 6]), { structural_path: "n/a", reason: "graph incomplete on the path" });
+  const toNull = synth({ fns: LINE, calls: [["a", null, "unresolved"]] });
+  assert.deepEqual(one(toNull, ["a.js", 2], ["a.js", 6]), { structural_path: "n/a", reason: "graph incomplete on the path" });
+  const carried = synth({ fns: LINE, calls: [["a", "b", "unresolved"]] }); // schema-valid unresolved edge WITH a target
+  assert.deepEqual(one(carried, ["a.js", 2], ["a.js", 6]), { structural_path: "n/a", reason: "graph incomplete on the path" });
+});
+
+test("C1: a flow through one unresolved call (handler -> ? -> dao) is n/a, never absent", () => {
+  // NodeGoat-style: the handler a calls b (exact), b calls the DAO through an unresolved `this.dao.find()`;
+  // the DAO's own function d holds the sink. Nothing links a to d, but the graph is blind on the way.
+  const graph = synth({ fns: LINE, calls: [["a", "b", "exact"], ["b", null, "unresolved"]] });
+  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 14]), { structural_path: "n/a", reason: "graph incomplete on the path" });
+});
+
+test("C1: an incomplete closure on the sink side alone is enough for n/a", () => {
+  const graph = synth({ fns: LINE, calls: [["a", "b", "exact"], ["d", null, "unresolved"]] });
+  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 14]), { structural_path: "n/a", reason: "graph incomplete on the path" });
+});
+
+test("C1: closures with only exact edges and no connection => absent; a non-exact edge past max_depth does not count", () => {
+  const graph = synth({ fns: LINE, calls: [["a", "b", "exact"], ["b", "c", "exact"], ["d", "d", "exact"]] });
+  assert.deepEqual(one(graph, ["a.js", 2], ["e.js", 2]), { structural_path: "absent", reason: "no connection within 6 edges" });
+  // a -> b -> c, then c -> ? unresolved: that edge is the 3rd from a, beyond max_depth 2
+  const deep = synth({ fns: LINE, calls: [["a", "b", "exact"], ["b", "c", "exact"], ["c", null, "unresolved"]] });
+  assert.deepEqual(one(deep, ["a.js", 2], ["e.js", 2], { max_depth: 2 }), { structural_path: "absent", reason: "no connection within 2 edges" });
+  assert.deepEqual(one(deep, ["a.js", 2], ["e.js", 2], { max_depth: 3 }), { structural_path: "n/a", reason: "graph incomplete on the path" });
 });
 
 test("max_depth bounds the search in edges: a 3-edge exact path is absent at 2 and proven at 3", () => {
@@ -121,7 +150,9 @@ test("max_depth bounds the search in edges: a 3-edge exact path is absent at 2 a
 
 test("cycles terminate", () => {
   const graph = synth({ fns: LINE, calls: [["a", "b", "exact"], ["b", "a", "exact"], ["b", "b", "name-only"], ["c", "c", "exact"]] });
-  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 10]), { structural_path: "absent", reason: "no connection within 6 edges" });
+  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 10]), { structural_path: "n/a", reason: "graph incomplete on the path" }); // b -> b name-only
+  const exact = synth({ fns: LINE, calls: [["a", "b", "exact"], ["b", "a", "exact"], ["b", "b", "exact"], ["c", "c", "exact"]] });
+  assert.deepEqual(one(exact, ["a.js", 2], ["a.js", 10]), { structural_path: "absent", reason: "no connection within 6 edges" });
 });
 
 // ---- location mapping -------------------------------------------------------------------------------
@@ -279,7 +310,7 @@ test("node golden: run -> UserService.run (exact) -> UserService.exec (name-only
   assert.deepEqual(out.findings, {
     "OSWE-1": { structural_path: "n/a", reason: "only non-exact edges connect source and sink" },
     "OSWE-2": { structural_path: "proven", reason: "same function" },
-    "OSWE-3": { structural_path: "absent", reason: "no connection within 6 edges" },
+    "OSWE-3": { structural_path: "n/a", reason: "graph incomplete on the path" }, // the handler's closure holds unresolved calls
     "OSWE-4": { structural_path: "proven", reason: "forward exact path (1 edges)" },
     "OSWE-5": { structural_path: "n/a", reason: "return-value flow not modelled" }
   });
@@ -475,4 +506,19 @@ test("CLI --graph value guards: --graph with no value, or followed by the next f
   assert.equal(nextFlag.status, 2, nextFlag.stderr);
   assert.match(nextFlag.stderr, /usage/);
   assert.equal(existsSync(outFile), false, "no output on a usage error");
+});
+
+test("C1/C1b goldens: an @Autowired interface (java) and an IRunner field (dotnet) are n/a through the DI hint, never absent", () => {
+  const java = checkChainStructure({
+    graph: golden("java"),
+    findings: [finding("OSWE-1", ["src/main/java/com/ex/di/DiApi.java", 16], ["src/main/java/com/ex/di/DiApi.java", 28])],
+    chains: []
+  });
+  assert.deepEqual(java.findings["OSWE-1"], { structural_path: "n/a", reason: "only non-exact edges connect source and sink" });
+  const dotnet = checkChainStructure({
+    graph: golden("dotnet"),
+    findings: [finding("OSWE-1", ["Controllers/DiController.cs", 18], ["Services/Runner.cs", 14])],
+    chains: []
+  });
+  assert.deepEqual(dotnet.findings["OSWE-1"], { structural_path: "n/a", reason: "only non-exact edges connect source and sink" });
 });

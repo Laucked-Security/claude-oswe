@@ -434,7 +434,7 @@ test("CLI: summary with app_graph (golden stats) + chain notes validates and ren
   const r = runRender("# Report\n", s);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.html.includes("<h2>App graph</h2>"), true);
-  assert.equal(r.html.includes("<td>Functions</td><td>10</td>"), true);
+  assert.equal(r.html.includes(`<td>Functions</td><td>${s.app_graph.stats.functions}</td>`), true); // the golden stats, copied
   assert.equal(r.html.includes("Notes: structural: member cap"), true);
   assert.equal(r.stderr, "");
 });

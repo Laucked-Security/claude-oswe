@@ -659,3 +659,93 @@ test("loadResolutionConfigs: an unreadable config (a directory named tsconfig.js
   assert.deepEqual(configs.errors, [{ file: "tsconfig.json", message: "unreadable" }]);
   assert.equal(configs.tsconfig, null);
 });
+
+// ---- C1b: interface / abstract dispatch, DI implementation hints -------------------------------------
+
+// A class entry that also implements `impls`; a bodiless (interface / abstract) method.
+const icls = (name, start, methods, { ext = null, impls = [] } = {}) => ({ name, extends: ext, implements: impls, methods, start_byte: start });
+const sig = (name, start, cls) => ({ ...fn(name, start, cls), bodiless: true });
+// Api.handle(svc) calls svc.run() on a receiver declared as `UserService`.
+const apiCaller = (path = "Api.java") => file(path, {
+  classes: [icls("Api", 0, ["handle"])],
+  functions: [fn("handle", 10, "Api")],
+  calls: [call("svc.run", 15, { enc: 10, receiverClass: "UserService", scope: ["svc"] })]
+});
+
+test("C1b (1): a call resolved to a bodiless interface method with no implementation is name-only, never exact", () => {
+  const iface = file("UserService.java", { classes: [icls("UserService", 0, ["run"])], functions: [sig("run", 20, "UserService")] });
+  const r = only(resolveAll([apiCaller(), iface]), "Api.java", 15);
+  assert.equal(r.confidence, "name-only");
+  assert.deepEqual(r.to, { path: "UserService.java", qualified_name: "UserService.run", start_byte: 20 });
+});
+
+test("C1b (1): an abstract method reached through `this` is name-only", () => {
+  const a = file("A.java", {
+    classes: [icls("A", 0, ["go", "step"])],
+    functions: [fn("go", 10, "A"), sig("step", 40, "A")],
+    calls: [call("this.step", 15, { enc: 10, receiver: "this" })]
+  });
+  const r = only(resolveAll([a]), "A.java", 15);
+  assert.equal(r.confidence, "name-only");
+  assert.equal(r.to.qualified_name, "A.step");
+});
+
+test("C1b (2): a class implementing the receiver class (resolved) overriding the method downgrades to name-only", () => {
+  const base = file("UserService.java", { classes: [icls("UserService", 0, ["run"])], functions: [fn("run", 20, "UserService")] });
+  const exactR = only(resolveAll([apiCaller(), base]), "Api.java", 15);
+  assert.equal(exactR.confidence, "exact");
+  const impl = file("Impl.java", { classes: [icls("Impl", 0, ["run"], { impls: ["UserService"] })], functions: [fn("run", 20, "Impl")] });
+  const r = only(resolveAll([apiCaller(), base, impl]), "Api.java", 15);
+  assert.equal(r.confidence, "name-only");
+  assert.deepEqual(r.to, { path: "UserService.java", qualified_name: "UserService.run", start_byte: 20 });
+});
+
+test("C1b (2): an unresolvable implements name still counts by its last segment (conservative)", () => {
+  const base = file("UserService.java", { classes: [icls("UserService", 0, ["run"])], functions: [fn("run", 20, "UserService")] });
+  const impl = file("Impl.java", { classes: [icls("Impl", 0, ["run"], { impls: ["com.missing.UserService"] })], functions: [fn("run", 20, "Impl")] });
+  const r = only(resolveAll([apiCaller(), base, impl]), "Api.java", 15);
+  assert.equal(r.confidence, "name-only");
+});
+
+test("C1b (3): a bodiless interface method with exactly one implementation resolves to it as name-only (DI hint)", () => {
+  const iface = file("UserService.java", { classes: [icls("UserService", 0, ["run"])], functions: [sig("run", 20, "UserService")] });
+  const impl = file("UserServiceImpl.java", { classes: [icls("UserServiceImpl", 0, ["run"], { impls: ["UserService"] })], functions: [fn("run", 30, "UserServiceImpl")] });
+  const r = only(resolveAll([apiCaller(), iface, impl]), "Api.java", 15);
+  assert.equal(r.confidence, "name-only");
+  assert.deepEqual(r.to, { path: "UserServiceImpl.java", qualified_name: "UserServiceImpl.run", start_byte: 30 });
+});
+
+test("C1b (3): several implementations -> the first by (path, start_byte), still name-only; an implementor without the method is skipped", () => {
+  const iface = file("UserService.java", { classes: [icls("UserService", 0, ["run"])], functions: [sig("run", 20, "UserService")] });
+  const b = file("b/Impl.java", { classes: [icls("BImpl", 0, ["run"], { impls: ["UserService"] })], functions: [fn("run", 30, "BImpl")] });
+  const a = file("a/Impl.java", {
+    classes: [icls("Other", 0, ["x"], { impls: ["UserService"] }), icls("AImpl", 50, ["run"], { impls: ["UserService"] })],
+    functions: [fn("x", 10, "Other"), fn("run", 60, "AImpl")]
+  });
+  const r = only(resolveAll([apiCaller(), iface, b, a]), "Api.java", 15);
+  assert.equal(r.confidence, "name-only");
+  assert.deepEqual(r.to, { path: "a/Impl.java", qualified_name: "AImpl.run", start_byte: 60 });
+});
+
+test("C1b (3): the hint reaches implementations below an abstract class and through interface inheritance", () => {
+  // IRunner <- (implements) Runner (defines Run) <- (extends) AdminRunner (does not)
+  const iface = file("IRunner.cs", { classes: [icls("IRunner", 0, ["Run"])], functions: [sig("Run", 10, "IRunner")] });
+  const runner = file("Runner.cs", { classes: [icls("Runner", 0, ["Run"], { impls: ["IRunner"] })], functions: [fn("Run", 20, "Runner")] });
+  const admin = file("AdminRunner.cs", { classes: [icls("AdminRunner", 0, ["Exec"], { ext: "Runner" })], functions: [fn("Exec", 20, "AdminRunner")] });
+  const caller = file("Api.cs", { classes: [icls("Api", 0, ["H"])], functions: [fn("H", 10, "Api")], calls: [call("r.Run", 15, { enc: 10, receiverClass: "IRunner", scope: ["r"] })] });
+  const r = only(resolveAll([caller, iface, runner, admin]), "Api.cs", 15);
+  assert.deepEqual([r.confidence, r.to?.qualified_name], ["name-only", "Runner.Run"]);
+  // abstract base: Base.step is bodiless, Impl extends Base defines it
+  const base = file("Base.java", { classes: [icls("Base", 0, ["step"]), icls("Impl", 100, ["step"], { ext: "Base" })], functions: [sig("step", 10, "Base"), fn("step", 110, "Impl")] });
+  const c2 = file("C.java", { classes: [icls("C", 0, ["h"])], functions: [fn("h", 10, "C")], calls: [call("b.step", 15, { enc: 10, receiverClass: "Base", scope: ["b"] })] });
+  const r2 = only(resolveAll([c2, base]), "C.java", 15);
+  assert.deepEqual([r2.confidence, r2.to?.qualified_name], ["name-only", "Impl.step"]);
+});
+
+test("C1b: a concrete receiver type keeps its exact edge when nothing implements or extends it", () => {
+  const concrete = file("Runner.cs", { classes: [icls("Runner", 0, ["Run"], { impls: ["IRunner"] })], functions: [fn("Run", 20, "Runner")] });
+  const iface = file("IRunner.cs", { classes: [icls("IRunner", 0, ["Run"])], functions: [sig("Run", 10, "IRunner")] });
+  const caller = file("Api.cs", { classes: [icls("Api", 0, ["H"])], functions: [fn("H", 10, "Api")], calls: [call("r.Run", 15, { enc: 10, receiverClass: "Runner", scope: ["r"] })] });
+  const r = only(resolveAll([caller, iface, concrete]), "Api.cs", 15);
+  assert.deepEqual([r.confidence, r.to?.qualified_name], ["exact", "Runner.Run"]);
+});

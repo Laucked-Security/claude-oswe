@@ -305,12 +305,13 @@ function onType(node, st) {
   const body = field(node, "body");
   const topLevel = st.scopes.length === 0;
   if (name) {
-    const parent = namedOf(childrenOfType(node, "base_clause")[0])[0];
+    const [parent, ...otherParents] = namedOf(childrenOfType(node, "base_clause")[0]);
     const methods = [...new Set(childrenOfType(body, "method_declaration").map((m) => field(m, "name")?.text).filter(Boolean))];
-    st.classes.push({ name, extends: isName(parent) ? baseName(parent.text) : null, methods, start_byte: node.startIndex });
+    // a class's `implements` list; an interface's parents after the first (which is its `extends`)
+    const interfaces = [...otherParents, ...namedOf(childrenOfType(node, "class_interface_clause")[0])].filter(isName).map((n) => baseName(n.text));
+    st.classes.push({ name, extends: isName(parent) ? baseName(parent.text) : null, implements: interfaces, methods, start_byte: node.startIndex });
     if (topLevel) st.exports.push({ name, start_byte: node.startIndex });
   }
-  if (childrenOfType(node, "class_interface_clause").length) st.notExtracted.add("implements clause");
   const attributes = attributesOf(node);
   const route = attributes.find((a) => attributeName(a) === "Route");
   const prefix = route ? routePath(route) : "";
@@ -378,7 +379,9 @@ function onFunction(node, st) {
     exported: fn.exported,
     class: fn.class,
     // a closure's lexical class body: resolve.mjs inherits a containing method's class only within it
-    ...(CLOSURES.has(node.type) ? { class_start_byte: fn.classStart } : {})
+    ...(CLOSURES.has(node.type) ? { class_start_byte: fn.classStart } : {}),
+    // an interface or abstract method: resolve.mjs never grades a call to it exact
+    ...(node.type === "method_declaration" && !field(node, "body") ? { bodiless: true } : {})
   });
   if (node.type === "method_declaration" && owner?.name) symfonyRoutes(node, owner, fn.qualified_name, st);
   const frame = newFrame(node.startIndex, fn.qualified_name);

@@ -2,17 +2,17 @@
   "version": 1,
   "generated_by": "oswe-build-graph/1",
   "stats": {
-    "files_total": 5,
-    "files_parsed": 5,
+    "files_total": 7,
+    "files_parsed": 7,
     "files_error": 0,
     "files_skipped": 0,
-    "functions": 12,
-    "calls_total": 8,
+    "functions": 15,
+    "calls_total": 10,
     "calls_exact": 2,
-    "calls_name_only": 2,
-    "calls_unresolved": 4,
+    "calls_name_only": 3,
+    "calls_unresolved": 5,
     "routes_by_auth": {
-      "unauthenticated": 3,
+      "unauthenticated": 4,
       "authenticated": 2,
       "unknown": 0
     },
@@ -33,8 +33,24 @@
   "nodes": [
     {
       "type": "file",
+      "id": "42fad909492f",
+      "path": "Services/IRunner.cs",
+      "stack": "dotnet",
+      "lang": "c_sharp",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
       "id": "52f3c7148220",
       "path": "Controllers/RunController.cs",
+      "stack": "dotnet",
+      "lang": "c_sharp",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "5a0e475db8b5",
+      "path": "Controllers/DiController.cs",
       "stack": "dotnet",
       "lang": "c_sharp",
       "parse_status": "ok"
@@ -73,15 +89,39 @@
     },
     {
       "type": "function",
-      "id": "2decab99e912",
+      "id": "17ed04b7b1b8",
+      "file": "Controllers/DiController.cs",
+      "name": "Run",
+      "qualified_name": "DiController.Run",
+      "line_start": 17,
+      "line_end": 22,
+      "kind": "method",
+      "exported": true,
+      "class": "DiController"
+    },
+    {
+      "type": "function",
+      "id": "22fbb41b121c",
       "file": "Services/Runner.cs",
       "name": "Run",
       "qualified_name": "Runner.Run",
-      "line_start": 7,
-      "line_end": 10,
+      "line_start": 17,
+      "line_end": 21,
       "kind": "method",
       "exported": true,
       "class": "Runner"
+    },
+    {
+      "type": "function",
+      "id": "318bccfca873",
+      "file": "Services/IRunner.cs",
+      "name": "Run",
+      "qualified_name": "IRunner.Run",
+      "line_start": 5,
+      "line_end": 5,
+      "kind": "method",
+      "exported": true,
+      "class": "IRunner"
     },
     {
       "type": "function",
@@ -145,18 +185,6 @@
     },
     {
       "type": "function",
-      "id": "582b5ac94207",
-      "file": "Services/Runner.cs",
-      "name": "Exec",
-      "qualified_name": "Runner.Exec",
-      "line_start": 12,
-      "line_end": 15,
-      "kind": "method",
-      "exported": true,
-      "class": "Runner"
-    },
-    {
-      "type": "function",
       "id": "64843c86fffa",
       "file": "Controllers/RunController.cs",
       "name": "Find",
@@ -166,17 +194,6 @@
       "kind": "method",
       "exported": true,
       "class": "RunController"
-    },
-    {
-      "type": "function",
-      "id": "64d1e93597b9",
-      "file": "Services/Runner.cs",
-      "name": "a",
-      "qualified_name": "Runner.Run.a",
-      "line_start": 19,
-      "line_end": 19,
-      "kind": "lambda",
-      "exported": false
     },
     {
       "type": "function",
@@ -202,15 +219,62 @@
     },
     {
       "type": "function",
-      "id": "cab19340b1ed",
+      "id": "d4d0ebc4aadc",
+      "file": "Controllers/DiController.cs",
+      "name": "DiController",
+      "qualified_name": "DiController.DiController",
+      "line_start": 12,
+      "line_end": 15,
+      "kind": "method",
+      "exported": true,
+      "class": "DiController"
+    },
+    {
+      "type": "function",
+      "id": "d8ac7c86144d",
       "file": "Services/Runner.cs",
-      "name": "Run",
-      "qualified_name": "Runner.Run",
-      "line_start": 17,
-      "line_end": 21,
+      "name": "a",
+      "qualified_name": "Runner.Run.a",
+      "line_start": 19,
+      "line_end": 19,
+      "kind": "lambda",
+      "exported": false
+    },
+    {
+      "type": "function",
+      "id": "dabcb67034f7",
+      "file": "Services/Runner.cs",
+      "name": "Exec",
+      "qualified_name": "Runner.Exec",
+      "line_start": 12,
+      "line_end": 15,
       "kind": "method",
       "exported": true,
       "class": "Runner"
+    },
+    {
+      "type": "function",
+      "id": "f2bcd47a1db9",
+      "file": "Services/Runner.cs",
+      "name": "Run",
+      "qualified_name": "Runner.Run",
+      "line_start": 7,
+      "line_end": 10,
+      "kind": "method",
+      "exported": true,
+      "class": "Runner"
+    },
+    {
+      "type": "route",
+      "id": "08803df953d6",
+      "file": "Controllers/DiController.cs",
+      "line": 17,
+      "http_method": "POST",
+      "path_pattern": "/api/di/run",
+      "handler": "17ed04b7b1b8",
+      "middlewares": [],
+      "framework": "aspnet",
+      "auth": "unauthenticated"
     },
     {
       "type": "route",
@@ -280,16 +344,6 @@
     },
     {
       "type": "sink",
-      "id": "00ba7ce7e42d",
-      "file": "Services/Runner.cs",
-      "line": 14,
-      "enclosing_fn": "582b5ac94207",
-      "class": "cmd-exec",
-      "callee": "Process.Start",
-      "pattern": "Process.Start"
-    },
-    {
-      "type": "sink",
       "id": "1047f4876fbe",
       "file": "Data/Dao.cs",
       "line": 10,
@@ -307,6 +361,25 @@
       "class": "sql",
       "callee": "SqlCommand",
       "pattern": "SqlCommand"
+    },
+    {
+      "type": "sink",
+      "id": "460859858303",
+      "file": "Services/Runner.cs",
+      "line": 14,
+      "enclosing_fn": "dabcb67034f7",
+      "class": "cmd-exec",
+      "callee": "Process.Start",
+      "pattern": "Process.Start"
+    },
+    {
+      "type": "source",
+      "id": "a453f3fad94c",
+      "file": "Controllers/DiController.cs",
+      "line": 18,
+      "enclosing_fn": "17ed04b7b1b8",
+      "kind": "body",
+      "pattern": "[FromBody]"
     },
     {
       "type": "source",
@@ -330,11 +403,27 @@
   "edges": [
     {
       "type": "calls",
-      "from": "2decab99e912",
-      "to": "582b5ac94207",
-      "line": 9,
-      "callee_text": "Exec",
+      "from": "17ed04b7b1b8",
+      "to": null,
+      "line": 21,
+      "callee_text": "Ok",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "17ed04b7b1b8",
+      "to": "f2bcd47a1db9",
+      "line": 20,
+      "callee_text": "_runner.Run",
       "confidence": "name-only"
+    },
+    {
+      "type": "calls",
+      "from": "22fbb41b121c",
+      "to": null,
+      "line": 20,
+      "callee_text": "a",
+      "confidence": "unresolved"
     },
     {
       "type": "calls",
@@ -355,14 +444,30 @@
     {
       "type": "calls",
       "from": "4142b598e3cf",
-      "to": "2decab99e912",
+      "to": "f2bcd47a1db9",
       "line": 22,
       "callee_text": "_runner.Run",
       "confidence": "exact"
     },
     {
       "type": "calls",
-      "from": "582b5ac94207",
+      "from": "935cf6f9bc6a",
+      "to": "f2bcd47a1db9",
+      "line": 7,
+      "callee_text": "r.Run",
+      "confidence": "exact"
+    },
+    {
+      "type": "calls",
+      "from": "d8ac7c86144d",
+      "to": "dabcb67034f7",
+      "line": 19,
+      "callee_text": "Exec",
+      "confidence": "name-only"
+    },
+    {
+      "type": "calls",
+      "from": "dabcb67034f7",
       "to": null,
       "line": 14,
       "callee_text": "Process.Start",
@@ -370,27 +475,16 @@
     },
     {
       "type": "calls",
-      "from": "64d1e93597b9",
-      "to": "582b5ac94207",
-      "line": 19,
+      "from": "f2bcd47a1db9",
+      "to": "dabcb67034f7",
+      "line": 9,
       "callee_text": "Exec",
       "confidence": "name-only"
     },
     {
-      "type": "calls",
-      "from": "935cf6f9bc6a",
-      "to": "2decab99e912",
-      "line": 7,
-      "callee_text": "r.Run",
-      "confidence": "exact"
-    },
-    {
-      "type": "calls",
-      "from": "cab19340b1ed",
-      "to": null,
-      "line": 20,
-      "callee_text": "a",
-      "confidence": "unresolved"
+      "type": "handles",
+      "from": "08803df953d6",
+      "to": "17ed04b7b1b8"
     },
     {
       "type": "handles",
@@ -420,6 +514,13 @@
     {
       "type": "imports",
       "from": "52f3c7148220",
+      "to": "974ab8c45760",
+      "confidence": "heuristic",
+      "specifier": "Demo.Services"
+    },
+    {
+      "type": "imports",
+      "from": "5a0e475db8b5",
       "to": "974ab8c45760",
       "confidence": "heuristic",
       "specifier": "Demo.Services"

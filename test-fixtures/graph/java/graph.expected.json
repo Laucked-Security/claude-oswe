@@ -2,17 +2,17 @@
   "version": 1,
   "generated_by": "oswe-build-graph/1",
   "stats": {
-    "files_total": 5,
-    "files_parsed": 5,
+    "files_total": 6,
+    "files_parsed": 6,
     "files_error": 0,
     "files_skipped": 0,
-    "functions": 10,
-    "calls_total": 12,
+    "functions": 13,
+    "calls_total": 15,
     "calls_exact": 1,
-    "calls_name_only": 2,
-    "calls_unresolved": 9,
+    "calls_name_only": 3,
+    "calls_unresolved": 11,
     "routes_by_auth": {
-      "unauthenticated": 1,
+      "unauthenticated": 2,
       "authenticated": 1,
       "unknown": 0
     },
@@ -37,6 +37,14 @@
       "type": "file",
       "id": "1a1b17ab8178",
       "path": "src/main/java/com/ex/Dao.java",
+      "stack": "java",
+      "lang": "java",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "700d3d597d52",
+      "path": "src/main/java/com/ex/di/DiApi.java",
       "stack": "java",
       "lang": "java",
       "parse_status": "ok"
@@ -110,6 +118,18 @@
     },
     {
       "type": "function",
+      "id": "247fdff3c655",
+      "file": "src/main/java/com/ex/di/DiApi.java",
+      "name": "run",
+      "qualified_name": "UserService.run",
+      "line_start": 23,
+      "line_end": 23,
+      "kind": "method",
+      "exported": false,
+      "class": "UserService"
+    },
+    {
+      "type": "function",
       "id": "389e6b7fe06f",
       "file": "src/main/java/com/ex/SecurityConfig.java",
       "name": "filterChain",
@@ -122,6 +142,18 @@
     },
     {
       "type": "function",
+      "id": "3d1a4019ab32",
+      "file": "src/main/java/com/ex/di/DiApi.java",
+      "name": "run",
+      "qualified_name": "DiApi.run",
+      "line_start": 15,
+      "line_end": 19,
+      "kind": "method",
+      "exported": true,
+      "class": "DiApi"
+    },
+    {
+      "type": "function",
       "id": "3dae86028440",
       "file": "src/main/java/com/ex/Dao.java",
       "name": "find",
@@ -131,6 +163,18 @@
       "kind": "method",
       "exported": true,
       "class": "Dao"
+    },
+    {
+      "type": "function",
+      "id": "485fc90a9c70",
+      "file": "src/main/java/com/ex/di/DiApi.java",
+      "name": "run",
+      "qualified_name": "UserServiceImpl.run",
+      "line_start": 27,
+      "line_end": 29,
+      "kind": "method",
+      "exported": false,
+      "class": "UserServiceImpl"
     },
     {
       "type": "function",
@@ -218,6 +262,18 @@
       "auth": "unauthenticated"
     },
     {
+      "type": "route",
+      "id": "cf098d57059d",
+      "file": "src/main/java/com/ex/di/DiApi.java",
+      "line": 15,
+      "http_method": "POST",
+      "path_pattern": "/di/run",
+      "handler": "3d1a4019ab32",
+      "middlewares": [],
+      "framework": "spring",
+      "auth": "unauthenticated"
+    },
+    {
       "type": "sink",
       "id": "0e917ef42627",
       "file": "src/main/java/com/ex/Dao.java",
@@ -229,6 +285,16 @@
     },
     {
       "type": "sink",
+      "id": "30c2af80945c",
+      "file": "src/main/java/com/ex/di/DiApi.java",
+      "line": 28,
+      "enclosing_fn": "485fc90a9c70",
+      "class": "cmd-exec",
+      "callee": "Runtime.getRuntime.exec",
+      "pattern": "Runtime.getRuntime().exec"
+    },
+    {
+      "type": "sink",
       "id": "ec4e796f6f50",
       "file": "src/main/java/com/ex/service/UserService.java",
       "line": 9,
@@ -236,6 +302,15 @@
       "class": "cmd-exec",
       "callee": "Runtime.getRuntime.exec",
       "pattern": "Runtime.getRuntime().exec"
+    },
+    {
+      "type": "source",
+      "id": "9178563ecdfc",
+      "file": "src/main/java/com/ex/di/DiApi.java",
+      "line": 16,
+      "enclosing_fn": "3d1a4019ab32",
+      "kind": "query",
+      "pattern": "@RequestParam"
     },
     {
       "type": "source",
@@ -290,6 +365,14 @@
     },
     {
       "type": "calls",
+      "from": "3d1a4019ab32",
+      "to": "485fc90a9c70",
+      "line": 17,
+      "callee_text": "userService.run",
+      "confidence": "name-only"
+    },
+    {
+      "type": "calls",
       "from": "3dae86028440",
       "to": null,
       "line": 5,
@@ -302,6 +385,22 @@
       "to": null,
       "line": 6,
       "callee_text": "st.execute",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "485fc90a9c70",
+      "to": null,
+      "line": 28,
+      "callee_text": "Runtime.getRuntime",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "485fc90a9c70",
+      "to": null,
+      "line": 28,
+      "callee_text": "Runtime.getRuntime.exec",
       "confidence": "unresolved"
     },
     {
@@ -353,6 +452,11 @@
       "type": "handles",
       "from": "a456ad0dee8e",
       "to": "a17503fd1b6d"
+    },
+    {
+      "type": "handles",
+      "from": "cf098d57059d",
+      "to": "3d1a4019ab32"
     },
     {
       "type": "imports",

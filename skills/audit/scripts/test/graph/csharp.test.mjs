@@ -239,7 +239,7 @@ test("functions: constructors, expression bodies, local functions, anonymous met
   assert.equal(x.functions.find((f) => f.name === "Local").class_start_byte, undefined);
 });
 
-test("classes: extends is the first base unless it looks like an interface; other bases noted; nested types by simple name", async () => {
+test("classes: extends is the first base unless it looks like an interface; other bases are implements; nested types by simple name", async () => {
   const x = await extract(
     "public class K<T> : Base.Generic<T>, IDisposable where T : class {\n  void M() {}\n  void M(int a) {}\n  class Nested : K<string> { void N() {} }\n}\n" +
       "class Only : IOnly { }\ninterface IA : IB { void A(); }\nstruct S : IS { }\nrecord R(int A) : RBase(A) { void Q() {} }\nenum E { X }\n"
@@ -249,7 +249,7 @@ test("classes: extends is the first base unless it looks like an interface; othe
     [["K", "Generic", ["M"]], ["Nested", "K", ["N"]], ["Only", null, []], ["IA", null, ["A"]], ["S", null, []], ["R", "RBase", ["Q"]], ["E", null, []]]
   );
   assert.equal(x.classes[0].start_byte, 0);
-  assert.ok(x.not_extracted.includes("implements clause"));
+  assert.deepEqual(x.classes[0].implements, ["IDisposable"]); // C1b: extracted, no longer noted
   const y = await extractFixture("Services/AdminRunner.cs");
   assert.deepEqual(y.classes.map((c) => [c.name, c.extends, c.methods]), [["AdminRunner", "Runner", ["Exec"]]]);
   assert.deepEqual(y.not_extracted, []);
@@ -574,6 +574,7 @@ test("the dotnet fixture through build-graph: route auth, field-typed receiver, 
     ["GET", "/api/Run/ping", "unauthenticated"],
     ["GET", "/health", "unauthenticated"],
     ["POST", "/api/Run/run", "authenticated"],
+    ["POST", "/api/di/run", "unauthenticated"],
     ["POST", "/exec", "authenticated"]
   ]);
   const fn = (file, qn) => graph.nodes.filter((n) => n.type === "function" && n.file === file && n.qualified_name === qn);
@@ -582,8 +583,13 @@ test("the dotnet fixture through build-graph: route auth, field-typed receiver, 
   const exec = fn("Services/Runner.cs", "Runner.Exec")[0];
   const lambda = fn("Services/Runner.cs", "Runner.Run.a")[0];
   const calls = graph.edges.filter((e) => e.type === "calls");
-  const fieldRun = calls.find((e) => e.callee_text === "_runner.Run");
-  assert.deepEqual([fieldRun.to, fieldRun.confidence], [run1.id, "exact"]); // the 1-parameter overload, via the field's type
+  const ctrlRun = fn("Controllers/RunController.cs", "RunController.Run")[0];
+  const fieldRun = calls.find((e) => e.from === ctrlRun.id && e.callee_text === "_runner.Run");
+  assert.deepEqual([fieldRun.to, fieldRun.confidence], [run1.id, "exact"]); // the 1-parameter overload, via the field's (concrete) type
+  // C1b: the IRunner-typed field resolves through the DI hint to Runner.Run (the implementor), name-only
+  const diRun = calls.find((e) => e.from === fn("Controllers/DiController.cs", "DiController.Run")[0].id && e.callee_text === "_runner.Run");
+  assert.deepEqual([diRun.to, diRun.confidence], [run1.id, "name-only"]);
+  assert.equal(fn("Services/IRunner.cs", "IRunner.Run").length, 1);
   const bareExec = calls.find((e) => e.from === run1.id && e.callee_text === "Exec");
   assert.deepEqual([bareExec.to, bareExec.confidence], [exec.id, "name-only"]); // AdminRunner overrides Exec
   const lambdaExec = calls.find((e) => e.from === lambda.id && e.callee_text === "Exec");
@@ -592,13 +598,28 @@ test("the dotnet fixture through build-graph: route auth, field-typed receiver, 
   assert.equal(cmd.enclosing_fn, exec.id);
   const find = fn("Data/Dao.cs", "Dao.Find")[0];
   assert.deepEqual(graph.nodes.filter((n) => n.type === "sink" && n.class === "sql").map((s) => [s.callee, s.enclosing_fn]).sort(), [["SqlCommand", find.id], ["cmd.ExecuteReader", find.id]].sort());
-  const body = graph.nodes.find((n) => n.type === "source" && n.kind === "body");
-  assert.equal(body.enclosing_fn, fn("Controllers/RunController.cs", "RunController.Run")[0].id);
+  const body = graph.nodes.find((n) => n.type === "source" && n.kind === "body" && n.file === "Controllers/RunController.cs");
+  assert.equal(body.enclosing_fn, ctrlRun.id);
   const fileId = (path) => graph.nodes.find((n) => n.type === "file" && n.path === path).id;
   const imports = graph.edges.filter((e) => e.type === "imports" && e.specifier === "Demo.Services");
   assert.deepEqual(
     imports.map((e) => [e.from, e.to, e.confidence]).sort(),
-    [[fileId("Controllers/RunController.cs"), fileId("Services/AdminRunner.cs"), "heuristic"], [fileId("Program.cs"), fileId("Services/AdminRunner.cs"), "heuristic"]].sort()
+    [[fileId("Controllers/DiController.cs"), fileId("Services/AdminRunner.cs"), "heuristic"], [fileId("Controllers/RunController.cs"), fileId("Services/AdminRunner.cs"), "heuristic"], [fileId("Program.cs"), fileId("Services/AdminRunner.cs"), "heuristic"]].sort()
   );
   assert.deepEqual(graph.stats.coverage_matrix.dotnet.extractors_applied, ["aspnet"]);
+});
+
+// ---- C1b: implements and bodiless ------------------------------------------------------------------
+
+test("C1b: classes carry implements (every base but the superclass); interface / abstract methods are bodiless", async () => {
+  const x = await extract(
+    "public class K : Base, IDisposable, Ns.IRun<int> { void M() {} }\nclass Only : IOnly { }\ninterface IA : IB, IC { void A(); int B() => 1; }\n" +
+      "abstract class Ab : IA { public abstract void A(); public void C() {} public string P() => \"x\"; }\nstruct S : IS { }\n"
+  );
+  assert.deepEqual(x.classes.map((c) => [c.name, c.extends, c.implements]), [
+    ["K", "Base", ["IDisposable", "IRun"]], ["Only", null, ["IOnly"]], ["IA", null, ["IB", "IC"]], ["Ab", null, ["IA"]], ["S", null, ["IS"]]
+  ]);
+  const bodiless = Object.fromEntries(x.functions.map((f) => [f.qualified_name, f.bodiless === true]));
+  assert.deepEqual(bodiless, { "K.M": false, "IA.A": true, "IA.B": false, "Ab.A": true, "Ab.C": false, "Ab.P": false });
+  assert.equal(x.not_extracted.includes("implements clause"), false);
 });
