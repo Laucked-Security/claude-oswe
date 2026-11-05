@@ -4,7 +4,7 @@
 
 ### White-Box Security Audit plugin for Claude Code
 
-**A [Laucked Security](https://github.com/Laucked-Security) project**
+**A [Laucked Security](https://www.laucked.com/) project**
 
 [![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -296,6 +296,13 @@ purposes only. **Do not** audit untrusted, hostile, or unauthorized repositories
 comments and strings are treated as untrusted data, never instructions. See [SECURITY.md](SECURITY.md)
 for the full responsible-use policy and how to report a vulnerability in the plugin itself.
 
+## About
+
+claude-oswe is built and maintained by [Laucked](https://www.laucked.com/), a penetration testing firm
+based in the Toulouse area, France. The plugin stops at static proof. For a white-box audit in which
+each finding is also confirmed dynamically, see
+[how we run source code audits](https://www.laucked.com/blog/audit-code-source) (in French).
+
 ## License
 
-[MIT](LICENSE) © 2026 [Laucked](https://github.com/Laucked-Security)
+[MIT](LICENSE) © 2026 [Laucked](https://www.laucked.com/)
