@@ -106,10 +106,13 @@ text**: identifiers and line numbers only, so it carries no secrets and needs no
   Edge identity = `(type, from, to, line, start_byte)`. Edge order and node order are sorted by
   `(type, id)`. **Two builds of identical input are byte-identical.**
 - `auth` on a route is computed deterministically from the `auth_markers` list already present in the
-  `surface` block of `references/<stack>.md`: a resolved middleware/decorator/attribute whose name
-  matches a marker → `authenticated`; all middlewares resolved and none match → `unauthenticated`; any
-  unresolved middleware → `unknown`. The analyzer and verifier may disagree with the graph in their
-  reasoning; the graph value is never overwritten.
+  `surface` block of `references/<stack>.md`: any middleware/decorator/attribute whose name matches a
+  marker → `authenticated` (the curated name is the evidence, whether or not the middleware resolved to
+  a parsed function); otherwise any unresolved middleware → `unknown`; otherwise → `unauthenticated`.
+  Framework-specific overrides (e.g. ASP.NET `[AllowAnonymous]`) force `unauthenticated`. Express
+  `app.use(path, …mws, router)` mounts propagate their path prefix and middlewares onto the mounted
+  file's routes. The analyzer and verifier may disagree with the graph in their reasoning; the graph
+  value is never overwritten.
 - `stats` block: `files_total`, `files_parsed`, `files_error`, `files_skipped`, `functions`,
   `calls_total`, `calls_exact`, `calls_name_only`, `calls_unresolved`, `routes_by_auth`,
   `coverage_matrix` (per stack: frameworks detected, extractors applied, constructs not extracted).
@@ -126,6 +129,12 @@ enclosing lexical scopes (parameters, locals, closure variables) so the resolver
 1. callee is a **top-level or class-member definition in the same file** and the name is **not
    shadowed** by a parameter/local/closure binding in any enclosing scope of the call site → `exact`.
    Shadowed → `unresolved` (the callee is a runtime value the graph cannot see).
+   1b. callee is `x.m()` where the receiver `x` has a **demonstrable class**: `x` is a local bound by
+   `new C(...)` in the same function or file, or (Java / C# / PHP) a field, parameter or property with
+   a declared type `C` → the method `m` of `C` (resolved in the same file, through the import bindings,
+   or by unique name across parsed files; two classes named `C` → `unresolved`), subject to rule 3's
+   override check → `exact`. A constructor call or a declared type is a demonstrated binding, not type
+   inference; receiver *reassignment* is not tracked, which the override check and the verifier absorb.
 2. callee is an **imported binding** (not shadowed) → the export of the resolved target file → `exact`.
    If the import resolves to a file but the export is not found → `unresolved`.
 3. `this.x()` / `self.x()` / `$this->x()` → the method `x` of the enclosing class, resolved in the same
