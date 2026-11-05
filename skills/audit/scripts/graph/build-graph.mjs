@@ -25,6 +25,14 @@
 //   helpers, graph schema). A hit rewrites the cached output byte-for-byte. Only graphs are
 //   stored: a { graph: null } envelope is never cached.
 //
+// Express globals: an `app.use(...)` whose last argument is neither a parsed function nor a parsed
+// router file is a global middleware text (no resolved function) for the later routes under its
+// prefix, so route auth applies to it (marker => authenticated, else unknown), and it is noted
+// `mount:<label>`. BENIGN_MIDDLEWARE (express.json / urlencoded / static / text / raw / Router,
+// bodyParser[.json|.urlencoded], cors, helmet, morgan, compression, cookieParser / cookie-parser,
+// methodOverride, favicon, serveStatic; whole text or first segment) is ignored entirely, and never
+// counts as an unresolved middleware on any route.
+//
 // Language modules are discovered, not registered: a file whose module (LANG_MODULE_FILE) does not
 // exist yet is a `file` node with parse_status "skipped", skip_reason "no extractor".
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -298,8 +306,25 @@ function importedFile(file, text, importMap, extractsByPath) {
 // code excerpts (a subscript handler text could carry a string literal).
 export const mountLabel = (text) => `mount:${text.replace(/[^A-Za-z0-9_.$]/g, "").slice(0, 64)}`;
 
+// Express middlewares that never decide authentication (body parsers, static files, CORS, security
+// headers, logging, compression, cookies): ignored entirely — never a global middleware, never an
+// unresolved middleware that makes a route `unknown`. A text matches by its whole normalised form or
+// its first dotted segment (`helmet.contentSecurityPolicy` -> `helmet`).
+export const BENIGN_MIDDLEWARE = new Set([
+  "express.json", "express.urlencoded", "express.static", "express.text", "express.raw", "bodyParser.json", "bodyParser.urlencoded",
+  "bodyParser", "cors", "helmet", "morgan", "compression", "cookieParser", "cookie-parser", "methodOverride", "favicon", "serveStatic", "express.Router"
+]);
+export function isBenignMiddleware(text) {
+  const normal = normalizeToken(text);
+  return BENIGN_MIDDLEWARE.has(normal) || BENIGN_MIDDLEWARE.has(normal.split(".")[0]);
+}
+
 // Classify every `USE` entry: a function (global middleware for later routes / mounts of its file),
-// a mounted router file, or neither (recorded as not_extracted "mount:<label>").
+// a mounted router file, or neither — then (I3) its texts are global middleware texts with no
+// resolved function (`ref: null`) for the later routes under its prefix, so the auth rules apply to
+// them (a marker match => authenticated, else unknown), and the entry is also recorded as
+// not_extracted "mount:<label>" (it may be a router the graph did not parse). Benign middleware
+// texts (BENIGN_MIDDLEWARE) are dropped from every USE entry.
 function classifyUses(parsed, resolved, importMap, notExtracted) {
   const extractsByPath = new Map(parsed.map((f) => [f.path, f.extract]));
   const globals = new Map(); // path -> [{ path_pattern, start_byte, mws: [{ file, text }] }]
@@ -307,14 +332,20 @@ function classifyUses(parsed, resolved, importMap, notExtracted) {
   for (const file of parsed) {
     for (const route of file.extract.routes ?? []) {
       if (route.http_method !== "USE") continue;
-      const mws = route.middleware_texts.map((text) => ({ file: file.path, text }));
+      const mws = route.middleware_texts.filter((text) => !isBenignMiddleware(text)).map((text) => ({ file: file.path, text }));
+      const own = isBenignMiddleware(route.handler_text) ? [] : [{ file: file.path, text: route.handler_text }];
+      const global = { path_pattern: route.path_pattern, start_byte: route.start_byte, mws: [...mws, ...own] };
       if (resolved.get(siteKey(file.path, route.handler_text))) {
-        pushTo(globals, file.path, { path_pattern: route.path_pattern, start_byte: route.start_byte, mws: [...mws, { file: file.path, text: route.handler_text }] });
+        pushTo(globals, file.path, global);
         continue;
       }
       const target = importedFile(file, route.handler_text, importMap, extractsByPath);
       if (target && !mountOf.has(target)) mountOf.set(target, { file: file.path, stack: file.stack, text: route.handler_text, path_pattern: route.path_pattern, start_byte: route.start_byte, mws });
-      else notExtracted(file.stack).add(target ? `${mountLabel(route.handler_text)}(mounted twice)` : mountLabel(route.handler_text));
+      else if (target) notExtracted(file.stack).add(`${mountLabel(route.handler_text)}(mounted twice)`);
+      else {
+        if (own.length) notExtracted(file.stack).add(mountLabel(route.handler_text));
+        if (global.mws.length) pushTo(globals, file.path, global);
+      }
     }
   }
   breakMountCycles(mountOf, notExtracted);
@@ -376,12 +407,20 @@ function isAuthMarker(text, surface) {
 function routeAuth(mws, surfaceOfPath) {
   if (mws.some((m) => normalizeToken(m.text) === "AllowAnonymous")) return "unauthenticated";
   if (mws.some((m) => isAuthMarker(m.text, surfaceOfPath(m.file)))) return "authenticated";
-  return mws.some((m) => !m.ref) ? "unknown" : "unauthenticated";
+  return mws.some((m) => !m.ref && !isBenignMiddleware(m.text)) ? "unknown" : "unauthenticated";
 }
+
+// Spec §2.4: SecurityFilterChain matchers are recorded file-level as `unknown` auth hints — a parsed
+// Java file declaring a SecurityFilterChain (java.mjs notes "SecurityFilterChain matchers") can guard
+// any Spring route, so a Spring route the auth rules would call `unauthenticated` is `unknown`;
+// marker routes stay `authenticated`.
+const SPRING_SECURITY_NOTE = "SecurityFilterChain matchers";
+const springSecurityConfigured = (parsed) => parsed.some((f) => f.stack === "java" && (f.extract.not_extracted ?? []).includes(SPRING_SECURITY_NOTE));
 
 // -> [{ node, handlerRef, mws: [{ file, text, ref }] }] for every non-USE route.
 function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
   const uses = classifyUses(parsed, resolved, importMap, notExtracted);
+  const springSecured = springSecurityConfigured(parsed);
   const memo = new Map();
   const routes = [];
   for (const file of parsed) {
@@ -394,6 +433,7 @@ function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
       const overloadKey = routeSiteKey(file.path, route.start_byte);
       const handlerRef = resolved.get(overloadKey) ?? resolved.get(siteKey(file.path, route.handler_text)) ?? null;
       if (!handlerRef && resolved.has(overloadKey)) notExtracted(file.stack).add("route(overloaded handler)");
+      const auth = routeAuth(mws, surfaceOfPath);
       routes.push({
         handlerRef,
         mws,
@@ -407,7 +447,7 @@ function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
           handler: handlerRef && fnRefId(handlerRef),
           middlewares: mws.map((m) => (m.ref ? fnRefId(m.ref) : m.text)),
           framework: route.framework,
-          auth: routeAuth(mws, surfaceOfPath)
+          auth: springSecured && route.framework === "spring" && auth === "unauthenticated" ? "unknown" : auth
         }
       });
     }

@@ -111,7 +111,12 @@ text**: identifiers and line numbers only, so it carries no secrets and needs no
   a parsed function); otherwise any unresolved middleware → `unknown`; otherwise → `unauthenticated`.
   Framework-specific overrides (e.g. ASP.NET `[AllowAnonymous]`) force `unauthenticated`. Express
   `app.use(path, …mws, router)` mounts propagate their path prefix and middlewares onto the mounted
-  file's routes. The analyzer and verifier may disagree with the graph in their reasoning; the graph
+  file's routes; an `app.use(…)` whose last argument resolves to neither a parsed function nor a parsed
+  router file is an unresolved global middleware for the later routes under its prefix (marker ⇒
+  `authenticated`, else `unknown`), except the built-in `BENIGN_MIDDLEWARE` list of Express middlewares
+  that never decide auth (`express.json`/`urlencoded`/`static`/`text`/`raw`/`Router`, `bodyParser`,
+  `cors`, `helmet`, `morgan`, `compression`, `cookieParser`, `methodOverride`, `favicon`, `serveStatic`),
+  which is ignored entirely. The analyzer and verifier may disagree with the graph in their reasoning; the graph
   value is never overwritten.
 - `stats` block: `files_total`, `files_parsed`, `files_error`, `files_skipped`, `functions`,
   `calls_total`, `calls_exact`, `calls_name_only`, `calls_unresolved`, `routes_by_auth`,

@@ -387,7 +387,8 @@ test("the java fixture through build-graph: route auth, implicit-this override g
   const { graph, reason } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["java"], frameworks: ["spring"], referencesDir: REFERENCES_DIR });
   assert.ok(graph, reason);
   const routes = graph.nodes.filter((n) => n.type === "route").map((r) => [r.http_method, r.path_pattern, r.auth]);
-  assert.deepEqual(routes.sort(), [["GET", "/api/health", "unauthenticated"], ["POST", "/api/run", "authenticated"], ["POST", "/di/run", "unauthenticated"]]);
+  // I4: SecurityConfig declares a SecurityFilterChain, so the unmarked Spring routes are unknown
+  assert.deepEqual(routes.sort(), [["GET", "/api/health", "unknown"], ["POST", "/api/run", "authenticated"], ["POST", "/di/run", "unknown"]]);
   const fn = (file, qn) => graph.nodes.filter((n) => n.type === "function" && n.file === `${SRC}/${file}` && n.qualified_name === qn);
   const [run1, run2] = fn("service/UserService.java", "UserService.run").sort((a, b) => a.line_start - b.line_start);
   assert.ok(run1 && run2 && run1.id !== run2.id, "two UserService.run overloads with distinct ids");

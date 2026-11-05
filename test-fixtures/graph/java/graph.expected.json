@@ -12,9 +12,9 @@
     "calls_name_only": 3,
     "calls_unresolved": 11,
     "routes_by_auth": {
-      "unauthenticated": 2,
+      "unauthenticated": 0,
       "authenticated": 1,
-      "unknown": 0
+      "unknown": 2
     },
     "coverage_matrix": {
       "java": {
@@ -259,7 +259,7 @@
       "handler": "a17503fd1b6d",
       "middlewares": [],
       "framework": "spring",
-      "auth": "unauthenticated"
+      "auth": "unknown"
     },
     {
       "type": "route",
@@ -271,7 +271,7 @@
       "handler": "3d1a4019ab32",
       "middlewares": [],
       "framework": "spring",
-      "auth": "unauthenticated"
+      "auth": "unknown"
     },
     {
       "type": "sink",

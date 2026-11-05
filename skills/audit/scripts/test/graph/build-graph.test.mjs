@@ -295,7 +295,60 @@ test("(6) a global app.use(fn) guards only later routes under its path; an unres
     "GET /admin/panel": ["authenticated", [ensure]],
     "DELETE /admin/sub": ["authenticated", [ensure]]
   });
-  assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["mount:express.static"]);
+  // I3: express.static is BENIGN_MIDDLEWARE — ignored entirely (no note, no unresolved middleware)
+  assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, []);
+});
+
+test("I3: an unresolved global app.use(...) is a middleware text for later routes: marker => authenticated, else unknown; benign ones are ignored", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "app.js", [
+    "const passport = require('passport');",
+    "function h(req, res) {}",
+    "app.use(express.json());",
+    "app.use(bodyParser.urlencoded({ extended: false }));",
+    "app.use(cors());",
+    "app.use(helmet.contentSecurityPolicy());",
+    "app.get('/open', h);",
+    "app.use('/api', passport.authenticate('jwt'));",
+    "app.get('/api/secret', h);",
+    "app.get('/other', h);",
+    "app.use('/v', vendorRouter);",
+    "app.get('/v/x', h);",
+    "app.get('/w', h);",
+    "app.use(customThing());",
+    "app.get('/later', h);",
+    ""
+  ].join("\n"));
+  const { graph } = await build(dir);
+  const routes = Object.fromEntries(nodesOf(graph, "route").map((r) => [r.path_pattern, [r.auth, r.middlewares]]));
+  assert.deepEqual(routes, {
+    "/open": ["unauthenticated", []],
+    "/api/secret": ["authenticated", ["passport.authenticate"]],
+    "/other": ["unauthenticated", []],
+    "/v/x": ["unknown", ["vendorRouter"]],
+    "/w": ["unauthenticated", []],
+    "/later": ["unknown", ["customThing"]]
+  });
+  // a non-benign unresolved USE target may also be an unparsed router: still noted
+  assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["mount:customThing", "mount:passport.authenticate", "mount:vendorRouter"]);
+});
+
+test("I3: the three ruled cases (passport global => authenticated; customThing() => unknown; express.json() => unauthenticated)", async (t) => {
+  const cases = [["app.use(passport.authenticate('jwt'));\napp.get('/secret', h);\n", "authenticated"], ["app.use(customThing());\napp.get('/x', h);\n", "unknown"], ["app.use(express.json());\napp.get('/x', h);\n", "unauthenticated"]];
+  for (const [src, auth] of cases) {
+    const dir = tempDir(t);
+    put(dir, "app.js", "function h(req, res) {}\n" + src);
+    const { graph } = await build(dir);
+    assert.deepEqual(nodesOf(graph, "route").map((r) => r.auth), [auth], src);
+  }
+});
+
+test("I3: a benign per-route middleware never makes a route unknown", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "app.js", "function h(req, res) {}\napp.post('/x', bodyParser.json(), h);\napp.post('/y', cookieParser(), checkThing, h);\n");
+  const { graph } = await build(dir);
+  const routes = Object.fromEntries(nodesOf(graph, "route").map((r) => [r.path_pattern, [r.auth, r.middlewares]]));
+  assert.deepEqual(routes, { "/x": ["unauthenticated", ["bodyParser.json"]], "/y": ["unknown", ["cookieParser", "checkThing"]] });
 });
 
 test("(6) auth: a Nest @UseGuards guard is authenticated; an unguarded controller is unauthenticated", async (t) => {
@@ -582,4 +635,31 @@ test("I6: a mount text is reduced to an identifier-only label (no quotes, spaces
   assert.deepEqual(graph.stats.config_errors, [{ file: "package.json", message: "invalid JSON" }]);
   assert.equal(JSON.stringify(graph).includes(secret), false);
   assert.equal(JSON.stringify(graph).includes(dir), false);
+});
+
+// ---- I4: a Spring SecurityFilterChain makes unmarked Spring routes unknown ---------------------------
+
+test("I4: with a SecurityFilterChain config, unauthenticated Spring routes are unknown; marker routes stay authenticated", async (t) => {
+  const api = [
+    "package com.ex;",
+    "@RestController",
+    "public class Api {",
+    "    @GetMapping(\"/open\") public String open() { return \"ok\"; }",
+    "    @PostMapping(\"/admin\") @PreAuthorize(\"hasRole('A')\") public String admin() { return \"ok\"; }",
+    "}",
+    ""
+  ].join("\n");
+  const config = "package com.ex;\npublic class Sec {\n    public SecurityFilterChain chain(HttpSecurity http) { return http.build(); }\n}\n";
+  const run = async (files) => {
+    const dir = tempDir(t);
+    for (const [path, src] of Object.entries(files)) put(dir, path, src);
+    const { graph } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["java"], frameworks: ["spring"], referencesDir: REFERENCES_DIR });
+    return graph;
+  };
+  const without = await run({ "Api.java": api });
+  assert.deepEqual(nodesOf(without, "route").map((r) => [r.path_pattern, r.auth]).sort(), [["/admin", "authenticated"], ["/open", "unauthenticated"]]);
+  const secured = await run({ "Api.java": api, "Sec.java": config });
+  assert.deepEqual(nodesOf(secured, "route").map((r) => [r.path_pattern, r.auth]).sort(), [["/admin", "authenticated"], ["/open", "unknown"]]);
+  assert.deepEqual(secured.stats.routes_by_auth, { unauthenticated: 0, authenticated: 1, unknown: 1 });
+  assert.ok(secured.stats.coverage_matrix.java.not_extracted.includes("SecurityFilterChain matchers"));
 });
