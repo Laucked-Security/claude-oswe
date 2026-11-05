@@ -6,13 +6,14 @@
 //              method no subclass overrides;
 //   name-only  a candidate, not a proof: the method is overridden in a subclass, the import was
 //              resolved heuristically, the bare name is defined exactly once across all files, or
-//              the name has several definitions (overloads) in one file / class and none is the
-//              only one whose `param_count` equals the call's `arg_count` (the first is taken);
+//              (overloads, below) no definition is the only one matching the call's arity;
 //   unresolved `to: null` — shadowed names, unresolved imports, homonyms across files or classes,
 //              any other dotted callee.
-// Overloads in one file / class are told apart by arity: the single definition whose
-// `param_count` equals the call's `arg_count` (both non-null) is the target. A call inside a
-// lambda / arrow acts for the class of the innermost method containing it (lexical `this`).
+// In a language declaring `lang.overloads`, same-named definitions in one file / class are overloads
+// told apart by arity: the single definition whose `param_count` equals the call's `arg_count`
+// (both non-null) is the target; elsewhere a second definition is a redefinition (unresolved). A call
+// inside a lambda / arrow acts for the class of the innermost method containing it (lexical
+// `this`), never across a class body.
 //
 // Input records are `{ path, langId, stack, extract }` with repo-relative forward-slash paths.
 //   loadResolutionConfigs(projectDir, scopeRealpath) -> { tsconfig, jsconfig, packageJson,
@@ -40,6 +41,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { confinePath } from "../confine-path.mjs";
+import { lastSegment } from "./text.mjs";
 
 const MAX_EXTENDS_DEPTH = 10;
 
@@ -183,22 +185,29 @@ const isTopLevel = (f) => f.class == null && f.qualified_name === f.name;
 const defaultExport = (ctx, path) => (ctx.extracts.get(path)?.exports ?? []).find((e) => e.name === "default") ?? null;
 const unique = (list) => (list.length === 1 ? list[0] : null);
 
-// One of the same-named definitions of a file or class -> { fn, confidence } (null for none). A
-// single definition is exact; among several (overloads), the one whose declared `param_count`
-// equals the call's `arg_count` (both known) is exact, otherwise the first by start_byte is
-// name-only.
-function pickDefinition(definitions, argCount) {
+// One of the same-named definitions of one file or class -> { fn, confidence, arityMismatch } (null
+// for none). Without overloads (a language not declaring `lang.overloads`: a second definition is a
+// redefinition) only a single definition is a target, exact. With overloads, arity decides: the
+// single definition whose `param_count` equals the call's `arg_count` (both known) is exact; a lone
+// definition whose known count differs is name-only (`arityMismatch`: the right overload may be
+// inherited); otherwise the first by start_byte is name-only.
+function pickDefinition(definitions, argCount, overloads) {
   if (!definitions.length) return null;
-  if (definitions.length === 1) return { fn: definitions[0], confidence: "exact" };
-  const byArity = argCount == null ? [] : definitions.filter((f) => f.param_count != null && f.param_count === argCount);
-  if (byArity.length === 1) return { fn: byArity[0], confidence: "exact" };
-  return { fn: definitions.reduce((a, b) => (b.start_byte < a.start_byte ? b : a)), confidence: "name-only" };
+  const known = argCount != null && overloads;
+  if (definitions.length === 1) {
+    const mismatch = known && definitions[0].param_count != null && definitions[0].param_count !== argCount;
+    return { fn: definitions[0], confidence: mismatch ? "name-only" : "exact", arityMismatch: mismatch };
+  }
+  if (!overloads) return null;
+  const byArity = known ? definitions.filter((f) => f.param_count != null && f.param_count === argCount) : [];
+  if (byArity.length === 1) return { fn: byArity[0], confidence: "exact", arityMismatch: false };
+  return { fn: definitions.reduce((a, b) => (b.start_byte < a.start_byte ? b : a)), confidence: "name-only", arityMismatch: known };
 }
 
 // The top-level function `name` of a file (see pickDefinition), provided the file exports that name.
 function exportedFunction(ctx, path, name, argCount) {
   if (!(ctx.extracts.get(path)?.exports ?? []).some((e) => e.name === name)) return null;
-  return pickDefinition(functionsIn(ctx, path).filter((f) => isTopLevel(f) && f.name === name), argCount);
+  return pickDefinition(functionsIn(ctx, path).filter((f) => isTopLevel(f) && f.name === name), argCount, ctx.overloads.has(path));
 }
 
 function defaultExportFunction(ctx, path) {
@@ -249,7 +258,6 @@ function lookupClass(name, fromPath, ctx) {
   return all.length === 1 ? { entry: all[0], confidence: "exact" } : null;
 }
 
-const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
 const pushTo = (map, key, value) => (map.has(key) ? map.get(key).push(value) : map.set(key, [value]));
 
 // byName / byKey index the classes; parentOf holds each class's resolved parent link; childrenOf
@@ -281,18 +289,26 @@ export function buildClassIndex(files, importMap) {
 }
 
 // Method `method` on the class, or (up to maxDepth hops) on its `extends` chain; overloads are
-// picked by arity (pickDefinition).
+// picked by arity (pickDefinition). When no definition on a class matches the call's known arity,
+// the walk goes on up the chain for one that does; failing that, the first such class's pick is the
+// (name-only) target.
 function findMethod(ref, method, ctx, maxDepth, argCount) {
   let current = ref;
+  let fallback = null;
   for (let depth = 0; current && depth <= maxDepth; depth++) {
     const { entry } = current;
     const methods = functionsIn(ctx, entry.path).filter((f) => f.class === entry.name && f.name === method);
-    const picked = pickDefinition(methods, argCount);
-    if (picked) return { path: entry.path, fn: picked.fn, confidence: weaker(current.confidence, picked.confidence) };
+    const picked = pickDefinition(methods, argCount, ctx.overloads.has(entry.path));
+    if (methods.length && !picked) return fallback; // redefinitions: no target
+    if (picked) {
+      const found = { path: entry.path, fn: picked.fn, confidence: weaker(current.confidence, picked.confidence) };
+      if (!picked.arityMismatch) return found;
+      fallback ??= found;
+    }
     const parent = ctx.classIndex.parentOf.get(classKey(entry));
     current = parent && { entry: parent.entry, confidence: weaker(current.confidence, parent.confidence) };
   }
-  return null;
+  return fallback;
 }
 
 // Rule 3's override check: does any subclass of `entry` (up to 10 levels down) redefine `method`?
@@ -347,7 +363,7 @@ function importedFunction({ binding, resolved }, ctx, argCount) {
 // method step and methods in rule 4's count apply only to implicit-this languages.
 function resolveBare(site, name, ctx) {
   const argCount = site.call.arg_count ?? null;
-  const local = pickDefinition(functionsIn(ctx, site.path).filter((f) => isTopLevel(f) && f.name === name), argCount);
+  const local = pickDefinition(functionsIn(ctx, site.path).filter((f) => isTopLevel(f) && f.name === name), argCount, ctx.overloads.has(site.path));
   if (local) return target(site.path, local.fn, local.confidence);
   if (site.implicitThis && site.ownClass) {
     const member = methodTarget(sameFileClass(ctx, site.path, site.ownClass), name, ctx, { maxDepth: 0, argCount });
@@ -359,8 +375,8 @@ function resolveBare(site, name, ctx) {
   // several definitions count as one candidate only when they are overloads in one file and class
   const [first] = definitions;
   if (!first || definitions.some((d) => d.path !== first.path || d.fn.class !== first.fn.class)) return null;
-  const picked = pickDefinition(definitions.map((d) => d.fn), argCount);
-  return target(first.path, picked.fn, "name-only");
+  const picked = pickDefinition(definitions.map((d) => d.fn), argCount, ctx.overloads.has(first.path));
+  return picked ? target(first.path, picked.fn, "name-only") : null;
 }
 
 // Rule 2 for `ns.foo` / `X.m` whose head is an import binding: a namespace binding names the
@@ -409,31 +425,50 @@ function definitionsByName(files) {
   return index;
 }
 
+const LEXICAL_THIS = new Set(["lambda", "arrow"]);
+
+// The innermost function of `functions` strictly containing `inner` by byte range (null if none).
+function container(inner, functions) {
+  return functions
+    .filter((f) => (f.start_byte < inner.start_byte || (f.start_byte === inner.start_byte && f.end_byte > inner.end_byte)) && inner.start_byte < f.end_byte)
+    .reduce((a, b) => (a && (a.start_byte > b.start_byte || (a.start_byte === b.start_byte && a.end_byte <= b.end_byte)) ? a : b), null);
+}
+
 // The class a call's enclosing function acts for (rule 3's `this`, the implicit-this step): its own
-// class, or — for a lambda / arrow, whose `this` is lexical — the class of the innermost function
-// strictly containing it (by byte range, same file), walking outward through nested lambdas / arrows. A
-// `function` (dynamic `this`) never inherits.
-function ownClassOf(enclosing, functions) {
+// class, or — for a lambda / arrow, whose `this` is lexical — the class of the innermost method
+// strictly containing it (by byte range, same file), walking outward through nested lambdas /
+// arrows. A `function` (dynamic `this`) never inherits, and the walk never crosses a class body:
+// every lambda on the way must share the starting lambda's `class_start_byte` (the classes[] entry
+// of the innermost class containing it), and the method reached must belong to that class (not so
+// for a lambda in a local / anonymous class's initializer).
+function ownClassOf(enclosing, ctx, path) {
+  if (!enclosing || enclosing.class != null || !LEXICAL_THIS.has(enclosing.kind)) return enclosing?.class ?? null;
+  const classStart = enclosing.class_start_byte ?? null;
+  const functions = functionsIn(ctx, path);
   let fn = enclosing;
-  while (fn && fn.class == null && (fn.kind === "lambda" || fn.kind === "arrow")) {
-    const inner = fn;
-    fn = functions
-      .filter((f) => (f.start_byte < inner.start_byte || (f.start_byte === inner.start_byte && f.end_byte > inner.end_byte)) && inner.start_byte < f.end_byte)
-      .reduce((a, b) => (a && (a.start_byte > b.start_byte || (a.start_byte === b.start_byte && a.end_byte <= b.end_byte)) ? a : b), null);
+  while (fn && fn.class == null && LEXICAL_THIS.has(fn.kind)) {
+    if ((fn.class_start_byte ?? null) !== classStart) return null;
+    fn = container(fn, functions);
   }
-  return fn?.class ?? null;
+  if (fn?.class == null || classStart == null) return null;
+  return classAt(ctx, path, classStart)?.name === fn.class ? fn.class : null;
 }
 
 export function resolveCalls(files, importMap, { classIndex, langModules }) {
-  const ctx = { ...context(files, importMap, classIndex), definitionsByName: definitionsByName(files) };
+  // files whose language declares `lang.overloads` (Java, C#): same-named definitions are overloads
+  const overloads = new Set(files.filter((f) => langModules?.get(f.langId)?.lang?.overloads === true).map((f) => f.path));
+  const ctx = { ...context(files, importMap, classIndex), definitionsByName: definitionsByName(files), overloads };
   const results = [];
   for (const file of byPath(files)) {
     const implicitThis = langModules?.get(file.langId)?.lang?.implicitThisCalls === true;
     const byStart = new Map();
     for (const fn of file.extract.functions) if (!byStart.has(fn.start_byte)) byStart.set(fn.start_byte, fn);
+    const ownClasses = new Map(); // enclosing start_byte -> ownClassOf(enclosing)
     for (const call of file.extract.calls) {
       const enclosing = call.enclosing_start_byte == null ? null : byStart.get(call.enclosing_start_byte) ?? null;
-      const hit = resolveCall({ path: file.path, call, enclosing, ownClass: ownClassOf(enclosing, file.extract.functions), implicitThis }, ctx);
+      if (enclosing && !ownClasses.has(enclosing.start_byte)) ownClasses.set(enclosing.start_byte, ownClassOf(enclosing, ctx, file.path));
+      const ownClass = enclosing ? ownClasses.get(enclosing.start_byte) : null;
+      const hit = resolveCall({ path: file.path, call, enclosing, ownClass, implicitThis }, ctx);
       results.push({
         from_fn_start_byte: enclosing ? enclosing.start_byte : null,
         from_path: file.path,

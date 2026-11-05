@@ -28,7 +28,7 @@ const extractFixture = (path) => extract(readFileSync(join(FIXTURE_DIR, path), "
 const names = (list) => list.map((x) => x.name);
 
 test("lang descriptor", () => {
-  assert.deepEqual(lang, { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false, callableLocals: true });
+  assert.deepEqual(lang, { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false, callableLocals: true, overloads: false });
 });
 
 // ---- exports ------------------------------------------------------------------------------------
@@ -366,9 +366,11 @@ async function resolveSource(path, text) {
   return { extract: files[0].extract, results: resolveCalls(files, importMap, { classIndex: buildClassIndex(files, importMap), langModules }) };
 }
 
-test("arity: param_count (rest ⇒ null) and arg_count (spread ⇒ null)", async () => {
-  const x = await extract("function f(a, b = 1) {}\nconst g = (...r) => r;\nconst h = x => x;\nf(1, 2); f(...xs); h(1);\n");
-  assert.deepEqual(x.functions.map((f) => [f.name, f.param_count]), [["f", 2], ["g", null], ["h", 1]]);
+test("arity: param_count (rest or default ⇒ null) and arg_count (spread ⇒ null)", async () => {
+  const x = await extract("function f(a, b = 1) {}\nconst g = (...r) => r;\nconst h = x => x;\nfunction k(a, { b }) {}\nf(1, 2); f(...xs); h(1);\n");
+  assert.deepEqual(x.functions.map((f) => [f.name, f.param_count]), [["f", null], ["g", null], ["h", 1], ["k", 2]]);
+  const ts = await extract("function t(a: number, b: string = \"x\") {}\nfunction r(a: number, ...c: number[]) {}\nfunction u(a: number, b?: string) {}\n", { langId: "typescript", path: "src/a.ts" });
+  assert.deepEqual(ts.functions.map((f) => [f.name, f.param_count]), [["t", null], ["r", null], ["u", 2]]);
   assert.deepEqual(x.calls.map((c) => [c.callee_text, c.arg_count]), [["f", 2], ["f", null], ["h", 1]]);
 });
 
@@ -381,4 +383,9 @@ test("an arrow inside a method acts for the method's class: this.m() resolves; a
     results.map((r) => [r.line, r.callee_text, r.to?.qualified_name ?? null, r.confidence]),
     [[4, "xs.forEach", null, "unresolved"], [4, "this.m", "K.m", "exact"], [5, "xs.forEach", null, "unresolved"], [5, "this.m", null, "unresolved"]]
   );
+});
+
+test("redefinitions (no lang.overloads): a function or method defined twice in one file / class is unresolved, whatever the arity", async () => {
+  const { results } = await resolveSource("src/r.js", "function f(a) {}\nfunction f(a, b) {}\nclass K {\n  m(a) {}\n  m(a, b) {}\n  run() { this.m(1); f(1); }\n}\n");
+  assert.deepEqual(results.map((r) => [r.callee_text, r.to, r.confidence]), [["this.m", null, "unresolved"], ["f", null, "unresolved"]]);
 });

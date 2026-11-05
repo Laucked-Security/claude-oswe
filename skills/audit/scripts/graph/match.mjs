@@ -16,6 +16,7 @@
 // `member` patterns (`.query(`, `->raw(`) name a method being CALLED, so a plain member reference such
 // as `req.query` never matches them.
 // PURE: no I/O. An unknown shape or category never matches.
+import { lastSegment } from "./text.mjs";
 
 const CATEGORIES_BY_SHAPE = {
   call: new Set(["call", "new", "member"]),
@@ -27,7 +28,6 @@ const CATEGORIES_BY_SHAPE = {
   literal: new Set(["literal"])
 };
 
-const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
 const firstSegment = (text) => text.split(".", 1)[0];
 // Receivers naming the object itself (normalized: `$this->x` is `$this.x`, `super().x` is `super.x`).
 const SELF_LIKE = new Set(["self", "cls", "this", "$this", "super"]);

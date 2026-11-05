@@ -34,10 +34,9 @@
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
-import { sinkClassFor } from "../sink-classes.mjs";
-import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass, repoPath } from "./common.mjs";
+import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, lastSegment, repoPath } from "./common.mjs";
 
-export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true, callableLocals: true };
+export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true, callableLocals: true, overloads: false };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 
@@ -68,7 +67,6 @@ const SOURCE_KINDS = {
 
 // ---- small AST helpers ----------------------------------------------------------------------------
 
-const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
 const positionalArgs = (call) => namedOf(field(call, "arguments")).filter((a) => a.type !== "keyword_argument");
 const keywordArg = (call, name) => namedOf(field(call, "arguments")).find((a) => a.type === "keyword_argument" && field(a, "name")?.text === name) ?? null;
 
@@ -191,14 +189,7 @@ function bind(st, name, { cls = null, assignment = false } = {}) {
 
 const sourceKind = (pattern) => lookup(SOURCE_KINDS, lastSegment(pattern.normalized)) ?? "body";
 
-// At most one source and one sink per AST node: the first matching pattern in surface order. A sink
-// derived from a call is positioned at the callee anchor (`sinkAt`, see calleeAnchor).
-function emitMatches(node, candidates, st, { sources = false, sinks = false, sinkAt = node }) {
-  const source = sources ? firstMatch(st.surface.sources, candidates) : null;
-  const sink = sinks ? firstMatch(st.surface.sinks, candidates) : null;
-  if (source) st.sources.push({ line: lineOf(node), start_byte: node.startIndex, kind: sourceKind(source), pattern: source.raw });
-  if (sink) st.sinks.push({ line: lineOf(sinkAt), start_byte: sinkAt.startIndex, class: sinkClassFor(sink.normalized, "python"), callee: candidates[0].text, pattern: sink.raw });
-}
+const emitMatches = matchEmitter("python", sourceKind); // see common.mjs
 
 const inChain = (ctx) => CHAIN_SLOTS.get(ctx.parentType) === ctx.field || ctx.parentType === "decorator";
 const isBinding = (ctx) => BINDING_PARENTS.has(ctx.parentType) || BINDING_SLOTS.get(ctx.parentType) === ctx.field;
@@ -325,7 +316,9 @@ function onFunction(node, st, ctx) {
     param_count: parameterCount(node, selfName),
     kind: node.type === "lambda" ? "lambda" : cls ? "method" : "function",
     exported: false,
-    class: cls
+    class: cls,
+    // a lambda's lexical class body: resolve.mjs inherits a containing method's class only within it
+    ...(node.type === "lambda" ? { class_start_byte: st.scopes.findLast((s) => s.cls)?.cls.start ?? null } : {})
   });
   if (ctx.parentType === "decorated_definition") decoratorRoutes(childrenOfType(node.parent, "decorator"), node, qualifiedName, st);
   const frame = newFrame(node.startIndex, qualifiedName);
@@ -409,7 +402,7 @@ function onClass(node, st) {
     if (atModule(st)) st.topLevel.push([name, node.startIndex]);
     else bind(st, name);
   }
-  st.scopes.push({ cls: { name, fieldTypes: fieldTypes(body) } });
+  st.scopes.push({ cls: { name, start: node.startIndex, fieldTypes: fieldTypes(body) } });
   return () => st.scopes.pop();
 }
 

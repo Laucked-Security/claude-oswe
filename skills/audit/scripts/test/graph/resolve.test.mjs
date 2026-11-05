@@ -458,6 +458,9 @@ test("rule 5: a bare helper() defined in two other files is unresolved", () => {
 
 // ---- overloads -----------------------------------------------------------------------------------
 
+// A language with overloads (Java, C#) and implicit this; IMPLICIT_THIS alone has no overloads.
+const OVERLOADS = { id: "stub", implicitThisCalls: true, overloads: true };
+
 // K.run(a) at 10 and K.run(a, b) at 40 (param_count from `arities`), and K.main at 80 calling
 // svc.run(...) on a K receiver with `argCount` arguments.
 function overloadFile(argCount, arities = [1, 2]) {
@@ -467,38 +470,61 @@ function overloadFile(argCount, arities = [1, 2]) {
 }
 
 test("overloads: the definition whose param_count equals the call's arg_count is exact", () => {
-  const one = only(resolveAll([overloadFile(1)], {}, IMPLICIT_THIS), "a.java", 85);
+  const one = only(resolveAll([overloadFile(1)], {}, OVERLOADS), "a.java", 85);
   assert.deepEqual([one.to, one.confidence], [{ path: "a.java", qualified_name: "K.run", start_byte: 10 }, "exact"]);
-  const two = only(resolveAll([overloadFile(2)], {}, IMPLICIT_THIS), "a.java", 85);
+  const two = only(resolveAll([overloadFile(2)], {}, OVERLOADS), "a.java", 85);
   assert.deepEqual([two.to.start_byte, two.confidence], [40, "exact"]);
 });
 
 test("overloads: an unknown arg_count, or no unique arity match, is name-only to the first definition", () => {
-  const unknown = only(resolveAll([overloadFile(null)], {}, IMPLICIT_THIS), "a.java", 85);
+  const unknown = only(resolveAll([overloadFile(null)], {}, OVERLOADS), "a.java", 85);
   assert.deepEqual([unknown.to.start_byte, unknown.confidence], [10, "name-only"]);
-  const sameArity = only(resolveAll([overloadFile(1, [1, 1])], {}, IMPLICIT_THIS), "a.java", 85);
+  const sameArity = only(resolveAll([overloadFile(1, [1, 1])], {}, OVERLOADS), "a.java", 85);
   assert.deepEqual([sameArity.to.start_byte, sameArity.confidence], [10, "name-only"]);
-  const varargs = only(resolveAll([overloadFile(3, [1, null])], {}, IMPLICIT_THIS), "a.java", 85);
+  const varargs = only(resolveAll([overloadFile(3, [1, null])], {}, OVERLOADS), "a.java", 85);
   assert.deepEqual([varargs.to.start_byte, varargs.confidence], [10, "name-only"]);
 });
 
-test("overloads: same-file top-level functions are picked by arity too", () => {
+test("redefinitions: without lang.overloads several same-named methods of a class stay unresolved, whatever the arity", () => {
+  for (const argCount of [1, 2, null]) {
+    const r = only(resolveAll([overloadFile(argCount)], {}, IMPLICIT_THIS), "a.java", 85);
+    assert.deepEqual([r.to, r.confidence], [null, "unresolved"], `arg_count ${argCount}`);
+  }
+});
+
+test("overloads: same-file top-level functions are picked by arity with lang.overloads, unresolved without", () => {
   const functions = [{ ...fn("f", 0), param_count: 0 }, { ...fn("f", 20), param_count: 2 }, fn("main", 40)];
   const a = file("a.js", { functions, calls: [{ ...call("f", 45, { enc: 40 }), arg_count: 2 }, call("f", 50, { enc: 40 })] });
-  const results = resolveAll([a]);
+  const results = resolveAll([a], {}, OVERLOADS);
   assert.deepEqual([only(results, "a.js", 45).to.start_byte, only(results, "a.js", 45).confidence], [20, "exact"]);
   assert.deepEqual([only(results, "a.js", 50).to.start_byte, only(results, "a.js", 50).confidence], [0, "name-only"]);
+  const redefined = resolveAll([a], {}, { id: "stub", implicitThisCalls: false, overloads: false });
+  for (const start of [45, 50]) assert.deepEqual([only(redefined, "a.js", start).to, only(redefined, "a.js", start).confidence], [null, "unresolved"]);
+});
+
+test("overloads: a lone definition of the wrong arity defers to a matching overload up the extends chain", () => {
+  // P.run(s, n) at 10; C extends P with C.run(s) at 60 and C.go at 80 calling this.run("x", 1)
+  const functions = [{ ...fn("run", 10, "P"), param_count: 2 }, { ...fn("run", 60, "C"), param_count: 1 }, { ...fn("go", 80, "C"), param_count: 0 }];
+  const classes = [cls("P", 0, ["run"]), cls("C", 50, ["run", "go"], "P")];
+  const calls = [{ ...call("this.run", 85, { enc: 80, receiver: "this" }), arg_count: 2 }, { ...call("this.run", 88, { enc: 80, receiver: "this" }), arg_count: 3 }];
+  const results = resolveAll([file("a.java", { classes, functions, calls })], {}, OVERLOADS);
+  const two = only(results, "a.java", 85);
+  assert.deepEqual([two.to.qualified_name, two.to.start_byte, two.confidence], ["P.run", 10, "exact"]);
+  const three = only(results, "a.java", 88); // no arity matches anywhere: the nearest, name-only
+  assert.deepEqual([three.to.qualified_name, three.to.start_byte, three.confidence], ["C.run", 60, "name-only"]);
 });
 
 // ---- lambdas / arrows and the enclosing class ------------------------------------------------------
 
 // K.m at 10..90 holds a lambda at 30..60 (optionally inside a `function` at 20..70) calling a bare
 // exec() and this.exec(); K.exec at 100, and an unrelated L.exec at 120 (so rule 4 cannot pick one).
-function lambdaFile({ viaFunction = false, kind = "lambda" } = {}) {
-  const lambda = { ...fn("<anon>", 30), qualified_name: "K.m.<anon>@1:31", end_byte: 60, kind };
+// The lambda's own class body is K (class_start_byte 0) unless `classStart` says otherwise.
+function lambdaFile({ viaFunction = false, kind = "lambda", classStart = 0 } = {}) {
+  const lambda = { ...fn("<anon>", 30), qualified_name: "K.m.<anon>@1:31", end_byte: 60, kind, class_start_byte: classStart };
   const functions = [{ ...fn("m", 10, "K"), end_byte: 90 }, lambda, fn("exec", 100, "K"), fn("exec", 120, "L")];
   if (viaFunction) functions.push({ ...fn("cb", 20), qualified_name: "K.m.cb", end_byte: 70 });
-  return file("a.java", { classes: [cls("K", 0, ["m", "exec"]), cls("L", 115, ["exec"])], functions, calls: [call("exec", 40, { enc: 30 }), call("this.exec", 50, { enc: 30, receiver: "this" })] });
+  const classes = [cls("K", 0, ["m", "exec"]), cls("L", 115, ["exec"]), cls("Local", 25, [])];
+  return file("a.java", { classes, functions, calls: [call("exec", 40, { enc: 30 }), call("this.exec", 50, { enc: 30, receiver: "this" })] });
 }
 
 test("a lambda / arrow acts for the class of the method containing it (implicit this and this.m())", () => {
@@ -514,6 +540,15 @@ test("a lambda / arrow acts for the class of the method containing it (implicit 
 test("a function between the lambda and the method (dynamic this) stops the inheritance", () => {
   const results = resolveAll([lambdaFile({ viaFunction: true })], {}, IMPLICIT_THIS);
   for (const start of [40, 50]) assert.deepEqual([only(results, "a.java", start).to, only(results, "a.java", start).confidence], [null, "unresolved"]);
+});
+
+test("a lambda nested in another class body (a local class's field initializer), or with no class_start_byte, inherits no class", () => {
+  const absent = lambdaFile();
+  delete absent.extract.functions[1].class_start_byte;
+  for (const [classStart, a] of [[25, lambdaFile({ classStart: 25 })], [null, lambdaFile({ classStart: null })], ["absent", absent]]) {
+    const results = resolveAll([a], {}, IMPLICIT_THIS);
+    for (const start of [40, 50]) assert.deepEqual([only(results, "a.java", start).to, only(results, "a.java", start).confidence], [null, "unresolved"], `class_start_byte ${classStart} @${start}`);
+  }
 });
 
 test("resolveCalls output is ordered by (from_path, start_byte) whatever the input order", () => {

@@ -35,7 +35,7 @@ const callRows = (x) => x.calls.map((c) => [c.callee_text, c.receiver, c.receive
 const fnRows = (x) => x.functions.map((f) => [f.kind, f.name, f.qualified_name, f.class, f.exported]);
 
 test("lang descriptor", () => {
-  assert.deepEqual(lang, { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false });
+  assert.deepEqual(lang, { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true });
 });
 
 // ---- routes -------------------------------------------------------------------------------------
@@ -312,6 +312,44 @@ test("every emitted list is sorted by start_byte", async () => {
       assert.deepEqual(bytes, [...bytes].sort((a, b) => a - b), `${file}: ${key}`);
     }
   }
+});
+
+// ---- class-scope barriers, nested exports, multiple paths ---------------------------------------
+
+test("a nested class body is a barrier: code in an anonymous / local class initializer has no enclosing method", async () => {
+  const x = await extract(
+    "class Outer {\n  void put(String a, String b) {}\n  void exec() {}\n" +
+      "  void m() {\n    java.util.Map<String, String> h = new java.util.HashMap<>() {{ put(\"a\", \"b\"); }};\n" +
+      "    class Local { Runnable r = () -> exec(); }\n  }\n}\nclass Other { void exec() {} }\n"
+  );
+  const lambda = x.functions.find((f) => f.kind === "lambda");
+  const local = x.classes.find((c) => c.name === "Local");
+  assert.deepEqual([lambda.qualified_name, lambda.class, lambda.class_start_byte], ["Local.<anon>@6:32", null, local.start_byte]);
+  assert.deepEqual(x.calls.map((c) => [c.callee_text, c.enclosing_start_byte]), [["put", null], ["exec", lambda.start_byte]]);
+  const { results } = await resolveSources({
+    "Outer.java": "class Outer {\n  void exec() {}\n  void m() {\n    class Local { Runnable r = () -> exec(); }\n    Runnable s = () -> exec();\n  }\n}\nclass Other { void exec() {} }\n"
+  });
+  // the local class's lambda never climbs to Outer; the method's own lambda does
+  assert.deepEqual(results.map((r) => [r.line, r.to?.qualified_name ?? null, r.confidence]), [[4, null, "unresolved"], [5, "Outer.exec", "exact"]]);
+});
+
+test("exported: a public member of a non-public nested type is not exported", async () => {
+  const x = await extract("public class A {\n  private static class P { public void m() {} }\n  public static class Q { public void n() {} }\n  static class R { public void o() {} }\n}\n");
+  assert.deepEqual(x.functions.map((f) => [f.qualified_name, f.exported]), [["P.m", false], ["Q.n", true], ["R.o", false]]);
+});
+
+test("Spring: several literal paths ⇒ one route per path, each at its literal; several class prefixes ⇒ the first, noted", async () => {
+  const text = "@RequestMapping(\"/api\")\nclass K {\n  @GetMapping({\"/a\", \"/b\"}) @Secured(\"X\") public void a() {}\n  @RequestMapping(value = {\"/c\"}, method = RequestMethod.POST) public void c() {}\n}\n" +
+    "@RequestMapping({\"/p\", \"/q\"})\nclass M {\n  @GetMapping(\"/x\") public void x() {}\n}\n";
+  const x = await extract(text);
+  assert.deepEqual(routeRows(x), [
+    ["GET", "/api/a", "K.a", ["Secured"], "spring"],
+    ["GET", "/api/b", "K.a", ["Secured"], "spring"],
+    ["POST", "/api/c", "K.c", [], "spring"],
+    ["GET", "/p/x", "M.x", [], "spring"]
+  ]);
+  assert.deepEqual(x.routes.slice(0, 3).map((r) => r.start_byte), [text.indexOf("\"/a\""), text.indexOf("\"/b\""), text.indexOf("@RequestMapping(value")]);
+  assert.deepEqual(x.not_extracted, ["route(multiple class prefixes)"]);
 });
 
 // ---- through build-graph ------------------------------------------------------------------------

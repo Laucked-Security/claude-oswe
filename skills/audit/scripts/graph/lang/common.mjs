@@ -1,9 +1,12 @@
 // Helpers shared verbatim by the SP10 language modules (javascript.mjs, python.mjs, ...): small AST
-// accessors, the pre-order TreeCursor walk, the receiver-class scope lookup and the repo-relative
-// path normal form. Language specifics (node types, handlers, frames' extra fields) stay in each
+// accessors, the source / sink emitter, the pre-order TreeCursor walk, the receiver-class scope
+// lookup and the repo-relative path normal form. Language specifics (node types, handlers, frames' extra fields) stay in each
 // module. PURE: no I/O.
 import { posix } from "node:path";
 import { matchesPattern } from "../match.mjs";
+import { sinkClassFor } from "../sink-classes.mjs";
+
+export { lastSegment } from "../text.mjs";
 
 export const lookup = (table, key) => (key != null && Object.hasOwn(table, key) ? table[key] : null);
 
@@ -17,6 +20,22 @@ export const anonLabel = (node) => `<anon>@${node.startPosition.row + 1}:${node.
 
 export const firstMatch = (patterns, candidates) => patterns.find((p) => candidates.some((c) => matchesPattern(p, c))) ?? null;
 export const byStart = (a, b) => a.start_byte - b.start_byte;
+
+// ---- sources and sinks ----------------------------------------------------------------------------
+
+// A module's emitter: `emitMatches(node, candidates, st, { sources, sinks, sinkAt })` pushes at most one
+// source and one sink per AST node — the first matching pattern in surface order — onto st.sources /
+// st.sinks (patterns from st.surface). A source sits at `node` with kind `sourceKind(pattern)`; a sink
+// at `sinkAt` (default `node`; a call's callee anchor), with the `stack`'s sink class and the first
+// candidate's text as callee. `node` may be a TreeCursor (startIndex / startPosition).
+export function matchEmitter(stack, sourceKind) {
+  return (node, candidates, st, { sources = false, sinks = false, sinkAt = node } = {}) => {
+    const source = sources ? firstMatch(st.surface.sources, candidates) : null;
+    const sink = sinks ? firstMatch(st.surface.sinks, candidates) : null;
+    if (source) st.sources.push({ line: lineOf(node), start_byte: node.startIndex, kind: sourceKind(source), pattern: source.raw });
+    if (sink) st.sinks.push({ line: lineOf(sinkAt), start_byte: sinkAt.startIndex, class: sinkClassFor(sink.normalized, stack), callee: candidates[0].text, pattern: sink.raw });
+  };
+}
 
 // ---- walk -----------------------------------------------------------------------------------------
 

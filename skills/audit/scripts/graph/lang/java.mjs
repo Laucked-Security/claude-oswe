@@ -9,8 +9,10 @@
 //              (`new C() {...}`, an enum constant's body) the class is null and the qualified name
 //              `<enclosing>.<anon>@<line>:<col>.<name>`; a lambda -> "lambda", named by the local it
 //              initialises (`Runnable r = () -> ...` -> `<enclosing>.r`), else
-//              `<enclosing>.<anon>@<line>:<col>`. exported = the enclosing top-level type is public
-//              and the method is public (interface members are implicitly public).
+//              `<enclosing>.<anon>@<line>:<col>`, and carries `class_start_byte` (its innermost class
+//              body) for resolve.mjs's lexical-this walk. exported = every enclosing type and the
+//              method are public (interface members are implicitly public). `param_count` is null
+//              with varargs; `lang.overloads: true` lets resolve.mjs pick overloads by arity.
 //   classes    class / interface / enum / record declarations, nested ones by their simple name;
 //              `extends` is the superclass's base name (`a.B<T>` -> `B`); `implements` is only noted.
 //   exports    every public top-level type. namespace = the `package` declaration.
@@ -25,23 +27,26 @@
 //              innermost local / parameter / loop / catch / resource / lambda variable, else a field
 //              of an enclosing class, else x itself when it is capitalised: a static call);
 //              `this.f.m()` -> the declared type of field f; `new C().m()` -> C; generics and
-//              qualifiers reduce to the base name. Annotation arguments are never calls.
+//              qualifiers reduce to the base name. Annotation arguments are never calls. A nested
+//              class body is a barrier: code in a local / anonymous class's field initializer or
+//              initializer block has no enclosing function (`enclosing_start_byte: null`).
 //   sinks      Java's surface tokens are written against declared types (`Statement.execute`), so a
 //              call whose receiver has a known class T is also matched as `T.<method>`; the sink's
 //              callee keeps the source text (`st.execute`).
 //   routes     Spring `@GetMapping / @PostMapping / @PutMapping / @DeleteMapping / @PatchMapping` and
 //              `@RequestMapping(method = ...)` on a method, prefixed by the class's
 //              `@RequestMapping`; `@PreAuthorize / @Secured / @RolesAllowed` on the class, then on
-//              the method, are the middleware texts. `SecurityFilterChain` config is only noted.
+//              the method, are the middleware texts; one route per literal path (several paths of
+//              one annotation each sit at their literal; several class prefixes: the first, noted).
+//              `SecurityFilterChain` config is only noted.
 //
 // Same TreeCursor walk as the JavaScript module (see its header for why not tree-sitter queries).
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
-import { sinkClassFor } from "../sink-classes.mjs";
-import { lookup, field, namedOf as namedNodes, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass } from "./common.mjs";
+import { lookup, field, namedOf as namedNodes, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, lastSegment } from "./common.mjs";
 
-export const lang = { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false };
+export const lang = { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 
@@ -75,7 +80,6 @@ const SOURCE_KINDS = {
 
 // Named children without Java's line / block comments.
 const namedOf = (node) => namedNodes(node).filter((c) => c.type !== "line_comment" && c.type !== "block_comment");
-const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
 const hasModifier = (node, keyword) => childrenOfType(node, "modifiers")[0]?.children.some((c) => c.type === keyword) ?? false;
 const annotationsOf = (node) => namedOf(childrenOfType(node, "modifiers")[0]).filter((c) => c.type === "annotation" || c.type === "marker_annotation");
 
@@ -164,7 +168,15 @@ function newState(path, surface) {
   };
 }
 
-const innermostFunction = (st) => st.scopes.findLast((s) => s.fn)?.frame ?? null;
+// The innermost method / lambda, unless a class body lies in between: code in a nested (local /
+// anonymous) class's field initializer or initializer block belongs to no function (module level).
+function innermostFunction(st) {
+  for (let i = st.scopes.length - 1; i >= 0; i--) {
+    if (st.scopes[i].fn) return st.scopes[i].frame;
+    if (st.scopes[i].cls) return null;
+  }
+  return null;
+}
 const innermostClassScope = (st) => st.scopes.findLast((s) => s.cls) ?? null;
 const innermostClass = (st) => innermostClassScope(st)?.cls ?? null;
 const enclosingName = (st) => innermostFunction(st)?.qualifiedName ?? innermostClass(st)?.qualifiedName ?? st.moduleName;
@@ -180,14 +192,7 @@ function bind(frame, name, cls) {
 
 const sourceKind = (pattern) => lookup(SOURCE_KINDS, pattern.normalized) ?? "body";
 
-// At most one source and one sink per AST node: the first matching pattern in surface order. A sink
-// derived from a call / `new` is positioned at the method name / the type (`sinkAt`).
-function emitMatches(node, candidates, st, { sources = false, sinks = false, sinkAt = node }) {
-  const source = sources ? firstMatch(st.surface.sources, candidates) : null;
-  const sink = sinks ? firstMatch(st.surface.sinks, candidates) : null;
-  if (source) st.sources.push({ line: lineOf(node), start_byte: node.startIndex, kind: sourceKind(source), pattern: source.raw });
-  if (sink) st.sinks.push({ line: lineOf(sinkAt), start_byte: sinkAt.startIndex, class: sinkClassFor(sink.normalized, "java"), callee: candidates[0].text, pattern: sink.raw });
-}
+const emitMatches = matchEmitter("java", sourceKind); // see common.mjs
 
 // A declared type (local, field, parameter, loop / resource variable) as a sink candidate.
 function typeCandidate(type, st) {
@@ -301,15 +306,15 @@ function fieldFrame(node, body, name) {
   return frame;
 }
 
-// A literal mapping path: "" when the annotation names none, null when it is not one string literal.
-function mappingPath(annotation) {
+// A mapping's literal paths as [{ path, node }] (node: the string literal, null when the annotation
+// names no path); null when any listed path is not a string literal.
+function mappingPaths(annotation) {
   const items = namedOf(field(annotation, "arguments"));
   const pair = items.find((i) => i.type === "element_value_pair" && ["value", "path"].includes(field(i, "key")?.text));
   const value = pair ? field(pair, "value") : items.find((i) => i.type !== "element_value_pair") ?? null;
-  if (!value) return "";
-  const literals = value.type === "element_value_array_initializer" ? namedOf(value) : [value];
-  if (literals.length === 0) return "";
-  return literals.length === 1 && literals[0].type === "string_literal" ? stringContent(literals[0]) : null;
+  const literals = !value ? [] : value.type === "element_value_array_initializer" ? namedOf(value) : [value];
+  if (literals.length === 0) return [{ path: "", node: null }];
+  return literals.every((l) => l.type === "string_literal") ? literals.map((l) => ({ path: stringContent(l), node: l })) : null;
 }
 
 function onType(node, st) {
@@ -326,17 +331,17 @@ function onType(node, st) {
   if (field(node, "interfaces")) st.notExtracted.add("implements clause");
   const annotations = annotationsOf(node);
   const mapping = annotations.find((a) => annotationName(a) === "RequestMapping");
-  let prefix = mapping ? mappingPath(mapping) : "";
-  if (prefix === null) {
-    st.notExtracted.add("route(non-literal path)");
-    prefix = "";
-  }
+  const prefixes = mapping ? mappingPaths(mapping) : [{ path: "" }];
+  if (prefixes === null) st.notExtracted.add("route(non-literal path)");
+  else if (prefixes.length > 1) st.notExtracted.add("route(multiple class prefixes)"); // the first is used
+  const prefix = prefixes?.[0].path ?? "";
   st.scopes.push({
     frame: fieldFrame(node, body, name),
     cls: {
       name,
+      start: node.startIndex,
       qualifiedName: name ?? `${enclosingName(st)}.${anonLabel(node)}`,
-      exported: outer ? outer.exported : isPublic,
+      exported: outer ? outer.exported && isPublic : isPublic,
       isInterface: node.type === "interface_declaration",
       prefix,
       auth: annotations.map(annotationName).filter((n) => AUTH_ANNOTATIONS.has(n))
@@ -349,7 +354,7 @@ function onType(node, st) {
 function onClassBody(node, st, ctx) {
   if (ctx.parentType !== "object_creation_expression" && ctx.parentType !== "enum_constant") return;
   st.notExtracted.add("anonymous class");
-  const cls = { name: null, qualifiedName: `${enclosingName(st)}.${anonLabel(node.parent)}`, exported: false, isInterface: false, prefix: "", auth: [] };
+  const cls = { name: null, start: node.startIndex, qualifiedName: `${enclosingName(st)}.${anonLabel(node.parent)}`, exported: false, isInterface: false, prefix: "", auth: [] };
   st.scopes.push({ frame: fieldFrame(node, node, null), cls });
   return () => st.scopes.pop();
 }
@@ -376,7 +381,7 @@ function onFunction(node, st, ctx) {
   if (node.type === "lambda_expression") {
     const local = lambdaName(node, ctx);
     const qualifiedName = `${enclosingName(st)}.${local ?? anonLabel(node)}`;
-    fn = { name: local ?? "<anon>", qualified_name: qualifiedName, kind: "lambda", exported: false, class: null };
+    fn = { name: local ?? "<anon>", qualified_name: qualifiedName, kind: "lambda", exported: false, class: null, classStart: innermostClass(st)?.start ?? null };
   } else {
     const name = field(node, "name")?.text ?? "<anon>";
     const isPublic = owner?.isInterface || hasModifier(node, "public");
@@ -392,7 +397,9 @@ function onFunction(node, st, ctx) {
     param_count: parameterCount(node),
     kind: fn.kind,
     exported: fn.exported,
-    class: fn.class
+    class: fn.class,
+    // a lambda's lexical class body: resolve.mjs inherits a containing method's class only within it
+    ...(fn.kind === "lambda" ? { class_start_byte: fn.classStart } : {})
   });
   if (node.type === "method_declaration" && owner?.name) springRoutes(node, owner, fn.qualified_name, st);
   const frame = newFrame(node.startIndex, fn.qualified_name);
@@ -419,20 +426,24 @@ function springRoutes(node, owner, qualifiedName, st) {
   for (const annotation of annotations) {
     const name = annotationName(annotation);
     if (!MAPPING_VERBS.has(name)) continue;
-    const path = mappingPath(annotation);
-    if (path === null) {
+    const paths = mappingPaths(annotation);
+    if (paths === null) {
       st.notExtracted.add("route(non-literal path)");
       continue;
     }
-    st.routes.push({
-      line: lineOf(annotation),
-      start_byte: annotation.startIndex,
-      http_method: MAPPING_VERBS.get(name) ?? requestMethod(annotation),
-      path_pattern: joinPath(owner.prefix, path),
-      handler_text: qualifiedName,
-      middleware_texts: [...owner.auth, ...auth],
-      framework: "spring"
-    });
+    // one route per literal path; several routes of one annotation sit at their own literal
+    for (const { path, node: literal } of paths) {
+      const at = paths.length > 1 ? literal : annotation;
+      st.routes.push({
+        line: lineOf(at),
+        start_byte: at.startIndex,
+        http_method: MAPPING_VERBS.get(name) ?? requestMethod(annotation),
+        path_pattern: joinPath(owner.prefix, path),
+        handler_text: qualifiedName,
+        middleware_texts: [...owner.auth, ...auth],
+        framework: "spring"
+      });
+    }
   }
 }
 

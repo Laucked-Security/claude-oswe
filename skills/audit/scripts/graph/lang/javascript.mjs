@@ -14,10 +14,9 @@
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
-import { sinkClassFor } from "../sink-classes.mjs";
-import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass, repoPath } from "./common.mjs";
+import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, repoPath } from "./common.mjs";
 
-export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false, callableLocals: true };
+export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false, callableLocals: true, overloads: false };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 
@@ -134,14 +133,7 @@ const currentFrame = (st) => st.fnStack.at(-1) ?? st.module;
 
 const sourceKind = (pattern) => lookup(SOURCE_KINDS, pattern.normalized.split(".").at(-1).toLowerCase()) ?? "body";
 
-// At most one source and one sink per AST node: the first matching pattern in surface order. A sink
-// derived from a call / `new` is positioned at the callee anchor (`sinkAt`, see calleeAnchor).
-function emitMatches(node, candidates, st, { sources = false, sinks = false, sinkAt = node }) {
-  const source = sources ? firstMatch(st.surface.sources, candidates) : null;
-  const sink = sinks ? firstMatch(st.surface.sinks, candidates) : null;
-  if (source) st.sources.push({ line: lineOf(node), start_byte: node.startIndex, kind: sourceKind(source), pattern: source.raw });
-  if (sink) st.sinks.push({ line: lineOf(sinkAt), start_byte: sinkAt.startIndex, class: sinkClassFor(sink.normalized, "node"), callee: candidates[0].text, pattern: sink.raw });
-}
+const emitMatches = matchEmitter("node", sourceKind); // see common.mjs
 
 const inChain = (ctx) => CHAIN_SLOTS.get(ctx.parentType) === ctx.field || ctx.parentType === "decorator";
 const isBinding = (ctx) => BINDING_PARENTS.has(ctx.parentType) || BINDING_SLOTS.get(ctx.parentType) === ctx.field;
@@ -211,12 +203,13 @@ function typeName(node) {
   }
 }
 
-// Declared parameters (`param_count`): null with a rest parameter (`...a`, TS `...a: T[]`).
+// Declared parameters (`param_count`): null with a rest parameter (`...a`, TS `...a: T[]`) or a
+// default value (`a = 1`, TS `a: T = 1`).
 function parameterCount(node) {
   const single = field(node, "parameter");
   const params = single ? [single] : namedOf(field(node, "parameters"));
-  const isRest = (p) => p.type === "rest_pattern" || field(p, "pattern")?.type === "rest_pattern";
-  return params.some(isRest) ? null : params.length;
+  const uncounted = (p) => p.type === "rest_pattern" || p.type === "assignment_pattern" || field(p, "pattern")?.type === "rest_pattern" || field(p, "value") !== null;
+  return params.some(uncounted) ? null : params.length;
 }
 
 function addParameters(node, frame) {
@@ -271,7 +264,9 @@ function onFunction(node, st, ctx) {
     param_count: parameterCount(node),
     kind: isMethod ? "method" : node.type === "arrow_function" ? "arrow" : "function",
     exported: false,
-    class: cls
+    class: cls,
+    // an arrow's lexical class body: resolve.mjs inherits a containing method's class only within it
+    ...(node.type === "arrow_function" ? { class_start_byte: st.classStack.at(-1)?.start ?? null } : {})
   });
   const frame = newFrame(node.startIndex, qualifiedName);
   addParameters(node, frame);
@@ -328,7 +323,7 @@ function onClass(node, st, ctx) {
     if (!st.fnStack.length) st.topLevel.set(name, node.startIndex);
     nestRoutes(node, name, body, st);
   }
-  st.classStack.push({ name, fieldTypes: fieldTypes(body) });
+  st.classStack.push({ name, start: node.startIndex, fieldTypes: fieldTypes(body) });
   return () => st.classStack.pop();
 }
 
