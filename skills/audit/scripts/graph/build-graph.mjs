@@ -339,9 +339,12 @@ function mountContext(path, { globals, mountOf }, memo) {
 
 const SHAPE_CATEGORY = { decorator: "decorator", call: "call", chain: "call", member: "call", word: "identifier" };
 
+// A marker with an argument prefix (php `->middleware('auth`, see surface.mjs) matches a middleware
+// name starting with it (`auth`, `auth:api`); every other marker matches by its shape.
 function isAuthMarker(text, surface) {
   const candidate = { text: normalizeToken(text) };
-  return (surface?.auth_markers ?? []).some((p) => SHAPE_CATEGORY[p.shape] && matchesPattern(p, { ...candidate, category: SHAPE_CATEGORY[p.shape] }));
+  return (surface?.auth_markers ?? []).some((p) =>
+    p.arg_prefix !== undefined ? text.startsWith(p.arg_prefix) : SHAPE_CATEGORY[p.shape] && matchesPattern(p, { ...candidate, category: SHAPE_CATEGORY[p.shape] }));
 }
 
 function routeAuth(mws, surfaceOfPath) {

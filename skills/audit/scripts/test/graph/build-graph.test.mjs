@@ -22,7 +22,7 @@ const NODE_FIXTURE = realpathSync(join(FIXTURES_DIR, "node"));
 
 // The frameworks each golden fixture is built with (spec: "the fixture's frameworks"); a stack not
 // listed here is built with every framework of that stack.
-const GOLDEN_FRAMEWORKS = { node: ["express"], python: ["flask", "django", "fastapi"], java: ["spring"] };
+const GOLDEN_FRAMEWORKS = { node: ["express"], python: ["flask", "django", "fastapi"], java: ["spring"], php: ["laravel", "symfony"] };
 const goldenFrameworks = (stack) => GOLDEN_FRAMEWORKS[stack] ?? Object.keys(FRAMEWORK_STACK).filter((f) => FRAMEWORK_STACK[f] === stack);
 
 function tempDir(t, prefix = "oswe-build-graph-") {
@@ -310,6 +310,26 @@ test("(6) auth: a Nest @UseGuards guard is authenticated; an unguarded controlle
   assert.equal(routes["GET /a/b"].framework, "nest");
   assert.equal(routes["GET /d/e"].auth, "unauthenticated");
   assert.deepEqual(routes["GET /d/e"].middlewares, []);
+});
+
+test("(6) auth: a marker with an argument prefix (php ->middleware('auth) matches middleware names starting with it", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "routes.php", [
+    "<?php",
+    "Route::get('/a', fn () => 1)->middleware('auth:api');",
+    "Route::get('/b', fn () => 1)->middleware('auth.basic');",
+    "Route::get('/c', fn () => 1)->middleware('throttle');",
+    "Route::get('/d', fn () => 1);",
+    ""
+  ].join("\n"));
+  const { graph } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["php"], frameworks: ["laravel"], referencesDir: REFERENCES_DIR });
+  const routes = Object.fromEntries(nodesOf(graph, "route").map((r) => [r.path_pattern, [r.auth, r.middlewares]]));
+  assert.deepEqual(routes, {
+    "/a": ["authenticated", ["auth:api"]],
+    "/b": ["authenticated", ["auth.basic"]],
+    "/c": ["unknown", ["throttle"]],
+    "/d": ["unauthenticated", []]
+  });
 });
 
 test("(6) a mount cycle drops the cycle-closing mount: the root's routes stay unprefixed", async (t) => {

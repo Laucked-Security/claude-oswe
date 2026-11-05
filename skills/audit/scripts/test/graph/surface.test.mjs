@@ -24,7 +24,7 @@ test("normalizeToken removes whitespace and (), and maps :: and -> to a dot", ()
 
 // ---- classifyPattern: one assertion per shape ---------------------------------------------------
 
-// [token, role, shape, normalized]
+// [token, role, shape, normalized, arg_prefix?]
 const CLASSIFY_CASES = [
   ["eval(", "sinks", "call", "eval"],
   [".query(", "sinks", "member", "query"],
@@ -37,17 +37,25 @@ const CLASSIFY_CASES = [
   ["os.system", "sinks", "call", "os.system"],
   ["Runtime.getRuntime().exec", "sinks", "call", "Runtime.getRuntime.exec"],
   ["Auth::check", "auth_markers", "chain", "Auth.check"],
-  ["->middleware('auth", "auth_markers", "member", "middleware"],
+  ["->middleware('auth", "auth_markers", "member", "middleware", "auth"],
   ["ProcessBuilder", "sinks", "word", "ProcessBuilder"],
   ["php://input", "sources", "literal", "php://input"],
   ["X-User-Role", "sources", "literal", "X-User-Role"]
 ];
 
-for (const [token, role, shape, normalized] of CLASSIFY_CASES) {
+for (const [token, role, shape, normalized, argPrefix] of CLASSIFY_CASES) {
   test(`classifyPattern(${JSON.stringify(token)}, ${role}) -> ${shape}/${normalized}`, () => {
-    assert.deepEqual(classifyPattern(token, role), { raw: token, shape, normalized });
+    assert.deepEqual(classifyPattern(token, role), { raw: token, shape, normalized, ...(argPrefix ? { arg_prefix: argPrefix } : {}) });
   });
 }
+
+test("classifyPattern: only a member token with a ('... argument fragment carries arg_prefix", () => {
+  assert.deepEqual(classifyPattern("->middleware('auth", "auth_markers"), { raw: "->middleware('auth", shape: "member", normalized: "middleware", arg_prefix: "auth" });
+  assert.equal(classifyPattern("->middleware('auth')", "auth_markers").arg_prefix, "auth");
+  assert.equal("arg_prefix" in classifyPattern(".query(", "sinks"), false);
+  assert.equal("arg_prefix" in classifyPattern("$this->authorize(", "auth_markers"), false);
+  assert.equal("arg_prefix" in classifyPattern("#[IsGranted", "auth_markers"), false);
+});
 
 test("classifyPattern: rule 6 splits on role (sinks/sanitizers -> call, sources/auth_markers -> chain)", () => {
   for (const role of ["sinks", "sanitizers"]) assert.equal(classifyPattern("shlex.quote", role).shape, "call");
@@ -138,7 +146,7 @@ test("loadSurface keeps the block's original order and role split (php/java/dotn
   const php = loadSurface("php", REFERENCES_DIR);
   assert.deepEqual(php.sources.map((p) => p.raw).slice(0, 3), ["$_GET", "$_POST", "$_REQUEST"]);
   assert.deepEqual(php.auth_markers.find((p) => p.raw === "->middleware('auth"),
-    { raw: "->middleware('auth", shape: "member", normalized: "middleware" });
+    { raw: "->middleware('auth", shape: "member", normalized: "middleware", arg_prefix: "auth" });
   assert.deepEqual(php.auth_markers.find((p) => p.raw === "Auth::check"),
     { raw: "Auth::check", shape: "chain", normalized: "Auth.check" });
   const java = loadSurface("java", REFERENCES_DIR);

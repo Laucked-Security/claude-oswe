@@ -16,7 +16,7 @@ const FIXTURES_DIR = join(REPO_ROOT, "test-fixtures", "graph");
 const REFERENCES_DIR = join(REPO_ROOT, "skills", "audit", "references");
 
 // [stack, language module id under graph/lang/]
-const IMPLEMENTED = [["node", "javascript"], ["python", "python"], ["java", "java"]];
+const IMPLEMENTED = [["node", "javascript"], ["python", "python"], ["java", "java"], ["php", "php"]];
 
 // Unbalanced braces/parens: a syntax error in every supported grammar (PHP needs its open tag,
 // otherwise the text is inline HTML).

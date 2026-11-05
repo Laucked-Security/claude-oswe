@@ -49,7 +49,13 @@ export function classifyPattern(token, role) {
   const [shape, text] = shapeOf(token, role);
   const normalized = normalizeToken(text);
   if (normalized === "") throw new TypeError(`surface token ${JSON.stringify(token)} has no pattern text`);
-  return { raw: token, shape, normalized };
+  const pattern = { raw: token, shape, normalized };
+  // A member token with an argument fragment (`->middleware('auth`) also names the argument's prefix:
+  // build-graph matches a middleware name starting with it (`auth`, `auth:api`).
+  const fragment = shape === "member" ? token.indexOf("('") : -1;
+  const argPrefix = fragment === -1 ? "" : token.slice(fragment + 2).replace(/['")]+$/, "");
+  if (argPrefix) pattern.arg_prefix = argPrefix;
+  return pattern;
 }
 
 // Same semantics as loadSurfaceBlock (which carries the stack-name path-traversal guard): null for an
