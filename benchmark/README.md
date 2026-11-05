@@ -98,7 +98,9 @@ node benchmark/metrics.mjs \
 
 `BENCHMARK.md` has three rows — `semgrep_raw`, `oswe_over_semgrep`, `hybrid` — plus the headline deltas
 (`fp_refuted`, `recall_cost`, `fn_recovered`). The **ledger is sanitized by construction** (test ids +
-booleans + cwe only — no code, paths, or secrets), so a real ledger and `BENCHMARK.md` are safe to commit.
+booleans + cwe + counters; from an SP10 report also finding ids, verdict statuses, `structural_path`,
+candidate-path ids `CP-<partition id>-<n>` and the fixed `apply-verdicts` notes — no code, file paths, or
+secrets), so a real ledger and `BENCHMARK.md` are safe to commit.
 The raw `leads`/SARIF/intermediates stay under gitignored `external/`.
 
 > Sanity check of the chain (no quota): build a synthetic "oracle" oswe map that perfectly refutes
