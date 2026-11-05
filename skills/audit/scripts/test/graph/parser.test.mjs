@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSource, loadLanguage, langIdForFile, parserAvailable, LANG_IDS, VENDOR_DIR } from "../../graph/parser.mjs";
@@ -50,4 +51,14 @@ test("loadLanguage rejects an unsupported language id; a parse error is reported
   await assert.rejects(loadLanguage("ruby"), /unsupported language id: ruby/);
   const tree = await parseSource("javascript", "f(((");
   assert.equal(tree.rootNode.hasError, true);
+});
+
+test("grammars are committed gzipped and load from the .gz files", async () => {
+  for (const id of LANG_IDS) {
+    assert.equal(existsSync(join(VENDOR_DIR, `tree-sitter-${id}.wasm.gz`)), true, `${id}.wasm.gz`);
+    assert.equal(existsSync(join(VENDOR_DIR, `tree-sitter-${id}.wasm`)), false, `raw ${id}.wasm must not be vendored`);
+  }
+  const python = await loadLanguage("python");
+  assert.ok(python.abiVersion > 0);
+  assert.equal((await parseSource("python", "f(1)")).rootNode.hasError, false);
 });

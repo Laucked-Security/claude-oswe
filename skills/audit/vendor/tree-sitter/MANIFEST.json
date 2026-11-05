@@ -1,38 +1,38 @@
 {
-  "tree-sitter-c_sharp.wasm": {
+  "tree-sitter-c_sharp.wasm.gz": {
     "package": "tree-sitter-wasms",
     "version": "0.1.13",
-    "sha256": "6266a7e32d68a3459104d994dc848df15d5672b0ea8e86d327274b694f8e6991"
+    "sha256": "3c5fdf2467176fbe5d913c410a6a79e3232fd416e882c5e4f13fbb2fff92caf5"
   },
-  "tree-sitter-java.wasm": {
+  "tree-sitter-java.wasm.gz": {
     "package": "tree-sitter-wasms",
     "version": "0.1.13",
-    "sha256": "637aac4415fb39a211a4f4292d63c66b5ce9c32fa2cd35464af4f681d91b9a1f"
+    "sha256": "bf584bcb6fe97f71ce27b969db5bb1549bd7dddc115359ce1b3b1fb35ad9d4f2"
   },
-  "tree-sitter-javascript.wasm": {
+  "tree-sitter-javascript.wasm.gz": {
     "package": "tree-sitter-wasms",
     "version": "0.1.13",
-    "sha256": "63812b9e275d26851264734868d27a1656bd44a2ef6eb3e85e6b03728c595ab5"
+    "sha256": "389f5d284d10cbcf2c283b36442414f24335cb2eb802817a18903581cd747e03"
   },
-  "tree-sitter-php.wasm": {
+  "tree-sitter-php.wasm.gz": {
     "package": "tree-sitter-wasms",
     "version": "0.1.13",
-    "sha256": "55bb617b6f01e14bab997861f0b20a2420cf6ba3199ffeb295b9ec398966d8a3"
+    "sha256": "3c9589db7dd710b38f1139174e0ac467ff214d9a95045445585be6d6a54061d5"
   },
-  "tree-sitter-python.wasm": {
+  "tree-sitter-python.wasm.gz": {
     "package": "tree-sitter-wasms",
     "version": "0.1.13",
-    "sha256": "9056d0fb0c337810d019fae350e8167786119da98f0f282aceae7ab89ee8253b"
+    "sha256": "30993f3e0c3ec397a02dd8250f0f0aea7d729e666d1a107603790f4ef7c5448c"
   },
-  "tree-sitter-tsx.wasm": {
+  "tree-sitter-tsx.wasm.gz": {
     "package": "tree-sitter-wasms",
     "version": "0.1.13",
-    "sha256": "6aa3b2c70e76f5d48eafef1093e9c4de383e13f2fdde2f4e9b98a378f6a8f1b6"
+    "sha256": "457fa44f0b59311934bf1d31651cdc7578ece567bbd368b52c4cf89f872c5a59"
   },
-  "tree-sitter-typescript.wasm": {
+  "tree-sitter-typescript.wasm.gz": {
     "package": "tree-sitter-wasms",
     "version": "0.1.13",
-    "sha256": "8515404dceed38e1ed86aa34b09fcf3379fff1b4ff9dd3967bcd6d1eb5ac3d8f"
+    "sha256": "453cf77e34dc0817059641c1caee59f34a689595c08eeab4da021f70ff9732db"
   },
   "tree-sitter.wasm": {
     "package": "web-tree-sitter",

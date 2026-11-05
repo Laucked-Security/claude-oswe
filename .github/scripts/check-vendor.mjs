@@ -16,9 +16,8 @@ import { createHash } from "node:crypto";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const VENDOR = join(ROOT, "skills", "audit", "vendor", "tree-sitter");
 const UNHASHED = new Set(["MANIFEST.json", "LICENSES.md"]);
-// The seven grammars alone are ~10.7 MB (parse tables, incompressible as WASM), so the whole
-// directory is ~10.9 MiB; the ceiling leaves headroom for a patch bump but catches a new language.
-const MAX_BYTES = 12 * 1024 * 1024;
+// Measured on the committed bytes: the seven grammars are ~11 MB raw but are committed gzipped (~1 MB).
+const MAX_BYTES = 10 * 1024 * 1024;
 
 const errors = [];
 const ok = (m) => console.log(`  ok  ${m}`);

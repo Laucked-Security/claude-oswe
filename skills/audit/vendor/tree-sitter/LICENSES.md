@@ -33,7 +33,7 @@ SOFTWARE.
 
 ## tree-sitter-wasms 0.1.13 (Unlicense)
 
-Files: `tree-sitter-<language>.wasm`.
+Files: `tree-sitter-<language>.wasm.gz` (the package's prebuilt grammars, gzipped).
 
 ```
 This is free and unencumbered software released into the public domain.
@@ -62,6 +62,53 @@ OTHER DEALINGS IN THE SOFTWARE.
 For more information, please refer to <https://unlicense.org>
 ```
 
-The grammar binaries inside tree-sitter-wasms are compiled from the upstream tree-sitter grammar
-repositories (tree-sitter-javascript, tree-sitter-typescript, tree-sitter-python, tree-sitter-java,
-tree-sitter-php, tree-sitter-c-sharp), each of which is MIT-licensed by its own authors.
+## Upstream grammars compiled into tree-sitter-wasms (MIT)
+
+The grammar binaries are compiled from the upstream tree-sitter grammar repositories below, each licensed
+under the MIT License with its own copyright holders. The permission text is identical in all of them
+and is reproduced once after the notices.
+
+### tree-sitter-javascript (MIT), grammar: javascript
+
+Copyright (c) 2014 Max Brunsfeld
+
+### tree-sitter-typescript (MIT), grammar: typescript, tsx
+
+Copyright (c) 2017 Max Brunsfeld
+
+### tree-sitter-python (MIT), grammar: python
+
+Copyright (c) 2016 Max Brunsfeld
+
+### tree-sitter-java (MIT), grammar: java
+
+Copyright (c) 2017 Ayman Nadeem
+
+### tree-sitter-php (MIT), grammar: php
+
+Copyright (c) 2017 Josh Vera, GitHub
+Copyright (c) 2019 Max Brunsfeld, Amaan Qureshi, Christian Frøystad, Caleb White
+
+### tree-sitter-c-sharp (MIT), grammar: c_sharp
+
+Copyright (c) 2014-2023 Max Brunsfeld, Damien Guard, Amaan Qureshi, and contributors.
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
