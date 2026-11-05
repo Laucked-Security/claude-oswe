@@ -144,6 +144,12 @@ enclosing lexical scopes (parameters, locals, closure variables) so the resolver
 4. callee name is unique across all parsed functions in scope → `name-only`.
 5. otherwise → `unresolved` (`to: null`); `callee_text` kept so sink matching still works.
 
+Two refinements shared by all rules: **overloads** (several same-named methods in one class, Java/C#)
+are disambiguated by arity — a unique definition whose parameter count equals the call's argument
+count is `exact`, otherwise the first overload is `name-only`; and a **lambda / arrow** function
+inherits the class of the innermost enclosing method for rule 3 and for implicit-`this` bare calls
+(a JavaScript `function` expression, whose `this` is dynamic, does not).
+
 Explicit non-goals: type inference, virtual dispatch resolution beyond rule 3's conservative check,
 interprocedural taint summaries, dynamic requires / reflection. A homonymous function defined in two
 files is **never** resolved to either; it yields `unresolved` with a stats counter. Tests guard:
