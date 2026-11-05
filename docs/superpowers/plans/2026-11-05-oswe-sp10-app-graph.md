@@ -41,6 +41,7 @@
 - `skills/audit/scripts/graph/surface.mjs` — surface-pattern classification.
 - `skills/audit/scripts/graph/walk.mjs` — scope-confined file enumeration.
 - `skills/audit/scripts/graph/sink-classes.mjs` — pattern → sink class table.
+- `skills/audit/scripts/graph/match.mjs` — shape-aware matching of a classified surface pattern against an AST candidate, shared by every extractor.
 - `skills/audit/scripts/graph/lang/{javascript,python,java,php,csharp}.mjs` — extractors.
 - `skills/audit/scripts/graph/resolve.mjs` — import + call resolution.
 - `skills/audit/scripts/graph/ids.mjs` — node/edge identity.
@@ -202,10 +203,11 @@ test("parserAvailable reports ok:false with a reason on a missing vendor dir, ne
 ### Task 5: JavaScript/TypeScript extractor + conformance suite
 
 **Files:**
-- Create: `skills/audit/scripts/graph/lang/javascript.mjs`, `test-fixtures/graph/node/{server.js, routes/users.js, services/userService.js, dao/userDao.js}` (no `graph.expected.json` yet — goldens are built-graph snapshots and start in Task 7), `skills/audit/scripts/test/graph-conformance.test.mjs`, `skills/audit/scripts/test/graph/javascript.test.mjs`
+- Create: `skills/audit/scripts/graph/match.mjs`, `skills/audit/scripts/graph/lang/javascript.mjs`, `test-fixtures/graph/node/{server.js, routes/users.js, services/userService.js, dao/userDao.js}` (no `graph.expected.json` yet — goldens are built-graph snapshots and start in Task 7), `skills/audit/scripts/test/graph/match.test.mjs`, `skills/audit/scripts/test/graph-conformance.test.mjs`, `skills/audit/scripts/test/graph/javascript.test.mjs`
 
 **Interfaces:**
-- Consumes: `parseSource`, `loadSurface`, `sinkClassFor`.
+- Consumes: `parseSource`, `loadSurface`, `sinkClassFor`, `normalizeToken`.
+- Produces: `match.mjs` export `matchesPattern(pattern, candidate) → boolean` where `pattern` is a classified surface pattern (`{ raw, shape, normalized }`) and `candidate = { category, text }` with `category ∈ "call" | "new" | "member" | "decorator" | "identifier" | "type" | "key" | "literal"` and `text` already passed through `normalizeToken`. Rules by shape (segments split on `.`): `call` ⇒ category `call`/`new`/`member` and `text` equals the pattern or ends with `"." + pattern`; `member` ⇒ category `call`/`member` and the last segment of `text` equals the pattern; `decorator` ⇒ category `decorator` and the first segment equals the pattern; `chain` ⇒ category `member`/`identifier`/`call` and `text` equals the pattern or starts with `pattern + "."`; `key` ⇒ category `key` and equality; `word` ⇒ category `identifier`/`type`/`call`/`new` and the last segment equals the pattern; `literal` ⇒ category `literal` and equality. Every extractor builds candidates from its AST and calls this — no extractor re-implements shape matching.
 - Produces: every language module exports
   - `lang = { id, stack, langIds: [...], frameworks: [...] }` (here `{ id: "javascript", stack: "node", langIds: ["javascript","typescript","tsx"], frameworks: ["express","nest"] }`)
   - `extractFile({ tree, path, sourceText, frameworks, surface }) → Extract` where `Extract = { functions, calls, imports, exports, classes, routes, sources, sinks, not_extracted }` with:
