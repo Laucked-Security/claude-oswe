@@ -159,12 +159,12 @@ test("parserAvailable reports ok:false with a reason on a missing vendor dir, ne
 - Produces: `loadSurface(stack, referencesDir) → { sources, sinks, sanitizers, auth_markers } | null` (each an array of classified patterns; reuses `parseSurfaceBlock` from `../surface-scan.mjs`).
 - Produces: `sink-classes.mjs` export `sinkClassFor(normalizedPattern, stack) → class` by first regex match over the lower-cased normalized token; `stack` is the stack id. Order of evaluation = order listed:
   `cmd-exec` ← `/(child_process|execsync|spawn|execfile|system|popen|proc_open|passthru|shell_exec|processbuilder|runtime\.getruntime|process\.start|processstartinfo|useshellexecute|subprocess)/`, plus `/^exec$/` when `stack !== "python"`;
-  `eval` ← `/(^eval$|newfunction|runinnewcontext|mvel|parseexpression|getvalue)/`, plus `/^exec$/` when `stack === "python"`;
+  `eval` ← `/(^eval$|newfunction|runinnewcontext|mvel|parseexpression|getvalue|preg_replace)/`, plus `/^exec$/` when `stack === "python"`;
   `deser` ← `/(unserialize|objectinputstream|readobject|xmldecoder|xstream|jsontypeinfo|yaml\.load|pickle|marshal|binaryformatter|netdatacontract|losformatter|objectstateformatter|typenamehandling|javascriptserializer)/`;
   `nosql` ← `/^\$/`;
   `template` ← `/(render_template_string|^template$|lodash\.template)/`;
   `sql` ← `/(query|mysqli|db\.raw|db\.select|whereraw|statement\.execute|cursor\.execute|^raw$|^extra$|rawsql|sqlcommand|executereader|executenonquery|fromsqlraw|executesqlraw|sequelize)/`;
-  `include` ← `/(include|^require$)/`;
+  `include` ← `/(include|^require(_once)?$)/`;
   `file-write` ← `/(move_uploaded_file|file_put_contents|writefile)/`;
   `file-read` ← `/(send_file|send_from_directory|sendfile|readfile|path\.combine)/`;
   `ssrf` ← `/(axios|fetch|http\.request|^got$|requests\.)/`;
