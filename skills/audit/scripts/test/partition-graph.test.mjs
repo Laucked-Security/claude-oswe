@@ -205,13 +205,14 @@ test("groups by (stack, auth, first path segment); a top-level file is `root`; i
     ]
   });
   const out = partitionGraph({ graph, fallback_partitions: [] });
-  // routes/a.js hosts an unauthenticated route too (group g-node-unauthenticated-routes), but the
-  // sorted-earlier authenticated group claims the file first, which leaves that group with nothing:
-  // it is omitted rather than emitted empty.
+  // routes/a.js hosts an authenticated and an unauthenticated route: the unauthenticated group claims
+  // first (I1: auth order), so it owns the file and the authenticated group keeps routes/b.js. A group
+  // left with nothing would be omitted rather than emitted empty.
   assert.deepEqual(out.partitions, [
     { partition_id: "g-node-authenticated-my_app", stack: "node", files: ["my app/d.js"] },
-    { partition_id: "g-node-authenticated-routes", stack: "node", files: ["routes/a.js", "routes/b.js"] },
+    { partition_id: "g-node-authenticated-routes", stack: "node", files: ["routes/b.js"] },
     { partition_id: "g-node-unauthenticated-root", stack: "node", files: ["top.js"] },
+    { partition_id: "g-node-unauthenticated-routes", stack: "node", files: ["routes/a.js"] },
     { partition_id: "g-node-unknown-api", stack: "node", files: ["api/v1/c.js"] },
     { partition_id: "g-python-authenticated-views", stack: "python", files: ["views/e.py"] }
   ]);
@@ -227,7 +228,7 @@ test("directories that sanitise to the same id merge into one partition (ids sta
   assert.deepEqual(out.partitions, [{ partition_id: "g-node-unknown-my_app", stack: "node", files: ["my app/a.js", "my_app/b.js"] }]);
 });
 
-test("a file reachable from two groups appears once, in the first group in sorted id order", () => {
+test("a file reachable from two groups appears once, in the first group in auth order (unauthenticated first)", () => {
   const graph = synth({
     files: ["routes/a.js", "server.js", "shared/util.js", "only/auth.js", "only/open.js"],
     fns: { a: "routes/a.js", s: "server.js", util: "shared/util.js", onlyAuth: "only/auth.js", onlyOpen: "only/open.js" },
@@ -239,10 +240,33 @@ test("a file reachable from two groups appears once, in the first group in sorte
   });
   const out = partitionGraph({ graph, fallback_partitions: fallbackOf(["all", "node", ["routes/a.js", "server.js", "shared/util.js", "only/auth.js", "only/open.js"]]) });
   assert.deepEqual(out.partitions, [
-    { partition_id: "g-node-authenticated-routes", stack: "node", files: ["only/auth.js", "routes/a.js", "shared/util.js"] },
-    { partition_id: "g-node-unauthenticated-root", stack: "node", files: ["only/open.js", "server.js"] }
+    { partition_id: "g-node-authenticated-routes", stack: "node", files: ["only/auth.js", "routes/a.js"] },
+    { partition_id: "g-node-unauthenticated-root", stack: "node", files: ["only/open.js", "server.js", "shared/util.js"] }
   ]);
   assert.equal(allFiles(out).filter((f) => f === "shared/util.js").length, 1);
+});
+
+test("I1: groups claim in auth order unauthenticated -> unknown -> authenticated, then stack, then module", () => {
+  const graph = synth({
+    files: ["a/auth.js", "b/unknown.js", "c/open.js", ["d/open.py", "python"], "lib/shared.js", "lib/two.js"],
+    fns: { auth: "a/auth.js", unk: "b/unknown.js", open: "c/open.js", py: "d/open.py", shared: "lib/shared.js", two: "lib/two.js" },
+    routes: [
+      { file: "a/auth.js", auth: "authenticated", handler: "auth" },
+      { file: "b/unknown.js", auth: "unknown", handler: "unk" },
+      { file: "c/open.js", auth: "unauthenticated", handler: "open" },
+      { file: "d/open.py", auth: "unauthenticated", handler: "py" }
+    ],
+    // every route reaches lib/shared.js; only the authenticated and unknown ones reach lib/two.js
+    calls: [["auth", "shared", "exact"], ["unk", "shared", "exact"], ["open", "shared", "exact"], ["py", "shared", "name-only"], ["auth", "two", "exact"], ["unk", "two", "exact"]]
+  });
+  const out = partitionGraph({ graph, fallback_partitions: [] });
+  // node sorts before python, so the node unauthenticated group wins lib/shared.js; unknown beats authenticated for lib/two.js
+  assert.deepEqual(out.partitions, [
+    { partition_id: "g-node-authenticated-a", stack: "node", files: ["a/auth.js"] },
+    { partition_id: "g-node-unauthenticated-c", stack: "node", files: ["c/open.js", "lib/shared.js"] },
+    { partition_id: "g-node-unknown-b", stack: "node", files: ["b/unknown.js", "lib/two.js"] },
+    { partition_id: "g-python-unauthenticated-d", stack: "python", files: ["d/open.py"] }
+  ]);
 });
 
 test("a route file belongs to its own group even when an earlier group reaches it", () => {
@@ -513,4 +537,13 @@ test("CLI --graph value guards: --graph with no value, or followed by the next f
   assert.equal(nextFlag.status, 2, nextFlag.stderr);
   assert.match(nextFlag.stderr, /usage/);
   assert.equal(existsSync(outFile), false, "no output on a usage error");
+});
+
+test("I1: a group whose route files were all claimed first by a more exposed group is omitted, not emitted empty", () => {
+  const graph = synth({
+    files: ["routes/a.js"],
+    routes: [{ file: "routes/a.js", auth: "authenticated" }, { file: "routes/a.js", auth: "unauthenticated" }]
+  });
+  const out = partitionGraph({ graph, fallback_partitions: [] });
+  assert.deepEqual(out.partitions, [{ partition_id: "g-node-unauthenticated-routes", stack: "node", files: ["routes/a.js"] }]);
 });

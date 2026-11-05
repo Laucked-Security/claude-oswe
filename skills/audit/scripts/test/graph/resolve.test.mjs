@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { loadResolutionConfigs, resolveImports, buildClassIndex, resolveCalls } from "../../graph/resolve.mjs";
 
 // Small in-memory Extracts (no parsing). A stub language module resolves a specifier through a
@@ -748,4 +749,53 @@ test("C1b: a concrete receiver type keeps its exact edge when nothing implements
   const caller = file("Api.cs", { classes: [icls("Api", 0, ["H"])], functions: [fn("H", 10, "Api")], calls: [call("r.Run", 15, { enc: 10, receiverClass: "Runner", scope: ["r"] })] });
   const r = only(resolveAll([caller, iface, concrete]), "Api.cs", 15);
   assert.deepEqual([r.confidence, r.to?.qualified_name], ["exact", "Runner.Run"]);
+});
+
+// ---- I2: import resolution cost ------------------------------------------------------------------
+
+test("I2: 10 000 synthetic paths x 100 specifiers resolve in < 1 s (java, c#, php: indexes + memoisation)", async () => {
+  const java = await import("../../graph/lang/java.mjs");
+  const csharp = await import("../../graph/lang/csharp.mjs");
+  const php = await import("../../graph/lang/php.mjs");
+  const cases = [
+    ["java", java, (i) => `src/p${i}/T${i}.java`, (i) => `p${i}`, (i) => `p${i}.T${i}`],
+    ["c_sharp", csharp, (i) => `src/N${i}/T${i}.cs`, (i) => `N${i}`, (i) => `N${i}.T${i}`],
+    ["php", php, (i) => `src/N${i}/T${i}.php`, (i) => `N${i}`, (i) => `N${i}\\T${i}`]
+  ];
+  for (const [langId, mod, pathOf, nsOf, specOf] of cases) {
+    const paths = Array.from({ length: 10000 }, (_, i) => pathOf(i));
+    const filePaths = new Set(paths);
+    const imports = Array.from({ length: 100 }, (_, i) => ({ line: 1, specifier: specOf(i * 97), bindings: [], local: null }));
+    // 100 parsed files, each importing the same 100 specifiers (10 000 lookups); every path declares its namespace
+    const files = paths.map((path, i) => ({ path, langId, stack: "x", extract: { functions: [], calls: [], imports: i < 100 ? imports : [], exports: [], classes: [], namespace: nsOf(i) } }));
+    const started = performance.now();
+    const map = resolveImports(files, { langModules: new Map([[langId, mod]]), filePaths, configs: {} });
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1000, `${langId}: ${elapsed.toFixed(0)} ms`);
+    assert.equal(map.size, 100 * 100, langId);
+    assert.deepEqual(map.get(`${paths[0]}\u0000${specOf(97)}`), { path: pathOf(97), confidence: "exact" }, langId);
+    // without resolveImports' memo, 10 000 direct calls still stay fast (the per-Set indexes)
+    const namespaces = new Map(files.map((f) => [f.path, f.extract.namespace]));
+    const direct = performance.now();
+    for (let i = 0; i < 10000; i++) mod.resolveImportSpecifier({ specifier: specOf(i), fromPath: paths[i % 100], filePaths, configs: {}, namespaces });
+    const directElapsed = performance.now() - direct;
+    assert.ok(directElapsed < 1000, `${langId} direct: ${directElapsed.toFixed(0)} ms`);
+  }
+});
+
+test("I2: memoised resolution never shares a fromPath-dependent result (relative JS / Python / PHP file specifiers)", async () => {
+  const js = await import("../../graph/lang/javascript.mjs");
+  const filePaths = new Set(["a/x.js", "a/util.js", "b/y.js", "b/util.js"]);
+  const imp = { line: 1, specifier: "./util", bindings: [], local: null };
+  const files = ["a/x.js", "b/y.js"].map((path) => ({ path, langId: "javascript", stack: "node", extract: { functions: [], calls: [], imports: [imp], exports: [], classes: [], namespace: null } }));
+  const map = resolveImports(files, { langModules: new Map([["javascript", js]]), filePaths, configs: {} });
+  assert.equal(map.get("a/x.js\u0000./util").path, "a/util.js");
+  assert.equal(map.get("b/y.js\u0000./util").path, "b/util.js");
+  const py = await import("../../graph/lang/python.mjs");
+  const pyPaths = new Set(["p/__init__.py", "p/a.py", "p/m.py", "q/__init__.py", "q/b.py", "q/m.py"]);
+  const pyImp = { line: 1, specifier: ".m", bindings: [], local: null };
+  const pyFiles = ["p/a.py", "q/b.py"].map((path) => ({ path, langId: "python", stack: "python", extract: { functions: [], calls: [], imports: [pyImp], exports: [], classes: [], namespace: null } }));
+  const pyMap = resolveImports(pyFiles, { langModules: new Map([["python", py]]), filePaths: pyPaths, configs: {} });
+  assert.equal(pyMap.get("p/a.py\u0000.m").path, "p/m.py");
+  assert.equal(pyMap.get("q/b.py\u0000.m").path, "q/m.py");
 });

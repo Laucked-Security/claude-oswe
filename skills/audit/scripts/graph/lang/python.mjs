@@ -676,6 +676,10 @@ function packageAncestors(fromPath, filePaths) {
 // A relative specifier (leading dots) resolves from the importing file's directory, one level up
 // per extra dot; a dotted specifier from the scope root, then from `src/` (the src layout), then
 // from each package ancestor of the importing file. `configs` / `namespaces` are part of the shared contract; Python ignores them.
+// resolve.mjs memoises resolveImportSpecifier per run on this key: relative specifiers resolve from the
+// importing file's directory and dotted ones from its package ancestors, so the directory is part of it.
+export const importCacheKey = ({ specifier, fromPath }) => `${posix.dirname(fromPath)}\u0000${specifier}`;
+
 export function resolveImportSpecifier({ specifier, fromPath, filePaths }) {
   if (typeof specifier !== "string" || specifier === "") return null;
   const dots = /^\.*/.exec(specifier)[0].length;

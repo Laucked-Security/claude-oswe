@@ -35,11 +35,13 @@
 //  2. Grouping. Group key = (stack of the route file's `file` node, route auth, module) where module is
 //     the first path segment of the route file ("root" for a top-level file). Partition id =
 //     g-<stack>-<auth>-<module>, every character outside [A-Za-z0-9_.-] replaced by "_" (groups whose
-//     sanitised ids coincide are one group, so ids stay unique). Groups are visited in sorted id order.
-//  3. Exclusive ownership. A file is emitted once. Pass 1: each group, in sorted order, claims its own
-//     route files — a route file is always where its routes are, so the group that exposes `/health`
-//     keeps server.js even when an earlier group's middleware lives there. Pass 2: each group, in sorted
-//     order, claims the reachable files nobody claimed yet (first group in sorted order wins). A group
+//     sanitised ids coincide are one group, so ids stay unique).
+//  3. Exclusive ownership. A file is emitted once. Groups claim in AUTH ORDER — unauthenticated, then
+//     unknown, then authenticated (then stack, module, id) — so a callee shared by an unauthenticated
+//     and an authenticated route lands with the most exposed surface. Pass 1: each group, in that order,
+//     claims its own route files — a route file is always where its routes are, so the group that
+//     exposes `/health` keeps server.js even when another group's middleware lives there. Pass 2: each
+//     group, in that order, claims the reachable files nobody claimed yet (the first group wins). A group
 //     left with no file is omitted. `files` are sorted by plain string comparison.
 //  4. Orphans. A file no group claimed stays with the directory partition the orchestrator put it in:
 //     for each fallback partition (input order) holding at least one unclaimed file, emit
@@ -143,8 +145,9 @@ function groupRoutes(index) {
   for (const r of index.routes) {
     const stack = index.stackByFile.get(pathKey(r.file));
     if (stack === undefined) continue;
-    const id = sanitize(`g-${stack}-${r.auth}-${moduleOf(r.file)}`);
-    if (!groups.has(id)) groups.set(id, { stack, routeFiles: [], seeds: [] });
+    const module = moduleOf(r.file);
+    const id = sanitize(`g-${stack}-${r.auth}-${module}`);
+    if (!groups.has(id)) groups.set(id, { stack, auth: r.auth, module, routeFiles: [], seeds: [] });
     const group = groups.get(id);
     group.routeFiles.push(r.file);
     group.seeds.push(...(index.seeds.get(r.id) ?? []));
@@ -152,9 +155,20 @@ function groupRoutes(index) {
   return groups;
 }
 
+// The claim order: the most exposed surface first — unauthenticated, then unknown, then authenticated
+// — then stack, then module, then id (plain string comparison).
+const AUTH_CLAIM_RANK = { unauthenticated: 0, unknown: 1, authenticated: 2 };
+const claimOrder = (groups) =>
+  [...groups.keys()].sort((a, b) => {
+    const ga = groups.get(a);
+    const gb = groups.get(b);
+    return (AUTH_CLAIM_RANK[ga.auth] ?? 3) - (AUTH_CLAIM_RANK[gb.auth] ?? 3) || compare(ga.stack, gb.stack) || compare(ga.module, gb.module) || compare(a, b);
+  });
+
 // Exclusive ownership (header, "Exclusive ownership"). Returns the non-empty group partitions in
 // sorted id order and the set of folded paths they claimed.
 function claimGroupFiles(groups, index) {
+  const order = claimOrder(groups);
   const ids = [...groups.keys()].sort(compare);
   const claimed = new Set();
   const filesOf = new Map(ids.map((id) => [id, []]));
@@ -164,8 +178,8 @@ function claimGroupFiles(groups, index) {
     claimed.add(key);
     filesOf.get(id).push(path);
   };
-  for (const id of ids) for (const path of groups.get(id).routeFiles) claim(id, path);
-  for (const id of ids) for (const path of reachableFiles(groups.get(id).seeds, index)) claim(id, path);
+  for (const id of order) for (const path of groups.get(id).routeFiles) claim(id, path);
+  for (const id of order) for (const path of reachableFiles(groups.get(id).seeds, index)) claim(id, path);
   const partitions = [];
   for (const id of ids) {
     const files = filesOf.get(id).sort(compare);

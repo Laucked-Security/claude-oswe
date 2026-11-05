@@ -25,7 +25,8 @@
 //     composerJson, pyproject, setupCfg, read: [{ path, sha256 }], errors: [{ file, message }] }
 //     with message one of CONFIG_ERRORS: "invalid JSON" | "unreadable" | "escapes project" (never
 //     repo content, never an absolute path).
-//   resolveImports(files, { langModules, filePaths, configs })
+//   resolveImports(files, { langModules, filePaths, configs })   (one resolveImportSpecifier call per
+//     distinct module importCacheKey; Java / C# / PHP index filePaths once per Set, common.mjs)
 //     -> Map<"<fromPath>\0<specifier>", { path, confidence }>   (unresolvable specifiers absent)
 //     plus, for a language declaring `lang.submoduleImports: true` (Python: `from pkg import sub` may
 //     name the module pkg.sub), "<fromPath>\0<specifier>\0<imported>" entries for each named binding
@@ -119,10 +120,26 @@ export function loadResolutionConfigs(projectDir, scopeRealpath) {
 
 const importKey = (fromPath, specifier) => `${fromPath}\u0000${specifier}`;
 
+// One resolver call per distinct memo key per language module and run: a module exporting
+// importCacheKey({ specifier, fromPath }) names what its result depends on (Java / C#: the specifier
+// alone; JS / PHP: the importing directory too for relative / file specifiers; Python: the importing
+// directory); without one, the key is (fromPath, specifier), which never shares a result.
+function memoisedResolver({ filePaths, configs, namespaces }) {
+  const memo = new Map(); // module -> Map<key, hit | null>
+  return (mod, specifier, fromPath) => {
+    if (!memo.has(mod)) memo.set(mod, new Map());
+    const cache = memo.get(mod);
+    const key = typeof mod.importCacheKey === "function" ? mod.importCacheKey({ specifier, fromPath }) : `${fromPath}\u0000${specifier}`;
+    if (!cache.has(key)) cache.set(key, mod.resolveImportSpecifier({ specifier, fromPath, filePaths, configs, namespaces }) ?? null);
+    return cache.get(key);
+  };
+}
+
 export function resolveImports(files, { langModules, filePaths, configs }) {
   const sorted = byPath(files);
   const namespaces = new Map(sorted.map((f) => [f.path, f.extract.namespace ?? null]));
   const importMap = new Map();
+  const resolveSpecifier = memoisedResolver({ filePaths, configs, namespaces });
   for (const file of sorted) {
     const mod = langModules.get(file.langId);
     if (typeof mod?.resolveImportSpecifier !== "function") continue;
@@ -130,11 +147,11 @@ export function resolveImports(files, { langModules, filePaths, configs }) {
     for (const { specifier } of file.extract.imports) {
       if (asked.has(specifier)) continue;
       asked.add(specifier);
-      const hit = mod.resolveImportSpecifier({ specifier, fromPath: file.path, filePaths, configs, namespaces });
+      const hit = resolveSpecifier(mod, specifier, file.path);
       if (hit && filePaths.has(hit.path)) importMap.set(importKey(file.path, specifier), { path: hit.path, confidence: hit.confidence });
     }
   }
-  resolveSubmodules(sorted, { langModules, filePaths, configs, namespaces, importMap });
+  resolveSubmodules(sorted, { langModules, filePaths, resolveSpecifier, importMap });
   return importMap;
 }
 
@@ -142,7 +159,7 @@ const submoduleKey = (fromPath, specifier, imported) => `${fromPath}\u0000${spec
 // `from . import views` -> ".views"; `from .x import views` -> ".x.views"; `from a.b import c` -> "a.b.c".
 const submoduleSpecifier = (specifier, imported) => (specifier.endsWith(".") ? `${specifier}${imported}` : `${specifier}.${imported}`);
 
-function resolveSubmodules(sorted, { langModules, filePaths, configs, namespaces, importMap }) {
+function resolveSubmodules(sorted, { langModules, filePaths, resolveSpecifier, importMap }) {
   const exportsOf = new Map(sorted.map((f) => [f.path, new Set((f.extract.exports ?? []).map((e) => e.name))]));
   for (const file of sorted) {
     const mod = langModules.get(file.langId);
@@ -153,7 +170,7 @@ function resolveSubmodules(sorted, { langModules, filePaths, configs, namespaces
       for (const { imported } of bindings) {
         const key = submoduleKey(file.path, specifier, imported);
         if (importMap.has(key) || (target && exportsOf.get(target.path)?.has(imported))) continue;
-        const hit = mod.resolveImportSpecifier({ specifier: submoduleSpecifier(specifier, imported), fromPath: file.path, filePaths, configs, namespaces });
+        const hit = resolveSpecifier(mod, submoduleSpecifier(specifier, imported), file.path);
         if (hit && filePaths.has(hit.path)) importMap.set(key, { path: hit.path, confidence: hit.confidence });
       }
     }

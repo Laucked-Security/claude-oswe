@@ -780,6 +780,11 @@ function pathTargets(specifier, paths) {
 }
 
 // `namespaces` is part of the shared contract (Java / PHP / C#); JavaScript ignores it.
+// resolve.mjs memoises resolveImportSpecifier per run on this key: a relative specifier resolves from the
+// importing file's directory; any other depends on the specifier (and the run's tsconfig) alone.
+export const importCacheKey = ({ specifier, fromPath }) =>
+  typeof specifier === "string" && (specifier === "." || specifier === ".." || specifier.startsWith("./") || specifier.startsWith("../")) ? `${posix.dirname(fromPath)}\u0000${specifier}` : specifier;
+
 export function resolveImportSpecifier({ specifier, fromPath, filePaths, configs }) {
   if (typeof specifier !== "string" || specifier === "") return null;
   if (specifier === "." || specifier === ".." || specifier.startsWith("./") || specifier.startsWith("../")) {

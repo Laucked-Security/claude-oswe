@@ -50,7 +50,7 @@ import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
 import {
   lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, repoPath,
-  newFrame, NO_FRAME, bind, innermostFunction, innermostClass, enclosingName
+  newFrame, NO_FRAME, bind, innermostFunction, innermostClass, enclosingName, pathsByBasename
 } from "./common.mjs";
 
 export const lang = { id: "php", stack: "php", langIds: ["php"], frameworks: ["laravel", "symfony"], implicitThisCalls: false, submoduleImports: false, callableLocals: false, overloads: false };
@@ -705,6 +705,10 @@ function psr4Paths(specifier, composerJson) {
 // A class name `A\B\C` -> its PSR-4 file when parsed, else the file C.php declaring namespace A\B
 // (`namespaces`: path -> Extract.namespace; several: the first by path, "heuristic"). A file
 // specifier -> the path relative to the including file's directory, when parsed. Otherwise null.
+// resolve.mjs memoises resolveImportSpecifier per run on this key: a file specifier (`require './x.php'`)
+// resolves from the including file's directory; a class name depends on the specifier alone.
+export const importCacheKey = ({ specifier, fromPath }) => (typeof specifier === "string" && isFileSpecifier(specifier) ? `${posix.dirname(fromPath ?? "")}\u0000${specifier}` : specifier);
+
 export function resolveImportSpecifier({ specifier, fromPath, filePaths, configs, namespaces }) {
   if (typeof specifier !== "string" || specifier === "") return null;
   if (isFileSpecifier(specifier)) {
@@ -716,6 +720,6 @@ export function resolveImportSpecifier({ specifier, fromPath, filePaths, configs
   const cut = specifier.lastIndexOf("\\");
   const namespace = cut === -1 ? null : specifier.slice(0, cut);
   const fileName = `${specifier.slice(cut + 1)}.php`;
-  const matches = [...filePaths].filter((p) => posix.basename(p) === fileName && (namespaces?.get(p) ?? null) === namespace).sort();
+  const matches = (pathsByBasename(filePaths).get(fileName) ?? []).filter((p) => (namespaces?.get(p) ?? null) === namespace); // sorted
   return matches.length ? { path: matches[0], confidence: matches.length === 1 ? "exact" : "heuristic" } : null;
 }

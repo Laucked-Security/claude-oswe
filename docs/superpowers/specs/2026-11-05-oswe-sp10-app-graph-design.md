@@ -315,14 +315,16 @@ hygiene (purged at end/abort) and is checkpointed under `.oswe/checkpoints/<run-
   and `calls` edges of confidence **`exact` or `name-only`** (inclusive is right for partitioning).
 - Group into partitions by `(stack, auth class, top-level module of the route file)`. Output is
   **exactly today's shape** `{ partition_id, stack, files[] }`, so `surface-scan.mjs` and
-  `allocate-budget.mjs` are untouched.
+  `allocate-budget.mjs` are untouched. A file reachable from several groups goes to one of them, the
+  most exposed first: `unauthenticated`, then `unknown`, then `authenticated` (then stack, module).
 - Files reached by no route → "orphan" partitions cut by directory, i.e. today's behaviour.
 - **Zero-regression guarantee:** `graph: null` or zero routes extracted ⇒ partition output is identical
   to the current directory partitioning. A test asserts this byte-for-byte on every fixture.
 
 ### 3.3 §3 Analyze — candidate paths — `enumerate-paths.mjs`
 
-- For each partition in `analyze[]`: enumerate `route → … → sink` paths over `calls` edges, depth ≤ 6,
+- For each partition in `analyze[]`: enumerate `route → … → sink` paths over `calls` edges (the route
+  and its handler in the partition's files, the hops in any file), depth ≤ 6,
   at most 50 paths per partition, ordered by `(sink class severity rank, auth == unauthenticated first,
   path length, id)`. Each hop = `{ file, line, function, edge_confidence }`; a path carries
   `min_confidence` (the weakest edge).

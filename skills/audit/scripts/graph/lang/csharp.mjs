@@ -75,7 +75,7 @@ import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
 import {
   lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, lastSegment,
-  newFrame, NO_FRAME, bind, innermostFunction, innermostClassScope, innermostClass, enclosingName
+  newFrame, NO_FRAME, bind, innermostFunction, innermostClassScope, innermostClass, enclosingName, pathsByBasename, pathsByNamespace
 } from "./common.mjs";
 
 export const lang = { id: "csharp", stack: "dotnet", langIds: ["c_sharp"], frameworks: ["aspnet"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true };
@@ -748,17 +748,20 @@ export function extractFile({ tree, path, surface }) {
 // first file (by path) declaring it, heuristic (a `using` names every file of the namespace; class
 // references then resolve through resolve.mjs's unique-class-name rule). `fromPath` / `configs` are
 // part of the shared contract; C# ignores them.
+// resolve.mjs memoises resolveImportSpecifier per run on this key: the result depends on the specifier
+// alone (fromPath is not consulted).
+export const importCacheKey = ({ specifier }) => specifier;
+
 export function resolveImportSpecifier({ specifier, filePaths, namespaces }) {
   if (typeof specifier !== "string") return null;
   const segments = specifier.split(".");
   if (segments.some((s) => s === "")) return null;
-  const paths = [...filePaths].sort();
   if (segments.length >= 2) {
     const namespace = segments.slice(0, -1).join(".");
     const fileName = `${segments.at(-1)}.cs`;
-    const typed = paths.filter((p) => posix.basename(p) === fileName && namespaces?.get(p) === namespace);
+    const typed = (pathsByBasename(filePaths).get(fileName) ?? []).filter((p) => namespaces?.get(p) === namespace);
     if (typed.length) return { path: typed[0], confidence: typed.length === 1 ? "exact" : "heuristic" };
   }
-  const declaring = paths.find((p) => namespaces?.get(p) === specifier);
+  const declaring = (pathsByNamespace(namespaces, filePaths).get(specifier) ?? [])[0];
   return declaring ? { path: declaring, confidence: "heuristic" } : null;
 }

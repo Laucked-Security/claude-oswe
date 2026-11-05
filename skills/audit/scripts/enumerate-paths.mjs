@@ -25,8 +25,10 @@
 // Candidates. Every `route` node whose file is in partition.files and whose handler is non-null is a root
 // (a route with no handler produces nothing). From the handler, ONE shortest path per reachable function
 // is computed over `calls` edges of confidence `exact` or `name-only` that have a target (never
-// `unresolved`), through functions whose file is in partition.files only (the handler included: a route
-// whose handler lives in another partition produces nothing). Cost = (hops, name-only edge count),
+// `unresolved`), through functions in ANY file of the graph: only the root — the route and its handler —
+// is bound to partition.files (a route whose handler lives in another partition produces nothing), so a
+// path from this partition's route into a callee owned by another partition is still listed (a shared
+// helper is claimed by one partition only, see partition-graph.mjs). Cost = (hops, name-only edge count),
 // compared lexicographically; ties go to the predecessor with the smaller function id (plain string
 // comparison). It is a level-synchronous BFS with a secondary relaxation, so the work is linear in the
 // edges even when the number of distinct paths is exponential. max_depth bounds the length of a candidate
@@ -91,20 +93,23 @@ function checkInput(input) {
 
 // ---- graph index ------------------------------------------------------------------------------------
 
-// Everything the search needs, restricted to the partition's files, built in one pass over nodes and edges.
+// Everything the search needs, built in one pass over nodes and edges: the roots (routes in the partition's
+// files whose handler is in them too) and the call graph over every function of the graph.
 function indexGraph(graph, files) {
   const inPartition = new Set(files.map(pathKey));
   const has = (file) => inPartition.has(pathKey(file));
-  const fnById = new Map(); // id -> function node, partition functions only
-  const routes = []; // route nodes in the partition with a handler
+  const fnById = new Map(); // id -> function node, every file
+  const candidates = []; // route nodes in the partition with a handler
   const sinksByFn = new Map(); // function id -> sink nodes enclosed by it
   const push = (map, key, value) => (map.has(key) ? map.get(key).push(value) : map.set(key, [value]));
   for (const n of graph.nodes) {
-    if (n.type === "function" && has(n.file)) fnById.set(n.id, n);
-    else if (n.type === "route" && n.handler !== null && has(n.file)) routes.push(n);
+    if (n.type === "function") fnById.set(n.id, n);
+    else if (n.type === "route" && n.handler !== null && has(n.file)) candidates.push(n);
     else if (n.type === "sink" && n.enclosing_fn !== null) push(sinksByFn, n.enclosing_fn, n);
   }
-  const callees = new Map(); // function id -> [{ to, confidence }] between partition functions
+  // a root's handler must be a known function in the partition's files
+  const routes = candidates.filter((r) => fnById.has(r.handler) && has(fnById.get(r.handler).file));
+  const callees = new Map(); // function id -> [{ to, confidence }] between known functions
   for (const e of graph.edges) {
     if (e.type === "calls" && e.to !== null && FOLLOWED_CONFIDENCE.has(e.confidence) && fnById.has(e.from) && fnById.has(e.to)) {
       push(callees, e.from, { to: e.to, confidence: e.confidence });
@@ -152,7 +157,7 @@ function shortestPathTree(start, { callees }, maxDepth) {
 function rankingRecords(index, maxDepth) {
   const records = [];
   for (const route of index.routes) {
-    if (!index.fnById.has(route.handler)) continue; // handler unknown, or outside the partition
+    if (!index.fnById.has(route.handler)) continue; // handler unknown (indexGraph already dropped those outside the partition)
     const tree = shortestPathTree(route.handler, index, maxDepth);
     for (const [fnId, step] of tree) {
       for (const sink of index.sinksByFn.get(fnId) ?? []) {

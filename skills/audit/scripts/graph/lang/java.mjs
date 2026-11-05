@@ -46,7 +46,7 @@ import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
 import {
   lookup, field, namedOf as namedNodes, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, lastSegment,
-  newFrame, NO_FRAME, bind, innermostFunction, innermostClassScope, innermostClass, enclosingName
+  newFrame, NO_FRAME, bind, innermostFunction, innermostClassScope, innermostClass, enclosingName, pathsByBasename
 } from "./common.mjs";
 
 export const lang = { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true };
@@ -564,13 +564,17 @@ export function extractFile({ tree, path, surface }) {
 // a file whose namespace is unknown matches by its path ending in a/b/Z.java ("heuristic"). Several
 // matches yield the first by path, "heuristic". A package / wildcard specifier (no capitalised last
 // segment) names no file. `fromPath` / `configs` are part of the shared contract; Java ignores them.
+// resolve.mjs memoises resolveImportSpecifier per run on this key: the result depends on the specifier
+// alone (fromPath is not consulted).
+export const importCacheKey = ({ specifier }) => specifier;
+
 export function resolveImportSpecifier({ specifier, filePaths, namespaces }) {
   if (typeof specifier !== "string") return null;
   const segments = specifier.split(".");
   if (segments.length < 2 || segments.some((s) => s === "") || !/^[A-Z]/.test(segments.at(-1))) return null;
   const pkg = segments.slice(0, -1).join(".");
   const fileName = `${segments.at(-1)}.java`;
-  const candidates = [...filePaths].filter((p) => posix.basename(p) === fileName).sort();
+  const candidates = pathsByBasename(filePaths).get(fileName) ?? []; // sorted
   const exact = candidates.filter((p) => namespaces?.get(p) === pkg);
   if (exact.length) return { path: exact[0], confidence: exact.length === 1 ? "exact" : "heuristic" };
   const suffix = `${segments.slice(0, -1).join("/")}/${fileName}`;

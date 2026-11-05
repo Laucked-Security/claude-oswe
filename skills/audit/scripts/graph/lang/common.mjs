@@ -116,6 +116,40 @@ export function receiverClass(name, frames, moduleFrame) {
 
 // ---- import resolution ----------------------------------------------------------------------------
 
+// Path indexes built ONCE per filePaths Set (a run's Set is never mutated after it is built), so a
+// resolver never scans or sorts the whole set per specifier. Lists are in sorted path order.
+const basenameIndexes = new WeakMap(); // filePaths -> Map<basename, paths[]>
+export function pathsByBasename(filePaths) {
+  let index = basenameIndexes.get(filePaths);
+  if (!index) {
+    index = new Map();
+    for (const p of [...filePaths].sort()) {
+      const name = posix.basename(p);
+      if (index.has(name)) index.get(name).push(p);
+      else index.set(name, [p]);
+    }
+    basenameIndexes.set(filePaths, index);
+  }
+  return index;
+}
+
+// namespaces (Map<path, namespace | null>, built per resolveImports call) -> Map<namespace, paths[]>
+// over the paths also in filePaths.
+const namespaceIndexes = new WeakMap(); // namespaces -> { filePaths, index }
+export function pathsByNamespace(namespaces, filePaths) {
+  if (!namespaces) return new Map();
+  const cached = namespaceIndexes.get(namespaces);
+  if (cached && cached.filePaths === filePaths) return cached.index;
+  const index = new Map();
+  for (const [p, ns] of [...namespaces].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+    if (!filePaths.has(p)) continue;
+    if (index.has(ns)) index.get(ns).push(p);
+    else index.set(ns, [p]);
+  }
+  namespaceIndexes.set(namespaces, { filePaths, index });
+  return index;
+}
+
 // Repo-relative normal form; null when the path escapes the repository root.
 export function repoPath(path) {
   const normal = posix.normalize(path);

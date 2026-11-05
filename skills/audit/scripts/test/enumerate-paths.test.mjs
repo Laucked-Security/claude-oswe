@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { enumeratePaths, InputError } from "../enumerate-paths.mjs";
+import { partitionGraph } from "../partition-graph.mjs";
 import { validate } from "../validate-output.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -127,9 +128,12 @@ test("node golden: the DAO nosql sink is unreachable from any route, even with e
   assert.deepEqual(out.candidate_paths.map((c) => c.id), ["CP-all-1"]);
 });
 
-test("node golden: functions outside the partition's files are not traversed", () => {
+test("I1: node golden — hops cross into files outside the partition (only the root route and its handler are partition-bound)", () => {
   const out = enumeratePaths({ graph: golden("node"), partition: part(["routes/users.js"]) });
-  assert.deepEqual(out.candidate_paths, []);
+  assert.deepEqual(out.candidate_paths.map((c) => [c.route.path_pattern, c.hops.map((h) => h.file), c.sink.class]), [
+    ["/users/:id/run", ["routes/users.js", "services/userService.js", "services/userService.js"], "cmd-exec"]
+  ]);
+  assert.deepEqual(enumeratePaths({ graph: golden("node"), partition: part(["services/userService.js"]) }).candidate_paths, []); // no route there
 });
 
 test("max_depth bounds hops.length: 2 prunes the golden's 3-hop path, 3 (and the default 6) keep it, 1 keeps only handler-level sinks", () => {
@@ -399,7 +403,7 @@ test("a route whose handler lives outside the partition's files yields nothing",
   assert.equal(enumeratePaths({ graph, partition: part(["a.js", "ctl/c.js"]) }).candidate_paths.length, 1);
 });
 
-test("a function outside the partition is a wall: no path goes through it, even if a later hop is back inside", () => {
+test("I1: a function outside the partition is not a wall: hops traverse any file of the graph", () => {
   const graph = synth({
     fns: { h: "a.js", mid: "z.js", back: "a.js", direct: "a.js" },
     routes: [{ file: "a.js", auth: "authenticated", handler: "h" }],
@@ -407,8 +411,32 @@ test("a function outside the partition is a wall: no path goes through it, even 
     sinks: [{ fn: "back", class: "cmd-exec" }, { fn: "direct", class: "sql" }]
   });
   const out = enumeratePaths({ graph, partition: part(["a.js"]) });
-  assert.deepEqual(classes(out), ["sql"]);
-  assert.deepEqual(classes(enumeratePaths({ graph, partition: part(["a.js", "z.js"]) })), ["cmd-exec", "sql"]);
+  assert.deepEqual(classes(out), ["cmd-exec", "sql"]);
+  assert.deepEqual(out.candidate_paths[0].hops.map((h) => h.file), ["a.js", "z.js", "a.js"]);
+  assert.deepEqual(enumeratePaths({ graph, partition: part(["a.js", "z.js"]) }), { ...out, partition_id: "p" });
+});
+
+test("I1 (review probe): admin/ (authenticated) + public/ (unauthenticated) share lib/db.js — the unauthenticated partition owns it and gets the eval candidate", () => {
+  const graph = synth({
+    fns: { adminList: "admin/routes.js", publicSearch: "public/routes.js", query: "lib/db.js" },
+    routes: [
+      { file: "admin/routes.js", auth: "authenticated", handler: "adminList", path: "/admin/list" },
+      { file: "public/routes.js", auth: "unauthenticated", handler: "publicSearch", path: "/search" }
+    ],
+    calls: [["adminList", "query", "exact"], ["publicSearch", "query", "exact"]],
+    sinks: [{ fn: "query", class: "eval", callee: "eval" }]
+  });
+  const partitions = partitionGraph({ graph, fallback_partitions: [] }).partitions;
+  assert.deepEqual(partitions.map((p) => [p.partition_id, p.files]), [
+    ["g-node-authenticated-admin", ["admin/routes.js"]],
+    ["g-node-unauthenticated-public", ["lib/db.js", "public/routes.js"]]
+  ]);
+  const byId = Object.fromEntries(partitions.map((p) => [p.partition_id, enumeratePaths({ graph, partition: p }).candidate_paths]));
+  assert.deepEqual(byId["g-node-unauthenticated-public"].map((c) => [c.id, c.route.path_pattern, c.route.auth, c.sink.class, c.hops.map((h) => h.function)]), [
+    ["CP-g-node-unauthenticated-public-1", "/search", "unauthenticated", "eval", ["publicSearch", "query"]]
+  ]);
+  // the authenticated partition does not own lib/db.js, yet its own route's path still crosses into it
+  assert.deepEqual(byId["g-node-authenticated-admin"].map((c) => [c.route.path_pattern, c.sink.class]), [["/admin/list", "eval"]]);
 });
 
 test("one candidate per (route, sink): two routes sharing a handler give two candidates for the same sink", () => {
