@@ -2,3 +2,4 @@ benchmark/results/nodegoat-baseline.json text eol=lf
 benchmark/results/nodegoat-data-supplemental.json text eol=lf
 # Vendored tree-sitter outputs are hashed byte-for-byte by .github/scripts/check-vendor.mjs — never EOL-convert.
 skills/audit/vendor/tree-sitter/* -text
+test-fixtures/graph/** text eol=lf

@@ -142,14 +142,13 @@ const currentFrame = (st) => st.fnStack.at(-1) ?? st.module;
 const firstMatch = (patterns, candidates) => patterns.find((p) => candidates.some((c) => matchesPattern(p, c))) ?? null;
 const sourceKind = (pattern) => lookup(SOURCE_KINDS, pattern.normalized.split(".").at(-1).toLowerCase()) ?? "body";
 
-// At most one source and one sink per AST node: the first matching pattern in surface order.
-function emitMatches(node, candidates, st, { sources = false, sinks = false }) {
+// At most one source and one sink per AST node: the first matching pattern in surface order. A sink
+// derived from a call / `new` is positioned at the callee anchor (`sinkAt`, see calleeAnchor).
+function emitMatches(node, candidates, st, { sources = false, sinks = false, sinkAt = node }) {
   const source = sources ? firstMatch(st.surface.sources, candidates) : null;
   const sink = sinks ? firstMatch(st.surface.sinks, candidates) : null;
-  if (!source && !sink) return;
-  const at = { line: lineOf(node), start_byte: node.startIndex };
-  if (source) st.sources.push({ ...at, kind: sourceKind(source), pattern: source.raw });
-  if (sink) st.sinks.push({ ...at, class: sinkClassFor(sink.normalized, "node"), callee: candidates[0].text, pattern: sink.raw });
+  if (source) st.sources.push({ line: lineOf(node), start_byte: node.startIndex, kind: sourceKind(source), pattern: source.raw });
+  if (sink) st.sinks.push({ line: lineOf(sinkAt), start_byte: sinkAt.startIndex, class: sinkClassFor(sink.normalized, "node"), callee: candidates[0].text, pattern: sink.raw });
 }
 
 const inChain = (ctx) => CHAIN_SLOTS.get(ctx.parentType) === ctx.field || ctx.parentType === "decorator";
@@ -173,7 +172,7 @@ function onNew(node, st) {
   if (!ctor) return;
   const text = textOf(ctor);
   // The surface spells constructor sinks `new Function`, which normalizes to `newFunction`.
-  emitMatches(node, [{ category: "new", text }, { category: "new", text: `new${text}` }], st, { sinks: true });
+  emitMatches(node, [{ category: "new", text }, { category: "new", text: `new${text}` }], st, { sinks: true, sinkAt: calleeAnchor(ctor, node) });
 }
 
 function onString(node, st, ctx) {
@@ -425,6 +424,15 @@ function expressRoute(call, fn, args, st) {
   });
 }
 
+// Position of a call / `new`: the callee's final identifier (the property of a member callee), so
+// chained calls (`a.b().c()`) and their sinks get distinct offsets. Any other callee shape (`f()()`,
+// `(0, f)()`) falls back to the argument list, or to the expression itself.
+function calleeAnchor(callee, expression) {
+  if (callee.type === "identifier") return callee;
+  if (callee.type === "member_expression") return field(callee, "property") ?? callee;
+  return field(expression, "arguments") ?? expression;
+}
+
 function receiverOf(fn) {
   if (fn.type !== "member_expression") return { receiver: null, name: null };
   let root = field(fn, "object");
@@ -445,13 +453,16 @@ function onCall(node, st, ctx) {
     return;
   }
   const calleeText = textOf(fn);
+  // `require('literal')` is an import, never a sink; only a dynamic require is an `include` sink.
+  const literalRequire = calleeText === "require" && args[0]?.type === "string";
   if (calleeText === "require" && !st.requireImports.has(node.startIndex)) {
-    if (args[0]?.type === "string") st.imports.push({ line: lineOf(node), specifier: stringContent(args[0]), bindings: [], local: null });
+    if (literalRequire) st.imports.push({ line: lineOf(node), specifier: stringContent(args[0]), bindings: [], local: null });
     else st.notExtracted.add("dynamic require");
   }
   const { receiver, name } = receiverOf(fn);
-  st.calls.push({ node, calleeText, receiver, receiverName: name, frames: [...st.fnStack] });
-  emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: true });
+  const anchor = calleeAnchor(fn, node);
+  st.calls.push({ anchor, calleeText, receiver, receiverName: name, frames: [...st.fnStack] });
+  emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: !literalRequire, sinkAt: anchor });
   if (fn.type === "member_expression") expressRoute(node, fn, args, st);
 }
 
@@ -624,12 +635,12 @@ function receiverClass(name, frames, moduleFrame) {
   return moduleFrame.classOf.get(name) ?? null;
 }
 
-function finishCall({ node, calleeText, receiver, receiverName, frames }, st) {
+function finishCall({ anchor, calleeText, receiver, receiverName, frames }, st) {
   const names = new Set(st.module.bindings);
   for (const frame of frames) for (const name of frame.bindings) names.add(name);
   return {
-    line: lineOf(node),
-    start_byte: node.startIndex,
+    line: lineOf(anchor),
+    start_byte: anchor.startIndex,
     callee_text: calleeText,
     enclosing_start_byte: frames.at(-1)?.startIndex ?? null,
     receiver,

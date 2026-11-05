@@ -39,7 +39,8 @@ async function extractTree(mod, stack, dir) {
   const surface = loadSurface(stack, REFERENCES_DIR);
   const files = [];
   for (const path of listSupportedFiles(dir)) {
-    const sourceText = readFileSync(join(dir, path), "utf8");
+    // CRLF checkouts are read as LF so offsets match the committed (eol=lf) fixture on every platform.
+    const sourceText = readFileSync(join(dir, path), "utf8").replace(/\r\n/g, "\n");
     const tree = await parseSource(langIdForFile(path), sourceText);
     try {
       const extract = mod.extractFile({ tree, path, sourceText, frameworks: mod.lang.frameworks, surface });

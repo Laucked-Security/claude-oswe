@@ -21,7 +21,8 @@ async function extract(sourceText, { langId = "javascript", path = "src/a.js" } 
   }
 }
 
-const extractFixture = (path) => extract(readFileSync(join(FIXTURE_DIR, path), "utf8"), { path });
+// CRLF checkouts are read as LF so offsets match the committed (eol=lf) fixture on every platform.
+const extractFixture = (path) => extract(readFileSync(join(FIXTURE_DIR, path), "utf8").replace(/\r\n/g, "\n"), { path });
 const names = (list) => list.map((x) => x.name);
 
 test("lang descriptor", () => {
@@ -139,6 +140,24 @@ test("one sink per call: the callee member is not a second sink; new Function an
     [4, "cmd-exec", "execSync", "execSync"],
     [5, "cmd-exec", "execFile", "execFile"]
   ]);
+});
+
+test("a literal require is an import, not a sink; a dynamic require is an include sink", async () => {
+  const x = await extract("const a = require('./a');\nrequire(name);\n");
+  assert.deepEqual(x.sinks.map((s) => [s.line, s.class, s.pattern]), [[2, "include", "require("]]);
+  assert.deepEqual(x.imports.map((i) => i.specifier), ["./a"]);
+  assert.deepEqual(x.not_extracted, ["dynamic require"]);
+});
+
+test("calls and their sinks are anchored at the callee's final identifier", async () => {
+  const chained = "a.b().c();\n";
+  const x = await extract(chained);
+  assert.deepEqual(x.calls.map((c) => [c.callee_text, c.start_byte]), [["a.b", chained.indexOf("b")], ["a.b.c", chained.indexOf("c")]]);
+  // `exec` alone is not a node surface sink; `execSync` is.
+  const oneLine = "execSync(a); eval(b); new Function(c);\n";
+  const y = await extract(oneLine);
+  assert.deepEqual(y.sinks.map((s) => [s.pattern, s.start_byte]), [["execSync", 0], ["eval(", oneLine.indexOf("eval")], ["new Function", oneLine.indexOf("Function")]]);
+  assert.equal(new Set(y.sinks.map((s) => s.start_byte)).size, 3);
 });
 
 test("source kinds and one source per member chain", async () => {
