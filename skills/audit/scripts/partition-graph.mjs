@@ -7,7 +7,8 @@
 // API: partitionGraph({ graph, fallback_partitions })
 //        -> { mode: "graph" | "fallback", partitions: [{ partition_id, stack, files }], orphan_partition_ids }
 //      throws InputError (message "bad input: ...") on malformed input. `graph` is the graph object
-//      itself or null (the orchestrator unwraps build-graph's { graph: null, reason } envelope);
+//      itself or null — the API never sees build-graph's { graph: null, reason } envelope: the CLI's
+//      --graph <path> unwraps it (see CLI below);
 //      `fallback_partitions` is the orchestrator's own directory partitioning.
 //
 // CLI: node partition-graph.mjs --file <in.json> --out <out.json> [--graph <graph.json>]

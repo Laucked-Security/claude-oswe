@@ -498,3 +498,19 @@ test("CLI --graph <path>: a golden file = the inline API call; envelopes; inline
   assert.equal(inv.status, 1, "validate(graph) still applies to the loaded graph");
   assert.match(inv.stderr, /schema/);
 });
+
+test("CLI --graph value guards: --graph with no value, or followed by the next flag, is a usage error (exit 2)", (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-partition-graph-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const inFile = join(dir, "in.json");
+  const outFile = join(dir, "out.json");
+  writeFileSync(inFile, JSON.stringify({ graph: null, fallback_partitions: [] }));
+  const noValue = spawnSync(process.execPath, [CLI, "--file", inFile, "--out", outFile, "--graph"], { encoding: "utf8" });
+  assert.equal(noValue.status, 2, noValue.stderr);
+  assert.match(noValue.stderr, /usage/);
+  assert.equal(existsSync(outFile), false, "no output on a usage error");
+  const nextFlag = spawnSync(process.execPath, [CLI, "--file", inFile, "--graph", "--out", outFile], { encoding: "utf8" });
+  assert.equal(nextFlag.status, 2, nextFlag.stderr);
+  assert.match(nextFlag.stderr, /usage/);
+  assert.equal(existsSync(outFile), false, "no output on a usage error");
+});

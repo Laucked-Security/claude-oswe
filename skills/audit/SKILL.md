@@ -39,8 +39,9 @@ never outlive the audit. Rules:
   `candidate-paths-in-<token>.json` / `candidate-paths-<token>.json` (§3) and
   `structural-in-<token>.json` (§5.5).
 - **Exactly two files outlive a single helper call:** the app graph
-  `graph-<token>.json` (written in §1.5, read by §2, §3, §5.5 and §7) and the structural result
-  `structural-<token>.json` (written in §5.5, read by §6 and §6b). Keep them **out** of the
+  `graph-<graph-token>.json` (written in §1.5, read by §2, §3, §5.5 and §7) and the structural result
+  `structural-<structural-token>.json` (written in §5.5, read by §6 and §6b). Each has its own literal
+  token, chosen once where the file is written and reused wherever it is named. Keep them **out** of the
   per-call `trap` and delete them with the rest of `.oswe/tmp/` at audit end / abort (below). They hold
   identifiers, paths and line numbers only — no source text, no secrets — but they live **only** in
   `.oswe/tmp/` (plus build-graph's own checkpoint cache entry for the graph) and are never copied elsewhere.
@@ -130,28 +131,35 @@ helper. **Do not build or reason about the graph by hand.** Write
 to a literal temp file, where `frameworks` uses **only** the ids `express`, `nest`, `flask`, `django`,
 `fastapi`, `spring`, `laravel`, `symfony`, `aspnet` (a detected framework outside this list is simply
 omitted — its files are still parsed, just without a route extractor). Omit `excludes`: the helper's
-defaults mirror the recon exclusion list above. Then run inside a `trap` that removes **only the input**:
-`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-in-<token>.json"' EXIT;
-  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/graph/build-graph.mjs"
-    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-in-<token>.json"
-    --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<token>.json"
-    --checkpoint-dir "${checkpoint_dir}" )`.
-**Keep `graph-<token>.json` for the whole run** (see Temp-file hygiene) — §2, §3, §5.5 and §7 read it
-under this same literal token.
+defaults mirror the recon exclusion list above. Choose the run-long literal **`<graph-token>`** now
+(e.g. `g4b81d2c`) and **reuse this literal token wherever the graph file is named** (§2, §3, §5.5, §7);
+per-call files keep a fresh `<token>` each time. Run inside a `trap` that removes **only the input**:
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-in-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/graph/build-graph.mjs" \
+    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-in-<token>.json" \
+    --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --checkpoint-dir "${checkpoint_dir}" )
+# the subshell's exit status IS build-graph's (0 ok, graph or null envelope / 1 malformed input / 2 IO)
+```
+
+**Keep `graph-<graph-token>.json` for the whole run** (see Temp-file hygiene).
 On a resume the helper prints `build-graph: cache hit` on stderr and rewrites the identical graph.
 - **`graph` in orchestration state.** Exit 0 with an object carrying `nodes[]` ⇒ `graph` = that file.
   Exit 0 with `{ "graph": null, "reason": "<…>" }`, **or** exit 1 (malformed input) / exit 2 (IO) ⇒
   `graph = null`, `graph_reason` = the `reason` (or the printed message) — on exit 1/2, also write
-  `{ "graph": null, "reason": "<that message>" }` to `graph-<token>.json` with the file tool, so the file
-  always exists for `--graph` below — and record in Coverage:
+  `{ "graph": null, "reason": "<that message>" }` to `graph-<graph-token>.json` with the file tool, so the
+  file always exists for `--graph` below — and record in Coverage:
   `App graph unavailable: <reason> — partitions, candidate paths and structural checks fell back to pre-SP10 behaviour.`
   **Building the graph never aborts the audit**; with `graph = null` every later phase behaves as
   before SP10 (§2 partition-graph returns your own partitions, §3 skips enumerate-paths, §5.5 reports
   everything `n/a`, §6b's structural rule then changes nothing).
 - **Passing the graph to a helper.** §2, §3 and §5.5 hand the graph to their helper **by path** with
-  `--graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<token>.json"`; their `--file` inputs stay small and
-  carry no `graph` key. The helpers read `{ "graph": null, "reason" }` as `graph = null`. Never re-type
-  the graph: read only its `stats` for the report (§7), and never paste nodes or edges into a prompt.
+  `--graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json"`; their `--file` inputs stay small
+  and carry no `graph` key. The helpers read `{ "graph": null, "reason" }` as `graph = null`. Never
+  re-type the graph: read only its `stats` for the report (as §7 describes), and never paste nodes or
+  edges into a prompt.
 
 ### 2. Partition & prioritize
 Partition the surface **by module / framework / authentication boundary** (never one agent per
@@ -160,13 +168,19 @@ partitions (`{ partition_id, stack, files: [repo-rel paths] }`) are the **fallba
 re-cuts them by route reachability with the tested helper. Write
 `{ "fallback_partitions": [<the partitions above>] }` to a literal temp file and run, under the usual
 `trap` (the graph goes by path, per §1.5 — also when it is the `graph: null` envelope):
-`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"' EXIT;
-  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/partition-graph.mjs"
-    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-in-<token>.json"
-    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<token>.json"
-    --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"
-  rc=$?; cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"; exit "$rc" )`
-→ `{ mode, partitions, orphan_partition_ids }` (keep the printed JSON). **Use the returned `partitions`
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/partition-graph.mjs" \
+    --file  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-in-<token>.json" \
+    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --out   "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"
+  rc=$?                                                              # capture BEFORE cat
+  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"      # <-- THIS stdout is the result you keep
+  exit "$rc" )                                                       # preserve the CLI's exit code
+```
+
+→ `{ mode, partitions, orphan_partition_ids }` (keep the printed JSON; the `--out` file is gone with the trap). **Use the returned `partitions`
 for everything after** (SARIF lead assignment below, §2.5, §3, §7), and note `mode`
 (`graph` | `fallback`) and `orphan_partition_ids` for the report's App graph section. With
 `graph = null`, or a graph with no routes, `mode` is `fallback` and `partitions` is byte-for-byte your
@@ -205,12 +219,18 @@ the rest become ranked, justified gaps (never an opaque wall).
 **Candidate paths before each analyzer dispatch (SP10).** For each partition in `analyze[]` (inline or
 subagent), when `graph` is non-null, write `{ "partition": <that partition's record from §2> }` to a
 literal temp file and run under the usual `trap`:
-`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"' EXIT;
-  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/enumerate-paths.mjs"
-    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-in-<token>.json"
-    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<token>.json"
-    --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"
-  rc=$?; cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"; exit "$rc" )`
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/enumerate-paths.mjs" \
+    --file  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-in-<token>.json" \
+    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --out   "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"
+  rc=$?                                                                # capture BEFORE cat
+  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"   # <-- THIS stdout is the result you keep
+  exit "$rc" )                                                         # preserve the CLI's exit code
+```
+
 → `{ partition_id, candidate_paths: [ { id, route, hops, sink, min_confidence } ] }` (≤ 50, ranked).
 Exit 1 = malformed input (our bug — fix the call); exit 2 = IO/usage → fix the call. **With
 `graph = null`, do not run it: `candidate_paths` = `[]`.** Pass the `candidate_paths` array to the
@@ -362,14 +382,21 @@ After §5 and **before** §6, check every aggregated finding (source → sink) a
 transition against the graph with the tested helper — **it runs even with `graph = null`** (everything
 is then `n/a`, reason `graph unavailable`). Write `{ "findings": [<every aggregated finding from §4>],
 "chains": [<every validated chain from §5>] }` to a literal temp file and run under a `trap` that removes
-**only the input** (the graph goes by path, per §1.5 — also when it is the `graph: null` envelope):
-`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-in-<token>.json"' EXIT;
-  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/check-chain-structure.mjs"
-    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-in-<token>.json"
-    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<token>.json"
-    --out "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-<token>.json" )`.
-**Keep `structural-<token>.json` until §6b has consumed it** (purged with the rest of `.oswe/tmp/`).
-Read it into orchestration state as `structural` = `{ findings: { "OSWE-N": { structural_path, reason } },
+**only the input** (the graph goes by path, per §1.5 — also when it is the `graph: null` envelope).
+Choose the run-long literal **`<structural-token>`** now and **reuse this literal token wherever the
+structural file is named** (§6b):
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-in-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/check-chain-structure.mjs" \
+    --file  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-in-<token>.json" \
+    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --out   "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-<structural-token>.json" )
+# the subshell's exit status IS the helper's (0 ok / 1 malformed input / 2 IO|usage)
+```
+
+**Keep `structural-<structural-token>.json` until §6b has consumed it** (purged with the rest of
+`.oswe/tmp/`). Read it into orchestration state as `structural` = `{ findings: { "OSWE-N": { structural_path, reason } },
 transitions: { "CHAIN-N": [ { index, structural_path, reason } ] } }`, where `structural_path` is
 `proven` (same function, or a forward call path over exact edges), `absent` (the graph saw both ends
 and found **no** call path within six edges) or `n/a` (anything the graph cannot decide). Exit 1 =
@@ -478,7 +505,7 @@ does **not** remove the structural file — it is purged with `.oswe/tmp/` at th
   node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/apply-verdicts.mjs" \
     --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" \
     --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json" \
-    --structural "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-<token>.json" \
+    --structural "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-<structural-token>.json" \
     --checkpoint-dir "${checkpoint_dir}"
   rc=$?                                                           # capture BEFORE cat
   cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"      # <-- THIS stdout is the result you keep
@@ -549,7 +576,10 @@ aggregated analyzer coverage (`analyzed`, `skipped`); `findings`/`chains`/`verdi
 validated objects; `lead_adjudications` = the per-lead outcomes (only when `--sarif` leads were
 ingested); `app_graph` (SP10, always present) = `{ "available": true, "stats": <graph.stats, verbatim> }`
 when `graph` is non-null, else `{ "available": false, "reason": "<graph_reason from §1.5>" }` — **never**
-set `multi_file_chain_count` yourself (the helper computes it from the chains) — write it to a literal `.oswe/tmp/` path (file tool, no shell interpolation), and run the
+set `multi_file_chain_count` yourself (the helper computes it from the chains). **Reading `stats`
+without loading the graph:** read only the leading part of `graph-<graph-token>.json` (its top-level keys
+are ordered `version`, `generated_by`, `stats`, `nodes`, `edges`), copy the `stats` object verbatim, and
+never load `nodes`/`edges` into context. Write the parts object to a literal `.oswe/tmp/` path (file tool, no shell interpolation), and run the
 tested helper under the usual `trap`:
 `( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/write-report.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" )`.
 Like the HTML, **`report.json` can never fail the audit**: on a non-zero exit (1 = the parts failed
@@ -602,7 +632,7 @@ and resume from. (`.md` not written = real abort; HTML-only failure = clean exit
 
 **Then purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (the report is `[REDACTED]`-safe; the
 raw intermediate files are not — see Temp-file hygiene). This also removes the two run-long SP10 files,
-`graph-<token>.json` and `structural-<token>.json`. This runs on the success path; on any abort
+`graph-<graph-token>.json` and `structural-<structural-token>.json`. This runs on the success path; on any abort
 earlier in the pipeline, purge before exiting too.
 
 ## Validation
@@ -655,8 +685,8 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
     the annex (§ “Dismissed findings”) with its reason.
   - Findings with `vuln_class:”trust-boundary”` are **excluded** here; they appear instead in the
     dedicated **Hygiene / Trust-boundary** section below.
-  - **Structural (SP10)**: each block — and the findings table, as a `Structural` column — shows the
-    finding's `structural_path` (`proven` / `absent` / `n/a`) and any `verification_notes` (e.g.
+  - **Structural (SP10)**: in each finding block, a `Structural:` line showing the finding's
+    `structural_path` (`proven` / `absent` / `n/a`) and any `verification_notes` (e.g.
     `structural: absent` = confidence capped to `to verify`). A chain carrying `structural: member cap`
     shows that note in its Exploit chains block.
 - **Hygiene / Trust-boundary (CWE-501)**: a **separate** section, placed after exploit findings and
