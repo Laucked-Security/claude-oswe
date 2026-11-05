@@ -3,7 +3,9 @@
 // a candidate is `{ category, text }` built by an extractor from one AST node, where `text` has
 // already been through normalizeToken. Each shape accepts a fixed set of candidate categories and
 // compares on `.`-separated segments (spec §2.5):
-//   call       call/new/member        text equals the pattern or ends with "." + pattern
+//   call       call/new/member        a dotted pattern: text equals it or ends with "." + pattern;
+//                                     a bare pattern (`eval(`, `exec(`): text equals it — a bare builtin
+//                                     never matches a method of the same name (`self.exec`)
 //   member     call                   last segment equals the pattern
 //   decorator  decorator              first segment equals the pattern
 //   chain      member/identifier/call text equals the pattern or starts with pattern + "."
@@ -28,7 +30,7 @@ const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
 const firstSegment = (text) => text.split(".", 1)[0];
 
 const COMPARE_BY_SHAPE = {
-  call: (text, p) => text === p || text.endsWith("." + p),
+  call: (text, p) => text === p || (p.includes(".") && text.endsWith("." + p)),
   member: (text, p) => lastSegment(text) === p,
   decorator: (text, p) => firstSegment(text) === p,
   chain: (text, p) => text === p || text.startsWith(p + "."),

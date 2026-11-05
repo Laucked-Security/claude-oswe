@@ -340,6 +340,14 @@ test("(6) a router mounted twice keeps the first mount; AllowAnonymous forces un
   assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["mount:r(mounted twice)"]);
 });
 
+test("(6) mounted paths keep the child's trailing slash, add none, and a bare / child is the mount path", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "app.js", "const r = require('./r');\napp.use('/api', r);\n");
+  put(dir, "r.js", "router.get('/ping/', (req, res) => {});\nrouter.get('/', (req, res) => {});\nrouter.get('/:id/run', (req, res) => {});\nmodule.exports = router;\n");
+  const { graph } = await build(dir);
+  assert.deepEqual(nodesOf(graph, "route").map((r) => r.path_pattern).sort(), ["/api", "/api/:id/run", "/api/ping/"]);
+});
+
 // ---- (7) cache ------------------------------------------------------------------------------------
 
 test("(7) cache: a second CLI run hits; editing the reference page or tsconfig.json misses", async (t) => {
@@ -459,19 +467,20 @@ test("(9) building every test-fixtures/graph/* tree takes < 2 s once the parser 
 // ---- (10) goldens ----------------------------------------------------------------------------------
 
 test("(10) every test-fixtures/graph/<stack>/graph.expected.json equals the rebuilt graph byte-for-byte", async () => {
+  // OSWE_UPDATE_GOLDEN=1 (re)writes the golden of every fixture directory, creating missing ones.
+  const update = process.env.OSWE_UPDATE_GOLDEN === "1";
   const stacks = readdirSync(FIXTURES_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && existsSync(join(FIXTURES_DIR, d.name, "graph.expected.json")))
+    .filter((d) => d.isDirectory() && (update || existsSync(join(FIXTURES_DIR, d.name, "graph.expected.json"))))
     .map((d) => d.name)
     .sort();
-  if (process.env.OSWE_UPDATE_GOLDEN !== "1") assert.ok(stacks.includes("node"), "the node golden is missing");
-  const targets = process.env.OSWE_UPDATE_GOLDEN === "1" && !stacks.includes("node") ? [...stacks, "node"] : stacks;
-  for (const stack of targets) {
+  if (!update) assert.ok(stacks.includes("node"), "the node golden is missing");
+  for (const stack of stacks) {
     const dir = realpathSync(join(FIXTURES_DIR, stack));
     const { graph, reason } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: [stack], frameworks: goldenFrameworks(stack), referencesDir: REFERENCES_DIR });
     assert.ok(graph, reason);
     const text = JSON.stringify(graph, null, 2) + "\n";
     const golden = join(dir, "graph.expected.json");
-    if (process.env.OSWE_UPDATE_GOLDEN === "1") writeFileSync(golden, text);
+    if (update) writeFileSync(golden, text);
     else assert.equal(text, readFileSync(golden, "utf8"), `${stack} golden drifted (rebuild with OSWE_UPDATE_GOLDEN=1 and review)`);
   }
 });

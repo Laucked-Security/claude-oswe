@@ -230,7 +230,7 @@
       "file": "api/urls.py",
       "line": 9,
       "http_method": "ANY",
-      "path_pattern": "/api/ping",
+      "path_pattern": "/api/ping/",
       "handler": "e38e5a5673e9",
       "middlewares": [],
       "framework": "django",
@@ -269,7 +269,7 @@
       "line": 6,
       "http_method": "ANY",
       "path_pattern": "/run/",
-      "handler": null,
+      "handler": "fc4b2cacaaad",
       "middlewares": [],
       "framework": "django",
       "auth": "unauthenticated"
@@ -283,16 +283,6 @@
       "class": "cmd-exec",
       "callee": "subprocess.run",
       "pattern": "subprocess.run"
-    },
-    {
-      "type": "sink",
-      "id": "cd50fae1a1da",
-      "file": "services/runner.py",
-      "line": 11,
-      "enclosing_fn": "2b57fce28668",
-      "class": "eval",
-      "callee": "self.exec",
-      "pattern": "exec("
     },
     {
       "type": "source",
@@ -381,6 +371,11 @@
       "type": "handles",
       "from": "a21964613cf3",
       "to": "fb04ec51d1e0"
+    },
+    {
+      "type": "handles",
+      "from": "a8c5905b7bdb",
+      "to": "fc4b2cacaaad"
     },
     {
       "type": "imports",

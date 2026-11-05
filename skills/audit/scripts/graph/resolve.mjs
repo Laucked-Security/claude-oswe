@@ -13,6 +13,10 @@
 //     composerJson, pyproject, setupCfg, read: [{ path, sha256 }], errors: [{ file, message }] }
 //   resolveImports(files, { langModules, filePaths, configs })
 //     -> Map<"<fromPath>\0<specifier>", { path, confidence }>   (unresolvable specifiers absent)
+//     plus, for a language declaring `lang.submoduleImports: true` (Python: `from pkg import sub` may
+//     name the module pkg.sub), "<fromPath>\0<specifier>\0<imported>" entries for each named binding
+//     whose target does not export `imported` (or does not resolve) while the submodule specifier
+//     resolves; such a binding then acts as a namespace binding to that module.
 //   buildClassIndex(files, importMap) -> { byName: Map<name, [{ path, name, extends, methods,
 //     start_byte }]>, byKey: Map<"<path>\0<start_byte>", entry>, parentOf: Map<key, { entry,
 //     confidence } | null>, childrenOf: Map<key, entry[]>, danglingByName: Map<name, entry[]> }
@@ -111,7 +115,30 @@ export function resolveImports(files, { langModules, filePaths, configs }) {
       if (hit && filePaths.has(hit.path)) importMap.set(importKey(file.path, specifier), { path: hit.path, confidence: hit.confidence });
     }
   }
+  resolveSubmodules(sorted, { langModules, filePaths, configs, namespaces, importMap });
   return importMap;
+}
+
+const submoduleKey = (fromPath, specifier, imported) => `${fromPath}\u0000${specifier}\u0000${imported}`;
+// `from . import views` -> ".views"; `from .x import views` -> ".x.views"; `from a.b import c` -> "a.b.c".
+const submoduleSpecifier = (specifier, imported) => (specifier.endsWith(".") ? `${specifier}${imported}` : `${specifier}.${imported}`);
+
+function resolveSubmodules(sorted, { langModules, filePaths, configs, namespaces, importMap }) {
+  const exportsOf = new Map(sorted.map((f) => [f.path, new Set((f.extract.exports ?? []).map((e) => e.name))]));
+  for (const file of sorted) {
+    const mod = langModules.get(file.langId);
+    if (mod?.lang?.submoduleImports !== true || typeof mod.resolveImportSpecifier !== "function") continue;
+    for (const { specifier, bindings } of file.extract.imports) {
+      if (!Array.isArray(bindings)) continue;
+      const target = importMap.get(importKey(file.path, specifier));
+      for (const { imported } of bindings) {
+        const key = submoduleKey(file.path, specifier, imported);
+        if (importMap.has(key) || (target && exportsOf.get(target.path)?.has(imported))) continue;
+        const hit = mod.resolveImportSpecifier({ specifier: submoduleSpecifier(specifier, imported), fromPath: file.path, filePaths, configs, namespaces });
+        if (hit && filePaths.has(hit.path)) importMap.set(key, { path: hit.path, confidence: hit.confidence });
+      }
+    }
+  }
 }
 
 // The import that binds `local` in a file, as { specifier, form: named|default|namespace, imported }.
@@ -132,6 +159,17 @@ function importBinding(extract, local) {
 
 function context(files, importMap, classIndex) {
   return { extracts: new Map(files.map((f) => [f.path, f.extract])), importMap, classIndex };
+}
+
+// The import binding of `local` in a file with its resolved target: { binding, resolved | null }, or
+// null when no import binds it. A named binding with a resolved submodule (see resolveImports) is
+// read as a namespace binding to that module.
+function boundImport(ctx, fromPath, local) {
+  const binding = importBinding(ctx.extracts.get(fromPath), local);
+  if (!binding) return null;
+  const submodule = binding.form === "named" ? ctx.importMap.get(submoduleKey(fromPath, binding.specifier, binding.imported)) : null;
+  if (submodule) return { binding: { specifier: binding.specifier, form: "namespace", imported: null }, resolved: submodule };
+  return { binding, resolved: ctx.importMap.get(importKey(fromPath, binding.specifier)) ?? null };
 }
 
 const functionsIn = (ctx, path) => ctx.extracts.get(path)?.functions ?? [];
@@ -183,9 +221,9 @@ function importedClass(ctx, binding, targetPath) {
 function lookupClass(name, fromPath, ctx) {
   const local = classesIn(ctx, fromPath, name);
   if (local.length) return local.length === 1 ? { entry: local[0], confidence: "exact" } : null;
-  const binding = importBinding(ctx.extracts.get(fromPath), name);
-  if (binding) {
-    const resolved = ctx.importMap.get(importKey(fromPath, binding.specifier));
+  const bound = boundImport(ctx, fromPath, name);
+  if (bound) {
+    const { binding, resolved } = bound;
     const entry = resolved ? importedClass(ctx, binding, resolved.path) : null;
     return entry ? { entry, confidence: weaker("exact", resolved.confidence) } : null;
   }
@@ -275,8 +313,7 @@ function sameFileClass(ctx, path, name) {
 }
 
 // Rule 2 for a bare callee bound by an import.
-function importedFunction(fromPath, binding, ctx) {
-  const resolved = ctx.importMap.get(importKey(fromPath, binding.specifier));
+function importedFunction({ binding, resolved }, ctx) {
   if (!resolved) return null;
   const fn = binding.form === "named" ? exportedFunction(ctx, resolved.path, binding.imported) : defaultExportFunction(ctx, resolved.path);
   return fn ? target(resolved.path, fn, weaker("exact", resolved.confidence)) : null;
@@ -292,8 +329,8 @@ function resolveBare(site, name, ctx) {
     const member = methodTarget(sameFileClass(ctx, site.path, ownClass), name, ctx, 0);
     if (member) return member;
   }
-  const binding = importBinding(ctx.extracts.get(site.path), name);
-  if (binding) return importedFunction(site.path, binding, ctx);
+  const bound = boundImport(ctx, site.path, name);
+  if (bound) return importedFunction(bound, ctx);
   const definitions = (ctx.definitionsByName.get(name) ?? []).filter((d) => site.implicitThis || d.fn.class == null);
   return definitions.length === 1 ? target(definitions[0].path, definitions[0].fn, "name-only") : null;
 }
@@ -304,10 +341,9 @@ function resolveBare(site, name, ctx) {
 function resolveImportMember(site, segments, ctx) {
   if (segments.length !== 2) return null;
   const [head, member] = segments;
-  const binding = importBinding(ctx.extracts.get(site.path), head);
-  if (!binding) return null;
-  const resolved = ctx.importMap.get(importKey(site.path, binding.specifier));
-  if (!resolved) return null;
+  const bound = boundImport(ctx, site.path, head);
+  if (!bound?.resolved) return null;
+  const { binding, resolved } = bound;
   const confidence = weaker("exact", resolved.confidence);
   if (binding.form === "namespace") {
     const fn = exportedFunction(ctx, resolved.path, member);

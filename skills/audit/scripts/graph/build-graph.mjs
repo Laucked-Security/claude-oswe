@@ -251,10 +251,12 @@ function resolveAll(parsed, langModules, configs, filePaths) {
 
 // ---- stage 5: routes, mounts, auth ----------------------------------------------------------------
 
-// Mounted path: collapse `//`; a trailing `/` is dropped except on a lone `/` (as Nest prefixes are).
+// Mounted path: collapse `//`; the child's own trailing `/` is kept (Django `api/` + `ping/` ->
+// `/api/ping/`) and none is added (`/users` + `/:id/run`); a bare `/` child is the prefix itself.
 function joinPath(prefix, own) {
   const joined = `${prefix}/${own}`.replace(/\/{2,}/g, "/");
-  return joined.length > 1 ? joined.replace(/\/$/, "") : joined;
+  if (joined.length === 1) return joined;
+  return own.endsWith("/") && own.replace(/^\/+/, "") !== "" ? joined : joined.replace(/\/$/, "");
 }
 
 // Express prefix semantics: `/` matches everything; `/a` matches `/a` and `/a/...`, never `/ab`.

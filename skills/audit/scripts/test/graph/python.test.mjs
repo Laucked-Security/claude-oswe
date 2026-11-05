@@ -29,7 +29,7 @@ const names = (list) => list.map((x) => x.name);
 const routeRows = (x) => x.routes.map((r) => [r.http_method, r.path_pattern, r.handler_text, r.middleware_texts, r.framework]);
 
 test("lang descriptor", () => {
-  assert.deepEqual(lang, { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false });
+  assert.deepEqual(lang, { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true });
 });
 
 // ---- routes -------------------------------------------------------------------------------------
@@ -92,18 +92,22 @@ test("Django: urlpatterns path / re_path routes, include ⇒ USE mount + import,
   assert.ok(y.not_extracted.includes("multiple inheritance"));
 });
 
-test("Django include through build-graph: the included file's routes are prefixed; Flask auth from login_required", async () => {
+test("Django include through build-graph: the included file's routes are prefixed (trailing slash kept), the submodule view resolves; Flask auth from login_required", async () => {
   const dir = realpathSync(FIXTURE_DIR);
   const { graph, reason } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["python"], frameworks: ["flask", "django", "fastapi"], referencesDir: REFERENCES_DIR });
   assert.ok(graph, reason);
   const routes = graph.nodes.filter((n) => n.type === "route").map((r) => [r.file, r.http_method, r.path_pattern, r.auth]);
   assert.deepEqual(routes.sort(), [
-    ["api/urls.py", "ANY", "/api/ping", "unauthenticated"],
+    ["api/urls.py", "ANY", "/api/ping/", "unauthenticated"],
     ["app.py", "GET", "/health", "unauthenticated"],
     ["app.py", "POST", "/run", "authenticated"],
     ["urls.py", "ANY", "/run/", "unauthenticated"],
     ["views/users.py", "GET", "/users/{id}", "unknown"]
   ]);
+  // `from views import users as views` names the submodule views/users.py, so views.run resolves
+  const djangoRun = graph.nodes.find((n) => n.type === "route" && n.file === "urls.py" && n.path_pattern === "/run/");
+  const run = graph.nodes.find((n) => n.type === "function" && n.file === "views/users.py" && n.qualified_name === "run");
+  assert.equal(djangoRun.handler, run.id);
 });
 
 // ---- sources and sinks --------------------------------------------------------------------------
@@ -121,6 +125,9 @@ test("sinks: subprocess.run is cmd-exec anchored at the callee's last identifier
   assert.equal(run.class, "cmd-exec");
   const text = readFileSync(join(FIXTURE_DIR, "services/runner.py"), "utf8").replace(/\r\n/g, "\n");
   assert.equal(run.start_byte, text.indexOf("run(c, shell=True)"));
+  assert.ok(!x.sinks.some((s) => s.callee === "self.exec"), "the method self.exec is not the builtin exec(");
+  const z = await extract("class K:\n    def m(self, c):\n        self.exec(c)\n        exec(c)\n");
+  assert.deepEqual(z.sinks.map((s) => [s.callee, s.class, s.line]), [["exec", "eval", 4]]);
   const y = await extract("exec(code)\nos.system(cmd)\nrender_template_string(t)\n");
   assert.deepEqual(y.sinks.map((s) => [s.callee, s.class]), [["exec", "eval"], ["os.system", "cmd-exec"], ["render_template_string", "template"]]);
 });
@@ -265,6 +272,13 @@ test("resolveImportSpecifier: dotted specifiers from the scope root, then from a
   assert.equal(r("util", "a/b.py"), null, "a/ has no __init__.py");
   assert.equal(r("flask"), null);
   assert.equal(r(""), null);
+});
+
+test("resolveImportSpecifier: src/ is a root after the scope root, before package ancestors", () => {
+  const filePaths = new Set(["src/app/__init__.py", "src/app/models.py", "src/app/views.py", "src/app/app/models.py"]);
+  const r = (specifier, paths = filePaths) => resolveImportSpecifier({ specifier, fromPath: "src/app/views.py", filePaths: paths, configs: {}, namespaces: new Map() });
+  assert.deepEqual(r("app.models"), { path: "src/app/models.py", confidence: "exact" }, "src/ wins over the package ancestor src/app");
+  assert.equal(r("app.models", new Set([...filePaths, "app/models.py"])).path, "app/models.py", "the scope root wins over src/");
 });
 
 test("the python fixture: an import resolves to another fixture file", async () => {

@@ -10,6 +10,8 @@
 //   exports    Python has no export statement: every top-level def / class whose name does not
 //              start with `_` — or, when the module sets `__all__` to a list of string literals,
 //              only those of them it names. A method is exported with its class.
+//   imports    `lang.submoduleImports: true`: `from pkg import sub` may name the module pkg.sub, which
+//              resolve.mjs tries when pkg does not export `sub`.
 //   classes    `extends` is the last dotted segment of the first base (`object` and keyword
 //              arguments ignored); further bases are only noted ("multiple inheritance").
 //   scopes     scope_names are the bindings of every enclosing def / lambda (parameters,
@@ -33,7 +35,7 @@ import { normalizeToken } from "../surface.mjs";
 import { sinkClassFor } from "../sink-classes.mjs";
 import { matchesPattern } from "../match.mjs";
 
-export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false };
+export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 
@@ -691,15 +693,15 @@ function packageAncestors(fromPath, filePaths) {
 }
 
 // A relative specifier (leading dots) resolves from the importing file's directory, one level up
-// per extra dot; a dotted specifier from the scope root, then from each package ancestor of the
-// importing file. `configs` / `namespaces` are part of the shared contract; Python ignores them.
+// per extra dot; a dotted specifier from the scope root, then from `src/` (the src layout), then
+// from each package ancestor of the importing file. `configs` / `namespaces` are part of the shared contract; Python ignores them.
 export function resolveImportSpecifier({ specifier, fromPath, filePaths }) {
   if (typeof specifier !== "string" || specifier === "") return null;
   const dots = /^\.*/.exec(specifier)[0].length;
   const rest = specifier.slice(dots);
   if (rest !== "" && rest.split(".").some((segment) => segment === "")) return null;
   const modulePath = rest.split(".").join("/");
-  const roots = dots ? [[posix.dirname(fromPath), ...Array(dots - 1).fill("..")].join("/")] : ["", ...packageAncestors(fromPath, filePaths)];
+  const roots = dots ? [[posix.dirname(fromPath), ...Array(dots - 1).fill("..")].join("/")] : ["", "src", ...packageAncestors(fromPath, filePaths)];
   for (const root of roots) {
     const hit = probe(repoPath(posix.join(root, modulePath)), filePaths, rest === "");
     if (hit) return { path: hit, confidence: "exact" };

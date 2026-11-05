@@ -232,6 +232,44 @@ test("any other dotted callee is unresolved with callee_text kept", () => {
   assert.deepEqual([r.to, r.confidence, r.callee_text], [null, "unresolved", "db.query"]);
 });
 
+// `from . import views` in pkg/urls.py + views.run(): views is the submodule pkg/views.py.
+function submoduleFiles({ initExports = [] } = {}) {
+  return [
+    file("pkg/__init__.py", { exports: initExports }),
+    file("pkg/urls.py", { imports: [named(".", "views")], functions: [fn("main", 20)], calls: [call("views.run", 30, { enc: 20 })] }),
+    file("pkg/views.py", { functions: [fn("run", 0)], exports: [{ name: "run", start_byte: 0 }] })
+  ];
+}
+const SUBMODULE_TABLE = { ".": "pkg/__init__.py", ".views": "pkg/views.py" };
+const withSubmodules = { id: "stub", implicitThisCalls: false, submoduleImports: true };
+
+function askedSpecifiers(files, lang) {
+  const seen = [];
+  const langModules = new Map([["stub", stubModule(SUBMODULE_TABLE, seen, lang)]]);
+  resolveImports(files, { langModules, filePaths: new Set(files.map((f) => f.path)), configs: {} });
+  return seen.map((a) => a.specifier);
+}
+
+test("rule 2 (submodule imports): from . import views + views.run() is exact to the submodule's export run", () => {
+  const r = only(resolveAll(submoduleFiles(), SUBMODULE_TABLE, withSubmodules), "pkg/urls.py", 30);
+  assert.deepEqual([r.to, r.confidence], [{ path: "pkg/views.py", qualified_name: "run", start_byte: 0 }, "exact"]);
+});
+
+test("rule 2 (submodule imports): without lang.submoduleImports the same call is unresolved", () => {
+  const r = only(resolveAll(submoduleFiles(), SUBMODULE_TABLE), "pkg/urls.py", 30);
+  assert.deepEqual([r.to, r.confidence], [null, "unresolved"]);
+});
+
+test("rule 2 (submodule imports): the fallback is asked only with the flag, and only when the target lacks the export", () => {
+  assert.deepEqual(askedSpecifiers(submoduleFiles(), withSubmodules), [".", ".views"]);
+  assert.deepEqual(askedSpecifiers(submoduleFiles(), { id: "stub", implicitThisCalls: false }), ["."]);
+  assert.deepEqual(askedSpecifiers(submoduleFiles({ initExports: [{ name: "views", start_byte: 0 }] }), withSubmodules), ["."]);
+  const dotted = [file("a.py", { imports: [named("a.b", "c")] })];
+  assert.deepEqual(askedSpecifiers(dotted, withSubmodules), ["a.b", "a.b.c"], "an unresolved target still tries the submodule");
+  const relative = [file("a.py", { imports: [named(".x", "views")] })];
+  assert.deepEqual(askedSpecifiers(relative, withSubmodules), [".x", ".x.views"]);
+});
+
 // ---- rule 3: this.m ------------------------------------------------------------------------------
 
 function userService(withAdminOverride) {

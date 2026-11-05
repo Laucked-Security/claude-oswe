@@ -9,13 +9,16 @@ const c = (category, text) => ({ category, text });
 
 // [description, pattern, candidate, expected]
 const CASES = [
-  // call: categories call/new/member; equality or a "."-boundary suffix
+  // call: categories call/new/member; equality, or (dotted patterns only) a "."-boundary suffix
   ["call: bare callee equality", sink("eval("), c("call", "eval"), true],
   ["call: dotted suffix on a boundary", sink("os.system"), c("call", "x.os.system"), true],
   ["call: member category accepted", sink("child_process.exec"), c("member", "child_process.exec"), true],
   ["call: no match across a non-boundary prefix", sink("os.system"), c("call", "foos.system"), false],
   ["call: identifier category rejected", sink("eval("), c("identifier", "eval"), false],
   ["call: a longer last segment does not match", sink("eval("), c("call", "evaluate"), false],
+  ["call: a bare pattern matches a bare callee", sink("exec("), c("call", "exec"), true],
+  ["call: a bare pattern does not match a method of that name", sink("exec("), c("call", "self.exec"), false],
+  ["call: a dotted pattern still matches a longer dotted callee", sink("os.system"), c("call", "a.os.system"), true],
   // member: categories call/member; last segment equality
   ["member: last segment of a callee", sink(".query("), c("call", "db.pool.query"), true],
   ["member: other last segment", sink(".query("), c("call", "query.run"), false],
