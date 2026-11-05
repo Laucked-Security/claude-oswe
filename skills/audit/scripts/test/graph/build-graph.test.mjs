@@ -22,7 +22,7 @@ const NODE_FIXTURE = realpathSync(join(FIXTURES_DIR, "node"));
 
 // The frameworks each golden fixture is built with (spec: "the fixture's frameworks"); a stack not
 // listed here is built with every framework of that stack.
-const GOLDEN_FRAMEWORKS = { node: ["express"], python: ["flask", "django", "fastapi"], java: ["spring"], php: ["laravel", "symfony"] };
+const GOLDEN_FRAMEWORKS = { node: ["express"], python: ["flask", "django", "fastapi"], java: ["spring"], php: ["laravel", "symfony"], dotnet: ["aspnet"] };
 const goldenFrameworks = (stack) => GOLDEN_FRAMEWORKS[stack] ?? Object.keys(FRAMEWORK_STACK).filter((f) => FRAMEWORK_STACK[f] === stack);
 
 function tempDir(t, prefix = "oswe-build-graph-") {

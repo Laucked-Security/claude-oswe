@@ -44,7 +44,10 @@
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
-import { lookup, field, namedOf as namedNodes, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, lastSegment } from "./common.mjs";
+import {
+  lookup, field, namedOf as namedNodes, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, lastSegment,
+  newFrame, NO_FRAME, bind, innermostFunction, innermostClassScope, innermostClass, enclosingName
+} from "./common.mjs";
 
 export const lang = { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true };
 
@@ -152,10 +155,7 @@ const stringContent = (node) => (node.text.startsWith('"""') ? node.text.slice(3
 
 // Every scope is a frame of `bindings` / `classOf` (see common.mjs receiverClass): a method or lambda
 // (`fn: true`, with its start byte and qualified name), a block-like statement, or a class body
-// (`cls`, whose frame holds the class's fields), innermost last.
-const newFrame = (startIndex = null, qualifiedName = null) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map() });
-const NO_FRAME = newFrame();
-
+// (`cls`, whose frame holds the class's fields), innermost last (common.mjs innermostFunction).
 function newState(path, surface) {
   return {
     moduleName: path.split("/").at(-1).replace(/\.[^.]*$/, ""),
@@ -166,26 +166,6 @@ function newState(path, surface) {
     scopes: [],
     annotationDepth: 0
   };
-}
-
-// The innermost method / lambda, unless a class body lies in between: code in a nested (local /
-// anonymous) class's field initializer or initializer block belongs to no function (module level).
-function innermostFunction(st) {
-  for (let i = st.scopes.length - 1; i >= 0; i--) {
-    if (st.scopes[i].fn) return st.scopes[i].frame;
-    if (st.scopes[i].cls) return null;
-  }
-  return null;
-}
-const innermostClassScope = (st) => st.scopes.findLast((s) => s.cls) ?? null;
-const innermostClass = (st) => innermostClassScope(st)?.cls ?? null;
-const enclosingName = (st) => innermostFunction(st)?.qualifiedName ?? innermostClass(st)?.qualifiedName ?? st.moduleName;
-
-function bind(frame, name, cls) {
-  if (!frame || !name) return;
-  frame.bindings.add(name);
-  if (cls) frame.classOf.set(name, cls);
-  else frame.classOf.delete(name);
 }
 
 // ---- sources and sinks ----------------------------------------------------------------------------

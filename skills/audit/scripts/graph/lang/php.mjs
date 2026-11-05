@@ -48,7 +48,10 @@
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
-import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, repoPath } from "./common.mjs";
+import {
+  lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, repoPath,
+  newFrame, NO_FRAME, bind, innermostFunction, innermostClass, enclosingName
+} from "./common.mjs";
 
 export const lang = { id: "php", stack: "php", langIds: ["php"], frameworks: ["laravel", "symfony"], implicitThisCalls: false, submoduleImports: false, callableLocals: false, overloads: false };
 
@@ -188,9 +191,7 @@ const textOf = (node) => normalizeToken(render(node));
 // Scopes, innermost last: a function (`fn: true`, with a frame of `bindings` / `classOf` for its
 // variables, see common.mjs receiverClass; `barrier` for a named function / method, whose variables
 // are its own) or a class body (`cls`, with its properties' classes). Module-level variables live in
-// `moduleFrame`.
-const newFrame = (startIndex = null, qualifiedName = null) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map() });
-const NO_FRAME = newFrame();
+// `moduleFrame`. innermostFunction / innermostClass / enclosingName: see common.mjs.
 
 function newState(path, surface) {
   return {
@@ -206,26 +207,9 @@ function newState(path, surface) {
   };
 }
 
-// The innermost function, unless a class body lies in between (an anonymous class's members).
-function innermostFunction(st) {
-  for (let i = st.scopes.length - 1; i >= 0; i--) {
-    if (st.scopes[i].fn) return st.scopes[i].frame;
-    if (st.scopes[i].cls) return null;
-  }
-  return null;
-}
-const innermostClass = (st) => st.scopes.findLast((s) => s.cls)?.cls ?? null;
-const enclosingName = (st) => innermostFunction(st)?.qualifiedName ?? innermostClass(st)?.qualifiedName ?? st.moduleName;
 // Where an assignment binds: the innermost function's frame, the module frame at top level, nowhere
 // directly in a class body.
 const currentFrame = (st) => (st.scopes.length === 0 ? st.moduleFrame : st.scopes.at(-1).frame ?? null);
-
-function bind(frame, name, cls) {
-  if (!frame || !name) return;
-  frame.bindings.add(name);
-  if (cls) frame.classOf.set(name, cls);
-  else frame.classOf.delete(name);
-}
 
 // The class of variable `name`: the innermost frame binding it, looking outward through closures /
 // arrows up to (and including) the nearest named function or method; the module frame only when no

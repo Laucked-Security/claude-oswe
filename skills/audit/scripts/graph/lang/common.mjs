@@ -76,6 +76,33 @@ export function walk(tree, st, handlers, cursorHandlers) {
 
 // ---- scopes ---------------------------------------------------------------------------------------
 
+// A scope's frame of `bindings` / `classOf` (see receiverClass): a function's (with its start byte
+// and qualified name), a block's or a class body's. NO_FRAME binds nothing; it is never written to.
+export const newFrame = (startIndex = null, qualifiedName = null) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map() });
+export const NO_FRAME = newFrame();
+
+export function bind(frame, name, cls) {
+  if (!frame || !name) return;
+  frame.bindings.add(name);
+  if (cls) frame.classOf.set(name, cls);
+  else frame.classOf.delete(name);
+}
+
+// For the modules whose state keeps `st.scopes` (innermost last: `{ frame, fn: true }` for a
+// function, `{ frame, cls }` for a class body, `{ frame }` for a block) and `st.moduleName` (Java,
+// PHP, C#). innermostFunction is the innermost function's frame, unless a class body lies in between:
+// code in a nested / anonymous class's initializer belongs to no function (module level).
+export function innermostFunction(st) {
+  for (let i = st.scopes.length - 1; i >= 0; i--) {
+    if (st.scopes[i].fn) return st.scopes[i].frame;
+    if (st.scopes[i].cls) return null;
+  }
+  return null;
+}
+export const innermostClassScope = (st) => st.scopes.findLast((s) => s.cls) ?? null;
+export const innermostClass = (st) => innermostClassScope(st)?.cls ?? null;
+export const enclosingName = (st) => innermostFunction(st)?.qualifiedName ?? innermostClass(st)?.qualifiedName ?? st.moduleName;
+
 // The class a receiver name is demonstrably bound to: the innermost scope binding the name wins (a
 // plain parameter or local shadows an outer constructed / annotated binding). Frames carry
 // `bindings: Set<name>` and `classOf: Map<name, class>`.
