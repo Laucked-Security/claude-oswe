@@ -362,13 +362,13 @@ test("malformed input throws InputError: graph, findings, chains, max_depth", ()
 
 // ---- CLI --------------------------------------------------------------------------------------------
 
-function runCli(t, input, { raw = null, outName = "out.json" } = {}) {
+function runCli(t, input, { raw = null, outName = "out.json", graphFile = null } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-check-chain-structure-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const inFile = join(dir, "in.json");
   const outFile = join(dir, outName);
   writeFileSync(inFile, raw ?? JSON.stringify(input));
-  const r = spawnSync(process.execPath, [CLI, "--file", inFile, "--out", outFile], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, [CLI, "--file", inFile, "--out", outFile, ...(graphFile ? ["--graph", graphFile] : [])], { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, out: existsSync(outFile) ? readFileSync(outFile, "utf8") : null };
 }
 
@@ -416,4 +416,47 @@ test("CLI: exit 2 for an unreadable --file, invalid JSON, an unwritable --out, a
   const noOut = spawnSync(process.execPath, [CLI, "--file", join(dir, "x.json")], { encoding: "utf8" });
   assert.equal(noOut.status, 2);
   assert.match(noOut.stderr, /usage/);
+});
+
+test("CLI --graph <path>: a golden file = the inline API call; envelopes; inline graph superseded; unreadable file exit 2", (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-check-chain-structure-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const goldenFile = join(FIXTURES_DIR, "node", "graph.expected.json");
+  const nullEnvelope = join(dir, "graph-null.json");
+  writeFileSync(nullEnvelope, JSON.stringify({ graph: null, reason: "parser unavailable" }));
+  const objEnvelope = join(dir, "graph-obj.json");
+  writeFileSync(objEnvelope, JSON.stringify({ graph: golden("node") }));
+  const withGraph = (graphFile, input) => runCli(t, null, { raw: JSON.stringify(input), graphFile });
+  const rest = {
+    findings: [finding("OSWE-1", ["routes/users.js", 6], ["services/userService.js", 10]), finding("OSWE-2", ["routes/users.js", 7], ["services/userService.js", 6])],
+    chains: [chain("CHAIN-1", [transition("OSWE-2", "OSWE-1", { kind: "call-path" })])]
+  };
+  const expected = JSON.stringify(checkChainStructure({ graph: golden("node"), ...rest }), null, 2) + "\n";
+  for (const input of [rest, { graph: "junk", ...rest }]) {
+    for (const file of [goldenFile, objEnvelope]) {
+      const r = withGraph(file, input);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stderr, "");
+      assert.equal(r.out, expected);
+    }
+  }
+  // The { graph: null } envelope is graph null => every finding and transition n/a, even over an inline graph.
+  const nul = withGraph(nullEnvelope, { graph: golden("node"), ...rest });
+  assert.equal(nul.status, 0, nul.stderr);
+  assert.equal(nul.out, JSON.stringify(checkChainStructure({ graph: null, ...rest }), null, 2) + "\n");
+  const out = JSON.parse(nul.out);
+  for (const v of Object.values(out.findings)) assert.equal(v.structural_path, "n/a");
+  for (const list of Object.values(out.transitions)) for (const v of list) assert.equal(v.structural_path, "n/a");
+  const missing = withGraph(join(dir, "nope.json"), rest);
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /cannot read --graph/);
+  assert.equal(missing.out, null);
+  const notJson = join(dir, "bad.json");
+  writeFileSync(notJson, "{not json");
+  assert.equal(withGraph(notJson, rest).status, 2);
+  const invalid = join(dir, "invalid.json");
+  writeFileSync(invalid, JSON.stringify({ ...golden("node"), version: 2 }));
+  const inv = withGraph(invalid, rest);
+  assert.equal(inv.status, 1, "validate(graph) still applies to the loaded graph");
+  assert.match(inv.stderr, /schema/);
 });

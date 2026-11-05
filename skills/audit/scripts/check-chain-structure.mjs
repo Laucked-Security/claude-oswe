@@ -15,12 +15,16 @@
 //      are the aggregated findings (finding_id OSWE-N, source / sink { file, line, ... }); `chains` are
 //      chain.schema.json objects (chain_id CHAIN-N, transitions[] { from, to, kind?, from_anchor?, to_anchor? }).
 //
-// CLI: node check-chain-structure.mjs --file <in.json> --out <out.json>
+// CLI: node check-chain-structure.mjs --file <in.json> --out <out.json> [--graph <graph.json>]
 //   input:  { "graph": <graph> | null, "findings": [...], "chains": [...], "max_depth"?: n }
 //   output: the API result, pretty-printed.
 //   exit 0 ok / 1 malformed input (graph neither null nor a schema-valid graph; findings or chains not an
 //   array of well-formed items, or with a duplicate id; max_depth present but not a positive integer) /
 //   2 IO | usage.
+//   --graph <graph.json> (optional): read the graph from that file instead of the input's "graph" key, which it
+//   supersedes (the key may then be omitted). The file is the graph itself or build-graph's envelope:
+//   { "graph": null, "reason" } is graph null, { "graph": <object> } is that object. Unreadable / unparsable
+//   => exit 2, like --file; the loaded graph is validated like an inline one.
 //
 // Mapping. A location { file, line } maps to enclosingFn: the function node of that file with
 // line_start <= line <= line_end, the innermost one when several match (greatest line_start, then smallest
@@ -244,7 +248,7 @@ export function checkChainStructure(input) {
 
 // ---- CLI --------------------------------------------------------------------------------------------
 
-const USAGE = "usage: check-chain-structure.mjs --file <in.json> --out <out.json>\n";
+const USAGE = "usage: check-chain-structure.mjs --file <in.json> --out <out.json> [--graph <graph.json>]\n";
 
 function fail(code, message) {
   process.stderr.write(message.endsWith("\n") ? message : message + "\n");
@@ -254,12 +258,26 @@ function fail(code, message) {
 function main(args) {
   const fi = args.indexOf("--file");
   const oi = args.indexOf("--out");
+  const gi = args.indexOf("--graph");
   if (fi === -1 || !args[fi + 1] || oi === -1 || !args[oi + 1]) fail(2, USAGE);
+  if (gi !== -1 && (!args[gi + 1] || args[gi + 1].startsWith("--"))) fail(2, USAGE);
   let input;
   try {
     input = JSON.parse(readFileSync(args[fi + 1], "utf8"));
   } catch (e) {
     fail(2, "cannot read --file: " + e.message);
+  }
+  if (gi !== -1) {
+    let loaded;
+    try {
+      loaded = JSON.parse(readFileSync(args[gi + 1], "utf8"));
+    } catch (e) {
+      fail(2, "cannot read --graph: " + e.message);
+    }
+    // build-graph's envelope { graph: null, reason } => null, { graph: <object> } => that object; otherwise
+    // the file is the graph itself (a graph has no "graph" key). It supersedes any inline "graph" key.
+    const graph = isObject(loaded) && Object.hasOwn(loaded, "graph") ? loaded.graph : loaded;
+    if (isObject(input)) input = { ...input, graph };
   }
   let result;
   try {

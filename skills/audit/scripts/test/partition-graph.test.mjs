@@ -390,13 +390,13 @@ test("malformed input throws: fallback_partitions, graph shape, schema-invalid g
 
 // ---- CLI ----------------------------------------------------------------------------------------------
 
-function runCli(t, input, { raw = null, outName = "out.json", args = null } = {}) {
+function runCli(t, input, { raw = null, outName = "out.json", args = null, graphFile = null } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-partition-graph-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const inFile = join(dir, "in.json");
   const outFile = join(dir, outName);
   writeFileSync(inFile, raw ?? JSON.stringify(input));
-  const r = spawnSync(process.execPath, args ?? [CLI, "--file", inFile, "--out", outFile], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, args ?? [CLI, "--file", inFile, "--out", outFile, ...(graphFile ? ["--graph", graphFile] : [])], { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, out: existsSync(outFile) ? readFileSync(outFile, "utf8") : null };
 }
 
@@ -460,4 +460,41 @@ test("CLI: exit 2 for an unreadable --file, an unwritable --out, and usage error
   assert.match(noOut.stderr, /usage/);
   const none = spawnSync(process.execPath, [CLI], { encoding: "utf8" });
   assert.equal(none.status, 2);
+});
+
+test("CLI --graph <path>: a golden file = the inline API call; envelopes; inline graph superseded; unreadable file exit 2", (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-partition-graph-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const goldenFile = join(FIXTURES_DIR, "node", "graph.expected.json");
+  const nullEnvelope = join(dir, "graph-null.json");
+  writeFileSync(nullEnvelope, JSON.stringify({ graph: null, reason: "parser unavailable" }));
+  const objEnvelope = join(dir, "graph-obj.json");
+  writeFileSync(objEnvelope, JSON.stringify({ graph: golden("node") }));
+  const withGraph = (graphFile, input) => runCli(t, null, { raw: JSON.stringify(input), args: null, graphFile });
+  // The inline graph key is omitted (first) or junk that must be ignored (second): --graph supersedes it.
+  for (const input of [{ fallback_partitions: NODE_FALLBACK }, { graph: "junk", fallback_partitions: NODE_FALLBACK }]) {
+    for (const file of [goldenFile, objEnvelope]) {
+      const r = withGraph(file, input);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stderr, "");
+      assert.equal(r.out, JSON.stringify(partitionGraph({ graph: golden("node"), fallback_partitions: NODE_FALLBACK }), null, 2) + "\n");
+    }
+  }
+  const fb = withGraph(nullEnvelope, { graph: golden("node"), fallback_partitions: NODE_FALLBACK });
+  assert.equal(fb.status, 0, fb.stderr);
+  const out = JSON.parse(fb.out);
+  assert.equal(out.mode, "fallback", "the { graph: null } envelope is graph null");
+  assert.equal(JSON.stringify(out.partitions), JSON.stringify(NODE_FALLBACK));
+  const missing = withGraph(join(dir, "nope.json"), { fallback_partitions: NODE_FALLBACK });
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /cannot read --graph/);
+  assert.equal(missing.out, null);
+  const notJson = join(dir, "bad.json");
+  writeFileSync(notJson, "{not json");
+  assert.equal(withGraph(notJson, { fallback_partitions: NODE_FALLBACK }).status, 2);
+  const invalid = join(dir, "invalid.json");
+  writeFileSync(invalid, JSON.stringify({ ...golden("node"), version: 2 }));
+  const inv = withGraph(invalid, { fallback_partitions: NODE_FALLBACK });
+  assert.equal(inv.status, 1, "validate(graph) still applies to the loaded graph");
+  assert.match(inv.stderr, /schema/);
 });

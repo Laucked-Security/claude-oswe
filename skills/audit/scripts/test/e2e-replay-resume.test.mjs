@@ -108,9 +108,9 @@ function runOnePass(projectDir, checkpointDir, passLabel, expectAllHits, sp10) {
   sp10(assert.equal, graph.nodes.find((n) => n.type === "file" && n.path === "a/app.py")?.parse_status, "ok");
 
   // --- SP10 SKILL §2: partition-graph (no route => fallback, byte-identical) ---
-  const pgIn = jw(join(projectDir, ".oswe", "tmp", `partitions-in-${passLabel}.json`), { graph, fallback_partitions: FALLBACK_PARTITIONS });
+  const pgIn = jw(join(projectDir, ".oswe", "tmp", `partitions-in-${passLabel}.json`), { fallback_partitions: FALLBACK_PARTITIONS });
   const pgOut = join(projectDir, ".oswe", "tmp", `partitions-${passLabel}.json`);
-  const pgR = run([CLI("partition-graph"), "--file", pgIn, "--out", pgOut]);
+  const pgR = run([CLI("partition-graph"), "--file", pgIn, "--graph", bgOut, "--out", pgOut]);
   const pgPayload = pgR.status === 0 ? JSON.parse(readFileSync(pgOut, "utf8")) : {};
   sp10(assert.equal, pgR.status, 0, `pass ${passLabel}: partition-graph failed: ${pgR.stderr}`);
   sp10(assert.equal, pgPayload.mode, "fallback");
@@ -135,9 +135,9 @@ function runOnePass(projectDir, checkpointDir, passLabel, expectAllHits, sp10) {
   const allocOutput = JSON.parse(readFileSync(allocOut, "utf8"));
 
   // --- SP10 SKILL §3: enumerate-paths for py:web; its candidate_paths join the analyzer dispatch_input ---
-  const epIn = jw(join(projectDir, ".oswe", "tmp", `candidate-paths-in-${passLabel}.json`), { graph, partition: pgPayload.partitions[0] });
+  const epIn = jw(join(projectDir, ".oswe", "tmp", `candidate-paths-in-${passLabel}.json`), { partition: pgPayload.partitions[0] });
   const epOut = join(projectDir, ".oswe", "tmp", `candidate-paths-${passLabel}.json`);
-  const epR = run([CLI("enumerate-paths"), "--file", epIn, "--out", epOut]);
+  const epR = run([CLI("enumerate-paths"), "--file", epIn, "--graph", bgOut, "--out", epOut]);
   const epPayload = epR.status === 0 ? JSON.parse(readFileSync(epOut, "utf8")) : {};
   sp10(assert.equal, epR.status, 0, `pass ${passLabel}: enumerate-paths failed: ${epR.stderr}`);
   sp10(assert.ok, Array.isArray(epPayload.candidate_paths), "candidate_paths must be an array");
@@ -184,9 +184,9 @@ function runOnePass(projectDir, checkpointDir, passLabel, expectAllHits, sp10) {
   const aggOutput = JSON.parse(readFileSync(aggOut, "utf8"));
 
   // --- SP10 SKILL §5.5: check-chain-structure on the aggregated findings; structural joins the verifier dispatch_input ---
-  const ccsIn = jw(join(projectDir, ".oswe", "tmp", `structural-in-${passLabel}.json`), { graph, findings: aggOutput.findings, chains: [] });
+  const ccsIn = jw(join(projectDir, ".oswe", "tmp", `structural-in-${passLabel}.json`), { findings: aggOutput.findings, chains: [] });
   const structuralPath = join(projectDir, ".oswe", "tmp", `structural-${passLabel}.json`);
-  const ccsR = run([CLI("check-chain-structure"), "--file", ccsIn, "--out", structuralPath]);
+  const ccsR = run([CLI("check-chain-structure"), "--file", ccsIn, "--graph", bgOut, "--out", structuralPath]);
   const structural = ccsR.status === 0 ? JSON.parse(readFileSync(structuralPath, "utf8")) : {};
   sp10(assert.equal, ccsR.status, 0, `pass ${passLabel}: check-chain-structure failed: ${ccsR.stderr}`);
   sp10(assert.ok, aggOutput.findings.length >= 1, "the structural check needs at least one aggregated finding");

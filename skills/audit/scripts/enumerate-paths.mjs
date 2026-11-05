@@ -11,12 +11,16 @@
 //      stack, files[] } as partition-graph.mjs emits it; `graph` is the graph object itself (never null:
 //      the orchestrator skips this helper when there is no graph).
 //
-// CLI: node enumerate-paths.mjs --file <in.json> --out <out.json>
+// CLI: node enumerate-paths.mjs --file <in.json> --out <out.json> [--graph <graph.json>]
 //   input:  { "graph": <graph>, "partition": { partition_id, stack, files[] }, "max_depth"?: n, "max_paths"?: n }
 //   output: the API result, pretty-printed.
 //   exit 0 ok / 1 malformed input (graph null / not an object with nodes[] and edges[] / failing
 //   validate("graph"); partition without a string partition_id or a files[] of strings; max_depth or
 //   max_paths present but not a positive integer) / 2 IO | usage.
+//   --graph <graph.json> (optional): read the graph from that file instead of the input's "graph" key, which it
+//   supersedes (the key may then be omitted). The file is the graph itself or build-graph's envelope:
+//   { "graph": null, "reason" } is graph null, { "graph": <object> } is that object. Unreadable / unparsable
+//   => exit 2, like --file; the loaded graph is validated like an inline one.
 //
 // Candidates. Every `route` node whose file is in partition.files and whose handler is non-null is a root
 // (a route with no handler produces nothing). From the handler, ONE shortest path per reachable function
@@ -203,7 +207,7 @@ export function enumeratePaths(input) {
 
 // ---- CLI --------------------------------------------------------------------------------------------
 
-const USAGE = "usage: enumerate-paths.mjs --file <in.json> --out <out.json>\n";
+const USAGE = "usage: enumerate-paths.mjs --file <in.json> --out <out.json> [--graph <graph.json>]\n";
 
 function fail(code, message) {
   process.stderr.write(message.endsWith("\n") ? message : message + "\n");
@@ -213,12 +217,26 @@ function fail(code, message) {
 function main(args) {
   const fi = args.indexOf("--file");
   const oi = args.indexOf("--out");
+  const gi = args.indexOf("--graph");
   if (fi === -1 || !args[fi + 1] || oi === -1 || !args[oi + 1]) fail(2, USAGE);
+  if (gi !== -1 && (!args[gi + 1] || args[gi + 1].startsWith("--"))) fail(2, USAGE);
   let input;
   try {
     input = JSON.parse(readFileSync(args[fi + 1], "utf8"));
   } catch (e) {
     fail(2, "cannot read --file: " + e.message);
+  }
+  if (gi !== -1) {
+    let loaded;
+    try {
+      loaded = JSON.parse(readFileSync(args[gi + 1], "utf8"));
+    } catch (e) {
+      fail(2, "cannot read --graph: " + e.message);
+    }
+    // build-graph's envelope { graph: null, reason } => null, { graph: <object> } => that object; otherwise
+    // the file is the graph itself (a graph has no "graph" key). It supersedes any inline "graph" key.
+    const graph = isObject(loaded) && Object.hasOwn(loaded, "graph") ? loaded.graph : loaded;
+    if (isObject(input)) input = { ...input, graph };
   }
   let result;
   try {

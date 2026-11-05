@@ -78,9 +78,9 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
     { partition_id: "partC", stack: "python", files: ["c/missing.py", escapeAbs] }
   ];
   const pgIn = join(root, "_partition-graph-in.json");
-  writeFileSync(pgIn, JSON.stringify({ graph, fallback_partitions: fallbackPartitions }));
+  writeFileSync(pgIn, JSON.stringify({ fallback_partitions: fallbackPartitions }));
   const pgOut = join(root, "_partitions.json");
-  const pgResult = run([CLI("partition-graph"), "--file", pgIn, "--out", pgOut]);
+  const pgResult = run([CLI("partition-graph"), "--file", pgIn, "--graph", bgOut, "--out", pgOut]);
   const pgPayload = pgResult.status === 0 ? JSON.parse(readFileSync(pgOut, "utf8")) : {};
   sp10(assert.equal, pgResult.status, 0, `partition-graph failed: ${pgResult.stderr}`);
   sp10(assert.equal, pgPayload.mode, "fallback", "no route in the fixture => fallback mode");
@@ -142,9 +142,9 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
 
   // === 4b. SP10 SKILL §3: enumerate-paths for the analyzed partition (no route => no candidate) ===
   const epIn = join(root, "_enumerate-paths-in.json");
-  writeFileSync(epIn, JSON.stringify({ graph, partition: pgPayload.partitions.find((p) => p.partition_id === allocation.analyze[0].partition_id) }));
+  writeFileSync(epIn, JSON.stringify({ partition: pgPayload.partitions.find((p) => p.partition_id === allocation.analyze[0].partition_id) }));
   const epOut = join(root, "_candidate-paths.json");
-  const epResult = run([CLI("enumerate-paths"), "--file", epIn, "--out", epOut]);
+  const epResult = run([CLI("enumerate-paths"), "--file", epIn, "--graph", bgOut, "--out", epOut]);
   const epPayload = epResult.status === 0 ? JSON.parse(readFileSync(epOut, "utf8")) : {};
   sp10(assert.equal, epResult.status, 0, `enumerate-paths failed: ${epResult.stderr}`);
   sp10(assert.equal, epPayload.partition_id, "partA");
@@ -228,9 +228,9 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   // OSWE-1's source (a/app.py:3) and sink (a/app.py:4) both sit in view() => "proven" (same function);
   // the entry -> OSWE-1 call-path transition is anchored inside view() too => "proven".
   const ccsIn = join(root, "_structural-in.json");
-  writeFileSync(ccsIn, JSON.stringify({ graph, findings: agPayload.findings, chains: [candidateChain] }));
+  writeFileSync(ccsIn, JSON.stringify({ findings: agPayload.findings, chains: [candidateChain] }));
   const structuralPath = join(root, "_structural.json");
-  const ccsResult = run([CLI("check-chain-structure"), "--file", ccsIn, "--out", structuralPath]);
+  const ccsResult = run([CLI("check-chain-structure"), "--file", ccsIn, "--graph", bgOut, "--out", structuralPath]);
   const structural = ccsResult.status === 0 ? JSON.parse(readFileSync(structuralPath, "utf8")) : {};
   sp10(assert.equal, ccsResult.status, 0, `check-chain-structure failed: ${ccsResult.stderr}`);
   for (const f of agPayload.findings) {

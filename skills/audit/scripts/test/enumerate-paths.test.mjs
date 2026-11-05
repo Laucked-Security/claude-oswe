@@ -522,13 +522,13 @@ test("malformed input throws InputError: graph, partition, max_depth, max_paths"
 
 // ---- CLI ----------------------------------------------------------------------------------------------
 
-function runCli(t, input, { raw = null, outName = "out.json", args = null } = {}) {
+function runCli(t, input, { raw = null, outName = "out.json", args = null, graphFile = null } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-enumerate-paths-")));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const inFile = join(dir, "in.json");
   const outFile = join(dir, outName);
   writeFileSync(inFile, raw ?? JSON.stringify(input));
-  const r = spawnSync(process.execPath, args ?? [CLI, "--file", inFile, "--out", outFile], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, args ?? [CLI, "--file", inFile, "--out", outFile, ...(graphFile ? ["--graph", graphFile] : [])], { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, out: existsSync(outFile) ? readFileSync(outFile, "utf8") : null };
 }
 
@@ -584,4 +584,41 @@ test("CLI: exit 2 for an unreadable --file, invalid JSON, an unwritable --out, a
   assert.match(noOut.stderr, /usage/);
   const none = spawnSync(process.execPath, [CLI], { encoding: "utf8" });
   assert.equal(none.status, 2);
+});
+
+test("CLI --graph <path>: a golden file = the inline API call; envelopes; inline graph superseded; unreadable file exit 2", (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-enumerate-paths-")));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const goldenFile = join(FIXTURES_DIR, "node", "graph.expected.json");
+  const nullEnvelope = join(dir, "graph-null.json");
+  writeFileSync(nullEnvelope, JSON.stringify({ graph: null, reason: "parser unavailable" }));
+  const objEnvelope = join(dir, "graph-obj.json");
+  writeFileSync(objEnvelope, JSON.stringify({ graph: golden("node") }));
+  const withGraph = (graphFile, input) => runCli(t, null, { raw: JSON.stringify(input), graphFile });
+  const expected = JSON.stringify(enumeratePaths({ graph: golden("node"), partition: AUTH_ROUTES }), null, 2) + "\n";
+  for (const input of [{ partition: AUTH_ROUTES }, { graph: "junk", partition: AUTH_ROUTES }]) {
+    for (const file of [goldenFile, objEnvelope]) {
+      const r = withGraph(file, input);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stderr, "");
+      assert.equal(r.out, expected);
+    }
+  }
+  // The { graph: null } envelope is graph null, which this helper rejects (exit 1), even over an inline graph.
+  const nul = withGraph(nullEnvelope, { graph: golden("node"), partition: AUTH_ROUTES });
+  assert.equal(nul.status, 1, nul.stderr);
+  assert.match(nul.stderr, /graph/);
+  assert.equal(nul.out, null);
+  const missing = withGraph(join(dir, "nope.json"), { partition: AUTH_ROUTES });
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /cannot read --graph/);
+  assert.equal(missing.out, null);
+  const notJson = join(dir, "bad.json");
+  writeFileSync(notJson, "{not json");
+  assert.equal(withGraph(notJson, { partition: AUTH_ROUTES }).status, 2);
+  const invalid = join(dir, "invalid.json");
+  writeFileSync(invalid, JSON.stringify({ ...golden("node"), version: 2 }));
+  const inv = withGraph(invalid, { partition: AUTH_ROUTES });
+  assert.equal(inv.status, 1, "validate(graph) still applies to the loaded graph");
+  assert.match(inv.stderr, /schema/);
 });

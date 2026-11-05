@@ -10,11 +10,15 @@
 //      itself or null (the orchestrator unwraps build-graph's { graph: null, reason } envelope);
 //      `fallback_partitions` is the orchestrator's own directory partitioning.
 //
-// CLI: node partition-graph.mjs --file <in.json> --out <out.json>
+// CLI: node partition-graph.mjs --file <in.json> --out <out.json> [--graph <graph.json>]
 //   input:  { "graph": <graph | null>, "fallback_partitions": [ { partition_id, stack, files[] } ] }
 //   output: the API result, pretty-printed.
 //   exit 0 ok / 1 malformed input (missing or invalid fallback_partitions, graph that is neither null nor
 //   an object with nodes[] and edges[], graph failing validate("graph")) / 2 IO | usage.
+//   --graph <graph.json> (optional): read the graph from that file instead of the input's "graph" key, which it
+//   supersedes (the key may then be omitted). The file is the graph itself or build-graph's envelope:
+//   { "graph": null, "reason" } is graph null, { "graph": <object> } is that object. Unreadable / unparsable
+//   => exit 2, like --file; the loaded graph is validated like an inline one.
 //
 // Fallback — the zero-regression guarantee. graph === null, or no route yields a group (in particular a
 // graph with zero `route` nodes), => mode "fallback": `partitions` is `fallback_partitions` passed
@@ -207,7 +211,7 @@ export function partitionGraph(input) {
 
 // ---- CLI --------------------------------------------------------------------------------------------
 
-const USAGE = "usage: partition-graph.mjs --file <in.json> --out <out.json>\n";
+const USAGE = "usage: partition-graph.mjs --file <in.json> --out <out.json> [--graph <graph.json>]\n";
 
 function fail(code, message) {
   process.stderr.write(message.endsWith("\n") ? message : message + "\n");
@@ -217,12 +221,26 @@ function fail(code, message) {
 function main(args) {
   const fi = args.indexOf("--file");
   const oi = args.indexOf("--out");
+  const gi = args.indexOf("--graph");
   if (fi === -1 || !args[fi + 1] || oi === -1 || !args[oi + 1]) fail(2, USAGE);
+  if (gi !== -1 && (!args[gi + 1] || args[gi + 1].startsWith("--"))) fail(2, USAGE);
   let input;
   try {
     input = JSON.parse(readFileSync(args[fi + 1], "utf8"));
   } catch (e) {
     fail(2, "cannot read --file: " + e.message);
+  }
+  if (gi !== -1) {
+    let loaded;
+    try {
+      loaded = JSON.parse(readFileSync(args[gi + 1], "utf8"));
+    } catch (e) {
+      fail(2, "cannot read --graph: " + e.message);
+    }
+    // build-graph's envelope { graph: null, reason } => null, { graph: <object> } => that object; otherwise
+    // the file is the graph itself (a graph has no "graph" key). It supersedes any inline "graph" key.
+    const graph = isObject(loaded) && Object.hasOwn(loaded, "graph") ? loaded.graph : loaded;
+    if (isObject(input)) input = { ...input, graph };
   }
   let result;
   try {
