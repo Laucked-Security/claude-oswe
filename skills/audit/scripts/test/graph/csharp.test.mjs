@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSource } from "../../graph/parser.mjs";
@@ -111,6 +112,66 @@ test("minimal APIs: MapGet / MapPost with lambda handlers named by their <anon> 
     ["lambda", "<anon>", "<anon>@7:22", null, false]
   ]);
   assert.deepEqual(x.functions.map((f) => [f.param_count, f.class_start_byte]), [[0, null], [2, null]]);
+});
+
+test("attribute routing: a [Route]-prefixed controller routes its unattributed public actions at the prefix (ANY); without [Route] only noted", async () => {
+  const x = await extract(
+    "[Route(\"api/[controller]/[action]\")]\n[Authorize]\npublic class ToolsController : ControllerBase {\n" +
+      "  public IActionResult Run(string c) => Ok();\n  [NonAction] public void Help() {}\n  public static void S() {}\n  private void P() {}\n" +
+      "  [HttpGet(\"x\")] public void X() {}\n  [AllowAnonymous] public void Open() {}\n}\n"
+  );
+  assert.deepEqual(routeRows(x), [
+    ["ANY", "/api/Tools/Run", "ToolsController.Run", ["Authorize"], "aspnet"],
+    ["GET", "/api/Tools/X/x", "ToolsController.X", ["Authorize"], "aspnet"],
+    ["ANY", "/api/Tools/Open", "ToolsController.Open", ["Authorize", "AllowAnonymous"], "aspnet"]
+  ]);
+  const text = "[Route(\"api/[controller]/[action]\")]\n[Authorize]\npublic class ToolsController : ControllerBase {\n  public IActionResult Run(";
+  assert.deepEqual([x.routes[0].start_byte, x.routes[0].line], [text.length - "Run(".length, 4]);
+  assert.deepEqual(x.not_extracted, []);
+  const y = await extract("public class ToolsController : ControllerBase {\n  public IActionResult Run(string c) => Ok();\n}\n");
+  assert.deepEqual([y.routes, y.not_extracted], [[], ["conventional routing"]]);
+});
+
+test("attribute routing: a method [Route] beside a templated verb ⇒ one route per template; several templated verbs ⇒ the [Route] route is ANY", async () => {
+  const x = await extract(
+    "[Route(\"p\")]\nclass K {\n  [Route(\"a\")] [HttpGet(\"b\")] public void M() {}\n  [HttpGet(\"c\")] [HttpPost(\"d\")] [Route(\"e\")] public void N() {}\n" +
+      "  [HttpGet] [HttpPut] [Route(\"f\")] public void O() {}\n}\n"
+  );
+  assert.deepEqual(routeRows(x).map((r) => r.slice(0, 3)), [
+    ["GET", "/p/a", "K.M"],
+    ["GET", "/p/b", "K.M"],
+    ["GET", "/p/c", "K.N"],
+    ["POST", "/p/d", "K.N"],
+    ["ANY", "/p/e", "K.N"],
+    ["GET", "/p/f", "K.O"],
+    ["PUT", "/p/f", "K.O"]
+  ]);
+  assert.equal(new Set(x.routes.map((r) => r.start_byte)).size, x.routes.length, "one anchor per route");
+});
+
+test("controllers deriving from another controller base ⇒ inherited controller attributes noted", async () => {
+  const x = await extract("public class AdminController : BaseController {\n  [HttpGet(\"a\")] public void A() {}\n}\npublic class OkController : Microsoft.AspNetCore.Mvc.ControllerBase { }\n");
+  assert.deepEqual(x.not_extracted, ["inherited controller attributes"]);
+  assert.deepEqual((await extract("public class OkController : Controller { }\nclass Base { }\nclass Derived : Base { }\n")).not_extracted, []);
+});
+
+test("minimal APIs: a bare method group naming a local function / method of its scope is qualified; this.M ⇒ <Class>.M", async () => {
+  const x = await extract("app.MapPut(\"/p\", Put);\napp.MapGet(\"/q\", Missing);\nstatic IResult Put() => Results.Ok();\n", { path: "Program.cs" });
+  assert.deepEqual(routeRows(x).map((r) => r.slice(0, 3)), [["PUT", "/p", "Program.Put"], ["GET", "/q", "Missing"]]);
+  const y = await extract(
+    "class Api {\n  void Register(WebApplication app) {\n    app.MapGet(\"/h\", this.Handle);\n    app.MapGet(\"/i\", Handle);\n    app.MapGet(\"/j\", Local);\n    void Local() {}\n  }\n  void Handle() {}\n}\n"
+  );
+  assert.deepEqual(routeRows(y).map((r) => r.slice(0, 3)), [["GET", "/h", "Api.Handle"], ["GET", "/i", "Api.Handle"], ["GET", "/j", "Api.Register.Local"]]);
+  const dir = mkdtempSync(join(tmpdir(), "oswe-csharp-"));
+  try {
+    writeFileSync(join(dir, "Program.cs"), "app.MapPut(\"/p\", Put);\nstatic string Put() => \"ok\";\n");
+    const { graph, reason } = await buildGraph({ projectDir: realpathSync(dir), scopeRealpath: realpathSync(dir), stacks: ["dotnet"], frameworks: ["aspnet"], referencesDir: REFERENCES_DIR });
+    assert.ok(graph, reason);
+    const put = graph.nodes.find((n) => n.type === "function" && n.qualified_name === "Program.Put");
+    assert.equal(graph.nodes.find((n) => n.type === "route").handler, put.id);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("minimal APIs: Map / MapMethods ⇒ ANY, method-group handlers, chained AllowAnonymous / RequireAuthorization, groups noted, non-routes ignored", async () => {
@@ -359,6 +420,19 @@ test("sources: [FromBody] / [FromQuery] parameters in the fixture, Request.* mem
 });
 
 // ---- imports and resolution ---------------------------------------------------------------------
+
+test("namespace: nested blocks ⇒ the innermost full dotted name; sibling blocks noted", async () => {
+  const x = await extract("namespace A {\n  namespace B.C {\n    class K {}\n  }\n}\n");
+  assert.deepEqual([x.namespace, x.not_extracted], ["A.B.C", []]);
+  const y = await extract("namespace A {\n  namespace B { }\n  namespace C { }\n}\n");
+  assert.deepEqual([y.namespace, y.not_extracted], ["A.B", ["multiple namespaces"]]);
+});
+
+test("an implicit lambda parameter is a declaration, its uses in the body are references", async () => {
+  const x = await extract("class K {\n  Func<bool, bool> f = UseShellExecute => UseShellExecute;\n}\n");
+  const text = "class K {\n  Func<bool, bool> f = UseShellExecute => UseShellExecute;\n}\n";
+  assert.deepEqual(x.sinks.map((s) => s.start_byte), [text.lastIndexOf("UseShellExecute")]);
+});
 
 test("imports: using / global using / using static / alias forms; namespace from the file-scoped or block declaration", async () => {
   const x = await extract("global using System.Text;\nusing static A.B.C;\nusing Al = P.Q.R;\nnamespace Demo.Web;\nusing Demo.Services;\nclass K {}\n");

@@ -210,21 +210,33 @@ async function extractAll({ o, files, langModules }, surfaceOf) {
 
 const importKey = (fromPath, specifier) => `${fromPath}\u0000${specifier}`;
 const siteKey = (path, x) => `${path}\u0000${x}`;
+const routeSiteKey = (path, startByte) => `${path}\u0001${startByte}`;
+const fnRef = (path, fn) => ({ path, qualified_name: fn.qualified_name, start_byte: fn.start_byte });
 
 // The function a route handler / middleware text names in its file: `<anon>@l:c` and `Class.method`
 // texts are same-file qualified names; anything else resolves exactly like a call from module level.
+// A handler text naming several same-file functions (overloaded C# / Java actions) is the one whose
+// [start_byte, end_byte) contains the route (its routing attribute / annotation lies inside the
+// method), stored under routeSiteKey(path, route.start_byte); when none contains it that key holds
+// null and the route falls back to the text's resolution (buildRoutes notes a miss).
 function resolveRouteTexts(parsed, importMap, classIndex, langModules) {
-  const resolved = new Map(); // siteKey(path, text) -> { path, qualified_name, start_byte } | null
+  const resolved = new Map(); // siteKey(path, text) | routeSiteKey(path, start) -> { path, qualified_name, start_byte } | null
   const pseudo = new Map(); // path -> pseudo-calls
   const bySeq = new Map(); // siteKey(path, seq) -> siteKey(path, text)
   for (const file of parsed) {
     for (const route of file.extract.routes ?? []) {
+      const overloads = /[.@]/.test(route.handler_text) ? file.extract.functions.filter((f) => f.qualified_name === route.handler_text) : [];
+      if (overloads.length > 1) {
+        const containing = overloads.filter((f) => f.start_byte <= route.start_byte && route.start_byte < f.end_byte);
+        const innermost = containing.reduce((a, f) => (a && a.start_byte > f.start_byte ? a : f), null);
+        resolved.set(routeSiteKey(file.path, route.start_byte), innermost && fnRef(file.path, innermost));
+      }
       for (const text of [route.handler_text, ...route.middleware_texts]) {
         const key = siteKey(file.path, text);
         if (resolved.has(key)) continue;
         const direct = /[.@]/.test(text) ? file.extract.functions.filter((f) => f.qualified_name === text) : [];
         if (direct.length === 1) {
-          resolved.set(key, { path: file.path, qualified_name: direct[0].qualified_name, start_byte: direct[0].start_byte });
+          resolved.set(key, fnRef(file.path, direct[0]));
           continue;
         }
         resolved.set(key, null);
@@ -365,7 +377,9 @@ function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
       const own = route.middleware_texts.map((text) => ({ file: file.path, text }));
       const mws = [...ctx.mws, ...globalsBefore(uses.globals, file.path, route.start_byte, route.path_pattern), ...own]
         .map((m) => ({ ...m, ref: resolved.get(siteKey(m.file, m.text)) ?? null }));
-      const handlerRef = resolved.get(siteKey(file.path, route.handler_text)) ?? null;
+      const overloadKey = routeSiteKey(file.path, route.start_byte);
+      const handlerRef = resolved.get(overloadKey) ?? resolved.get(siteKey(file.path, route.handler_text)) ?? null;
+      if (!handlerRef && resolved.has(overloadKey)) notExtracted(file.stack).add("route(overloaded handler)");
       routes.push({
         handlerRef,
         mws,

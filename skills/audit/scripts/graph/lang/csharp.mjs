@@ -20,7 +20,8 @@
 //              name; `extends` is the first base type's base name unless it looks like an interface
 //              (`I[A-Z]...`); every other base is only noted ("implements clause").
 //   exports    every public top-level (namespace-level) type. namespace = the first `namespace X.Y;` /
-//              `namespace X.Y { }` declaration (several: noted).
+//              `namespace X.Y { }` declaration, deepened by blocks nested in it (`namespace A {
+//              namespace B { } }` -> "A.B"); a sibling declaration is noted.
 //   imports    `using X.Y;` / `global using X.Y;` -> "X.Y" binding nothing (a file-level dependency:
 //              class references resolve through resolve.mjs's unique-class-name rule);
 //              `using static X.Y.Z;` the same, noted; `using A = X.Y.Z;` -> named binding Z, local A.
@@ -44,19 +45,24 @@
 //   sources    member-access chains and call callees, each matched through every suffix sub-chain
 //              (`HttpContext.Request.Form["x"]` -> `Request.Form`; at most one source per chain),
 //              attributes on a parameter or a method (`[FromBody]`), identifiers and string literals.
-//   routes     attribute routing: `[HttpGet]` / `[HttpPost]` / `[HttpPut]` / `[HttpDelete]` /
-//              `[HttpPatch]` / `[HttpHead]` / `[HttpOptions]` (optionally with a template; a template-less
-//              verb takes the method's `[Route]` template) or a lone method `[Route("x")]` (ANY), each
-//              prefixed by the class's `[Route]` (a template starting with `/` or `~/` is not); the
+//   routes     attribute routing, one route per template (see actionRoutes): `[HttpGet]` / `[HttpPost]` /
+//              `[HttpPut]` / `[HttpDelete]` / `[HttpPatch]` / `[HttpHead]` / `[HttpOptions]` (optionally
+//              with a template; a template-less verb takes the method's `[Route]` template), a method
+//              `[Route("x")]` (the action's one verb, else ANY), and in a type with a literal `[Route]`
+//              every public, non-static, non-`[NonAction]` action without either (ANY, at the prefix);
+//              each prefixed by the type's `[Route]` (a template starting with `/` or `~/` is not); the
 //              `[controller]` token is the class name without its `Controller` suffix, `[action]` the
 //              method name; the class's then the method's `[Authorize]` / `[AllowAnonymous]` are the
-//              middleware texts. A `...Controller` class with a public method carrying no routing
-//              attribute is only noted ("conventional routing"). Minimal APIs: `x.MapGet / MapPost /
-//              MapPut / MapDelete / MapPatch(path, handler)`, `x.Map` / `x.MapMethods` -> ANY; a lambda
-//              handler is its `<anon>@l:c` label, a method group `X.M` its text; chained
-//              `.RequireAuthorization(...)` / `.AllowAnonymous()` are the middleware texts.
-//              `MapGroup` / `MapControllers` are only noted ("route group"): routes inside a group
-//              keep their own path.
+//              middleware texts. A `...Controller` class without `[Route]` whose public action carries
+//              no routing attribute is only noted ("conventional routing"); one deriving from a base
+//              other than `Controller` / `ControllerBase` is noted ("inherited controller attributes":
+//              the base's attributes are not read). Minimal APIs: `x.MapGet / MapPost / MapPut /
+//              MapDelete / MapPatch(path, handler)`, `x.Map` / `x.MapMethods` -> ANY; a lambda handler is
+//              its `<anon>@l:c` label; a method group `X.M` its text, `this.M` -> `<Class>.M`, a bare `M`
+//              the local function `<enclosing>.M` (`Program.M` at top level) or method `<Class>.M` the
+//              file defines, else `M`; chained `.RequireAuthorization(...)` / `.AllowAnonymous()` are
+//              the middleware texts. `MapGroup` / `MapControllers` are only noted ("route group"):
+//              routes inside a group keep their own path.
 //
 // Known grammar limits (vendored tree-sitter-c_sharp, tree-sitter-wasms 0.1.13): C# 12 class / struct
 // primary constructors (`class X(Runner r) { }`) do not parse — the tree has an ERROR node there,
@@ -84,7 +90,7 @@ const LAMBDAS = new Set(["lambda_expression", "anonymous_method_expression"]);
 // is the candidate), an attribute or a namespace: it is not a value reference.
 const NON_REFERENCE_SLOTS = new Set([
   "member_access_expression.name", "member_binding_expression.name", "invocation_expression.function",
-  "parameter.name", "parameter_list.name", "lambda_expression.null", "for_each_statement.left", "catch_declaration.name",
+  "parameter.name", "parameter_list.name", "for_each_statement.left", "catch_declaration.name",
   "declaration_expression.name", "type_parameter.name", "type_parameter_constraints_clause.target", "attribute.name",
   ...[
     ...TYPE_DECLARATIONS, "enum_member_declaration", "delegate_declaration", "method_declaration", "constructor_declaration",
@@ -102,6 +108,7 @@ const SOURCE_ATTRIBUTE_OWNERS = new Set(["parameter", "method_declaration"]);
 
 const HTTP_VERB_ATTRIBUTES = new Map([["HttpGet", "GET"], ["HttpPost", "POST"], ["HttpPut", "PUT"], ["HttpDelete", "DELETE"], ["HttpPatch", "PATCH"], ["HttpHead", "HEAD"], ["HttpOptions", "OPTIONS"]]);
 const ROUTING_ATTRIBUTES = new Set([...HTTP_VERB_ATTRIBUTES.keys(), "Route", "NonAction"]);
+const MVC_BASES = new Set(["Controller", "ControllerBase"]);
 const AUTH_ATTRIBUTES = new Set(["Authorize", "AllowAnonymous"]);
 const MINIMAL_VERBS = { MapGet: "GET", MapPost: "POST", MapPut: "PUT", MapDelete: "DELETE", MapPatch: "PATCH", Map: "ANY", MapMethods: "ANY" };
 const ROUTE_GROUPS = new Set(["MapGroup", "MapControllers"]);
@@ -210,11 +217,13 @@ function newState(path, surface) {
     functions: [], calls: [], imports: [], exports: [], classes: [], routes: [], sources: [], sinks: [],
     notExtracted: new Set(),
     namespace: null,
-    namespaceCount: 0,
+    namespaceSeen: false,
     scopes: [],
     moduleFrame: newFrame(),
     attributeDepth: 0,
-    anonNames: new Map() // lambda start byte -> its minimal-API route-handler label
+    anonNames: new Map(), // lambda start byte -> its minimal-API route-handler label
+    bareHandlers: [], // minimal-API routes with a bare method-group handler: { route, candidates }
+    namespaces: [] // the enclosing namespace blocks' full dotted names
   };
 }
 
@@ -235,6 +244,7 @@ function typeCandidate(type, st) {
 
 // onIdentifier receives the TreeCursor rather than a Node (see javascript.mjs).
 function onIdentifier(cursor, st, ctx) {
+  if (ctx.parentType === "lambda_expression" && ctx.field !== "body") return; // the parameter of `x => ...`
   if (ctx.field === "type" || NON_REFERENCE_PARENTS.has(ctx.parentType) || NON_REFERENCE_SLOTS.has(`${ctx.parentType}.${ctx.field}`)) return;
   emitMatches(cursor, [{ category: "identifier", text: cursor.nodeText }], st, { sources: true, sinks: true });
 }
@@ -358,8 +368,8 @@ function onType(node, st) {
   const prefixes = attributes.filter((a) => attributeName(a) === "Route").map(templateOf);
   if (prefixes.length > 1) st.notExtracted.add("route(multiple class prefixes)"); // the first is used
   if (prefixes[0] === null) st.notExtracted.add("route(non-literal path)");
-  const unrouted = (m) => hasModifier(m, "public") && !attributesOf(m).some((a) => ROUTING_ATTRIBUTES.has(attributeName(a)));
-  if (name?.endsWith("Controller") && methods.some(unrouted)) st.notExtracted.add("conventional routing");
+  if (name?.endsWith("Controller") && prefixes.length === 0 && methods.some(isUnroutedAction)) st.notExtracted.add("conventional routing");
+  if (name?.endsWith("Controller") && superclass && !MVC_BASES.has(superclass)) st.notExtracted.add("inherited controller attributes");
   st.scopes.push({
     frame: fieldFrame(node, members),
     cls: {
@@ -369,6 +379,7 @@ function onType(node, st) {
       exported: outer ? outer.exported && isPublic : isPublic,
       isInterface: node.type === "interface_declaration",
       prefix: prefixes[0] ?? "",
+      routedPrefix: prefixes.length > 0 && prefixes[0] !== null, // its unattributed actions are routed at the prefix
       controller: name?.replace(/(.)Controller$/, "$1") ?? "",
       auth: attributes.map(attributeName).filter((n) => AUTH_ATTRIBUTES.has(n))
     }
@@ -448,16 +459,32 @@ function onFunction(node, st) {
   return () => st.scopes.pop();
 }
 
-// One route per verb attribute (or the lone method `[Route]`), at the attribute.
+// A public, non-static action carrying no routing attribute (`[NonAction]` counts as one).
+const isUnroutedAction = (m) => hasModifier(m, "public") && !hasModifier(m, "static") && !attributesOf(m).some((a) => ROUTING_ATTRIBUTES.has(attributeName(a)));
+
+// The routes of an action as [{ at, method, template }]: each templated verb at its own template; a
+// template-less verb at the first method `[Route]` template (else at the prefix); every other method
+// `[Route]` at its template, constrained to the action's one verb (else ANY); an unattributed action of
+// a `[Route]`-prefixed type at the prefix (ANY), anchored at its name.
+function actionRoutes(node, attributes, names, owner) {
+  const verbs = attributes.filter((a, i) => HTTP_VERB_ATTRIBUTES.has(names[i]));
+  const routes = attributes.filter((a, i) => names[i] === "Route");
+  const verbOf = (a) => HTTP_VERB_ATTRIBUTES.get(attributeName(a));
+  const bare = verbs.filter((v) => templateOf(v) === "");
+  const specs = verbs.map((v) => ({ at: v, method: verbOf(v), template: templateOf(v) !== "" ? templateOf(v) : routes.length ? templateOf(routes[0]) : "" }));
+  const constraint = verbs.length === 1 ? verbOf(verbs[0]) : "ANY";
+  routes.forEach((r, i) => {
+    if (!(bare.length && i === 0)) specs.push({ at: r, method: constraint, template: templateOf(r) });
+  });
+  if (!specs.length && owner.routedPrefix && isUnroutedAction(node)) specs.push({ at: field(node, "name"), method: "ANY", template: "" });
+  return specs;
+}
+
 function attributeRoutes(node, owner, fn, st) {
   const attributes = attributesOf(node);
   const names = attributes.map(attributeName);
   const auth = names.filter((n) => AUTH_ATTRIBUTES.has(n));
-  const routeAttribute = attributes.find((a, i) => names[i] === "Route") ?? null;
-  const verbs = attributes.filter((a, i) => HTTP_VERB_ATTRIBUTES.has(names[i]));
-  for (const attribute of verbs.length ? verbs : [routeAttribute].filter(Boolean)) {
-    let template = templateOf(attribute);
-    if (template === "" && attribute !== routeAttribute && routeAttribute) template = templateOf(routeAttribute); // [HttpGet] [Route("x")]
+  for (const { at, method, template } of actionRoutes(node, attributes, names, owner)) {
     if (template === null) {
       st.notExtracted.add("route(non-literal path)");
       continue;
@@ -467,9 +494,9 @@ function attributeRoutes(node, owner, fn, st) {
       .replace(/\[controller\]/gi, owner.controller)
       .replace(/\[action\]/gi, fn.name);
     st.routes.push({
-      line: lineOf(attribute),
-      start_byte: attribute.startIndex,
-      http_method: HTTP_VERB_ATTRIBUTES.get(attributeName(attribute)) ?? "ANY",
+      line: lineOf(at),
+      start_byte: at.startIndex,
+      http_method: method,
       path_pattern: path,
       handler_text: fn.qualified_name,
       middleware_texts: [...owner.auth, ...auth],
@@ -478,14 +505,31 @@ function attributeRoutes(node, owner, fn, st) {
   }
 }
 
-// A minimal-API handler argument as its handler text (null when it names none).
+// A minimal-API handler argument as its handler text (null when it names none): a lambda's label;
+// `this.M` -> `<Class>.M` inside a type; a bare `M` stays as is until the walk ends (see
+// qualifyHandlers); any other method group its text.
 function routeHandler(value, st) {
   if (LAMBDAS.has(value?.type)) {
     const label = anonLabel(value);
     st.anonNames.set(value.startIndex, label);
     return label;
   }
+  const cls = innermostClass(st);
+  if (value?.type === "member_access_expression" && field(value, "expression")?.type === "this_expression" && cls?.qualifiedName) {
+    return `${cls.qualifiedName}.${memberName(field(value, "name"))}`;
+  }
   return value?.type === "identifier" || value?.type === "member_access_expression" ? textOf(value) : null;
+}
+
+// A bare method-group handler `M` names the local function `<enclosing>.M` of its scope (a top-level
+// `Program.M` included), else the method `<Class>.M` of the enclosing type, when the file defines it
+// (local functions may follow the registration, hence after the walk).
+function qualifyHandlers(st) {
+  const defined = new Set(st.functions.map((f) => f.qualified_name));
+  for (const { route, candidates } of st.bareHandlers) {
+    const hit = candidates.find((c) => c && defined.has(c));
+    if (hit) route.handler_text = hit;
+  }
 }
 
 // The `.RequireAuthorization(...)` / `.AllowAnonymous()` calls chained onto a route registration.
@@ -516,7 +560,7 @@ function minimalApiRoute(node, name, st) {
   }
   const handler = routeHandler(args[handlerAt], st);
   if (!handler) return void st.notExtracted.add("route(non-literal handler)");
-  st.routes.push({
+  const route = {
     line: lineOf(node),
     start_byte: node.startIndex,
     http_method: MINIMAL_VERBS[name],
@@ -524,7 +568,12 @@ function minimalApiRoute(node, name, st) {
     handler_text: handler,
     middleware_texts: chainedAuth(node),
     framework: "aspnet"
-  });
+  };
+  st.routes.push(route);
+  if (args[handlerAt].type === "identifier") {
+    const cls = innermostClass(st);
+    st.bareHandlers.push({ route, candidates: [`${enclosingName(st)}.${handler}`, cls?.qualifiedName ? `${cls.qualifiedName}.${handler}` : null] });
+  }
 }
 
 // ---- calls ----------------------------------------------------------------------------------------
@@ -615,9 +664,18 @@ function onUsing(node, st) {
   st.imports.push({ line: lineOf(node), specifier, bindings: alias ? [{ imported: lastSegment(specifier), local: alias }] : [], local: null });
 }
 
+// The file's namespace is the first declaration's full dotted name, deepened by a block nested
+// directly in it (`namespace A { namespace B { } }` -> "A.B"); any other declaration is noted.
 function onNamespace(node, st) {
-  if (st.namespaceCount++ > 0) st.notExtracted.add("multiple namespaces"); // the first is the file's
-  else st.namespace = nameText(field(node, "name"));
+  const own = nameText(field(node, "name"));
+  const outer = st.namespaces.at(-1) ?? null;
+  const full = outer && own ? `${outer}.${own}` : own;
+  if (!st.namespaceSeen) st.namespace = full;
+  else if (outer !== null && outer === st.namespace) st.namespace = full;
+  else st.notExtracted.add("multiple namespaces");
+  st.namespaceSeen = true;
+  st.namespaces.push(full);
+  return () => st.namespaces.pop();
 }
 
 // A C# 12 primary constructor the vendored grammar cannot parse: an ERROR node standing for the
@@ -664,6 +722,7 @@ const CURSOR_HANDLERS = new Map([["identifier", onIdentifier]]);
 export function extractFile({ tree, path, surface }) {
   const st = newState(path, surface);
   walk(tree, st, HANDLERS, CURSOR_HANDLERS);
+  qualifyHandlers(st);
   return {
     functions: st.functions.sort(byStart),
     calls: st.calls.sort(byStart),

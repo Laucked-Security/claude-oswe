@@ -332,6 +332,46 @@ test("(6) auth: a marker with an argument prefix (php ->middleware('auth) matche
   });
 });
 
+test("(6) overloaded handlers: each route handles the overload containing it (C# GET/POST pair)", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "EditController.cs", [
+    "[Route(\"[controller]\")]",
+    "public class EditController : Controller {",
+    "  [HttpGet(\"edit\")] public IActionResult Edit(int id) => View();",
+    "  [HttpPost(\"edit\")] public IActionResult Edit(Model m) => View();",
+    "}",
+    ""
+  ].join("\n"));
+  const { graph } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["dotnet"], frameworks: ["aspnet"], referencesDir: REFERENCES_DIR });
+  const edits = nodesOf(graph, "function").filter((f) => f.qualified_name === "EditController.Edit");
+  const byLine = new Map(edits.map((f) => [f.line_start, f.id]));
+  assert.equal(byLine.size, 2);
+  const routes = nodesOf(graph, "route").map((r) => [r.http_method, r.path_pattern, r.handler]).sort();
+  assert.deepEqual(routes, [["GET", "/Edit/edit", byLine.get(3)], ["POST", "/Edit/edit", byLine.get(4)]].sort());
+  const handles = graph.edges.filter((e) => e.type === "handles").map((e) => e.to).sort();
+  assert.deepEqual(handles, [byLine.get(3), byLine.get(4)].sort());
+  assert.deepEqual(graph.stats.coverage_matrix.dotnet.not_extracted, []);
+});
+
+test("(6) overloaded handlers: a route inside none of them falls back to the text, then notes route(overloaded handler)", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "a.js", "// placeholder source, extracted by the stub module\n");
+  const modules = tempDir(t, "oswe-build-graph-stub-");
+  put(modules, "javascript.mjs", [
+    "export const lang = { id: 'javascript', stack: 'node', langIds: ['javascript'], frameworks: ['express'], implicitThisCalls: false, submoduleImports: false, callableLocals: true, overloads: false };",
+    "const fn = (start, end) => ({ name: 'm', qualified_name: 'K.m', line_start: 1, line_end: 1, start_byte: start, end_byte: end, param_count: 0, kind: 'method', exported: false, class: 'K' });",
+    "export function extractFile() {",
+    "  return { functions: [fn(0, 10), fn(10, 20)], calls: [], imports: [], exports: [], classes: [{ name: 'K', extends: null, methods: ['m'], start_byte: 0 }], namespace: null,",
+    "    routes: [{ line: 1, start_byte: 30, http_method: 'GET', path_pattern: '/x', handler_text: 'K.m', middleware_texts: [], framework: 'express' }], sources: [], sinks: [], not_extracted: [] };",
+    "}",
+    "export const resolveImportSpecifier = () => null;",
+    ""
+  ].join("\n"));
+  const { graph } = await build(dir, { langModulesDir: modules });
+  assert.deepEqual(nodesOf(graph, "route").map((r) => [r.path_pattern, r.handler]), [["/x", null]]);
+  assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["route(overloaded handler)"]);
+});
+
 test("(6) a mount cycle drops the cycle-closing mount: the root's routes stay unprefixed", async (t) => {
   const dir = tempDir(t);
   put(dir, "a.js", "const b = require('./b');\napp.use('/b', b);\napp.get('/x', (req, res) => {});\nmodule.exports = app;\n");
