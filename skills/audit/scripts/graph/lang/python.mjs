@@ -19,11 +19,11 @@
 //              class names) plus the module's assignment targets. Imports and module-level def /
 //              class names never shadow. A class body binds nothing visible to its methods.
 //   receivers  `self` is a method's first parameter, whatever its name (`self`, `cls`, `me`), as
-//              long as the method does not rebind it: `self.m()` -> receiver "this"; `self.a.m()`
-//              -> the declared class of attribute a; any other `x.m()` (a loop variable named
-//              `cls` included) -> the class x is bound to (`x = C(...)`, `x: C`, parameter `x: C`)
-//              in the innermost scope that binds x. A name bound twice to different things
-//              carries no class.
+//              long as the method is not a `@staticmethod` and does not rebind it: `self.m()` ->
+//              receiver "this"; `self.a.m()` -> the declared class of attribute a; any other
+//              `x.m()` (a loop variable named `cls` or a staticmethod's parameter included) -> the
+//              class x is bound to (`x = C(...)`, `x: C`, parameter `x: C`) in the innermost scope
+//              that binds x. A name bound twice to different things carries no class.
 //   routes     Flask `@<x>.route(path, methods=[...])` / `@<x>.<verb>(path)`; FastAPI the same
 //              verbs on a FastAPI / APIRouter receiver (or in a file importing fastapi), plus
 //              `Depends.<name>` middleware texts; Django module-level `urlpatterns` `path()` /
@@ -259,8 +259,11 @@ function parameterName(param) {
   }
 }
 
-// A method's receiver parameter: its first parameter, unless that is a splat or a separator.
-function firstParameterName(node) {
+// A method's receiver parameter: its first parameter, unless that is a splat or a separator, or the
+// method is a `@staticmethod` (bare or called). A `@classmethod`'s first parameter (`cls`) counts.
+function receiverParameter(node) {
+  const decorators = node.parent?.type === "decorated_definition" ? childrenOfType(node.parent, "decorator") : [];
+  if (decorators.some((d) => lastSegment(decoratorInfo(d).name) === "staticmethod")) return null;
   const first = namedOf(field(node, "parameters"))[0];
   if (!first || !["identifier", "typed_parameter", "default_parameter", "typed_default_parameter"].includes(first.type)) return null;
   const name = parameterName(first);
@@ -315,7 +318,7 @@ function onFunction(node, st, ctx) {
   if (ctx.parentType === "decorated_definition") decoratorRoutes(childrenOfType(node.parent, "decorator"), node, qualifiedName, st);
   const frame = newFrame(node.startIndex, qualifiedName);
   addParameters(node, frame);
-  if (cls) Object.assign(frame, { selfName: firstParameterName(node), fieldTypes: top.cls.fieldTypes });
+  if (cls) Object.assign(frame, { selfName: receiverParameter(node), fieldTypes: top.cls.fieldTypes });
   st.scopes.push({ frame });
   return () => st.scopes.pop();
 }
@@ -368,7 +371,7 @@ function fieldTypes(body) {
     }
   }
   const selfAssignments = namedOf(body).map(definedFunction).filter((d) => d?.type === "function_definition").flatMap((method) => {
-    const selfName = firstParameterName(method);
+    const selfName = receiverParameter(method);
     return field(method, "body").descendantsOfType("assignment").filter((a) => {
       const left = field(a, "left");
       return selfName && left?.type === "attribute" && field(left, "object")?.type === "identifier" && field(left, "object").text === selfName;

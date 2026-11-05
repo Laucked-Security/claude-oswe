@@ -259,6 +259,16 @@ test("calls: self / cls are receivers only as a method's unrebound first paramet
   assert.ok(x.calls.find((c) => c.line === 7).scope_names.includes("cls"), "the loop variable shadows, so the call stays unresolved");
 });
 
+test("calls: a @staticmethod's first parameter is no receiver and contributes no attribute types", async () => {
+  const x = await extract(
+    "class K:\n    def go(self):\n        pass\n\n    @staticmethod\n    def f(x):\n        x.go()\n        x.attr = C()\n\n" +
+      "    @staticmethod()\n    def g(y):\n        y.go()\n\n    def m(self):\n        self.attr.run()\n"
+  );
+  const rows = x.calls.filter((c) => c.callee_text.includes(".")).map((c) => [c.callee_text, c.receiver, c.receiver_class]);
+  assert.deepEqual(rows, [["x.go", null, null], ["y.go", null, null], ["self.attr.run", null, null]]);
+  assert.ok(x.calls.find((c) => c.callee_text === "x.go").scope_names.includes("x"), "x is an ordinary parameter");
+});
+
 // ---- imports ------------------------------------------------------------------------------------
 
 test("import forms: dotted, aliased, from-import with alias, relative, star", async () => {
