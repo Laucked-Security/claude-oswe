@@ -369,7 +369,12 @@ would make "verifier may still accept" impossible. Instead:
    `structural_path == "absent"` ⇒ `confidence = "to verify"`**, recorded in the finding's
    `verification_notes` as `"structural: absent"`. The verifier's verdict (accept/downgrade/reject) is
    unchanged; only the confidence ceiling is. Through the existing Critical gate (every member at
-   "strong static proof"), a chain with such a member can no longer be Critical.
+   "strong static proof"), a chain with such a member can no longer be Critical. A chain verdict
+   whose `new_confidence` / `new_severity` lies within the ceilings computed from the members' pre-cap
+   confidences but above the post-cap ceilings (losing the Critical natural level also lowers the
+   severity ceiling) is clamped to the post-cap ceilings (chain note `"structural: member cap"`)
+   rather than failed as verifier output — the verifier could not have known the cap, and a retry
+   could not fix it.
 3. No existing rule changes; the 320 pipeline tests stay green with `--structural` omitted.
 
 ### 3.5 §7 Report
