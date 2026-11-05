@@ -17,9 +17,11 @@
 //   exit 0 ok (graph or null envelope) / 1 malformed input (missing projectDir / stacks /
 //   referencesDir, scope_realpath escaping projectDir) / 2 IO | usage.
 //   --checkpoint-dir wraps the run with cache-wrap (helperName "build-graph"): the input digest
-//   covers every parsed file's bytes, the resolution configs read, the reference pages loaded, the
-//   stacks / frameworks / excludes and vendor MANIFEST.json; the version digest covers every
-//   graph/**/*.mjs plus the vendored loader. A hit rewrites the cached output byte-for-byte.
+//   covers every walked file (path, walk status / skip reason, bytes), the resolution configs read,
+//   the reference pages loaded, the stacks / frameworks / excludes and vendor MANIFEST.json; the
+//   version digest covers every graph/**/*.mjs plus versionFiles() (vendored loader, out-of-tree
+//   helpers, graph schema). A hit rewrites the cached output byte-for-byte. Only graphs are
+//   stored: a { graph: null } envelope is never cached.
 //
 // Language modules are discovered, not registered: a file whose module (LANG_MODULE_FILE) does not
 // exist yet is a `file` node with parse_status "skipped", skip_reason "no extractor".
@@ -62,7 +64,7 @@ const pushTo = (map, key, value) => (map.has(key) ? map.get(key).push(value) : m
 const isStringArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 
 function normalizeOptions(opts) {
-  const { projectDir, scopeRealpath, stacks, frameworks = [], excludes, referencesDir, vendorDir } = opts ?? {};
+  const { projectDir, scopeRealpath, stacks, frameworks = [], excludes, referencesDir, vendorDir, langModulesDir } = opts ?? {};
   if (typeof projectDir !== "string" || projectDir === "") throw new InputError("projectDir must be a non-empty string");
   if (!isStringArray(stacks)) throw new InputError("stacks must be an array of strings");
   if (typeof referencesDir !== "string" || referencesDir === "") throw new InputError("referencesDir must be a non-empty string");
@@ -70,6 +72,7 @@ function normalizeOptions(opts) {
   if (excludes !== undefined && !isStringArray(excludes)) throw new InputError("excludes must be an array of strings");
   if (scopeRealpath !== undefined && scopeRealpath !== null && typeof scopeRealpath !== "string") throw new InputError("scope_realpath must be a string");
   if (vendorDir !== undefined && typeof vendorDir !== "string") throw new InputError("vendorDir must be a string");
+  if (langModulesDir !== undefined && typeof langModulesDir !== "string") throw new InputError("langModulesDir must be a string");
   let root;
   try {
     root = realpathSync(resolve(projectDir));
@@ -83,28 +86,30 @@ function normalizeOptions(opts) {
   } catch (e) {
     throw new InputError(e.code === "ENOENT" ? `scope_realpath does not exist: ${scopeRealpath}` : "scope_realpath escapes projectDir");
   }
-  return { root, scope, stacks, frameworks, excludes: excludes ?? DEFAULT_EXCLUDES, referencesDir, vendorDir: vendorDir ?? VENDOR_DIR };
+  return { root, scope, stacks, frameworks, excludes: excludes ?? DEFAULT_EXCLUDES, referencesDir, vendorDir: vendorDir ?? VENDOR_DIR, langModulesDir: langModulesDir ?? LANG_MODULES_DIR };
 }
 
 // ---- stage 2: walk + read + language modules ------------------------------------------------------
 
-const moduleCache = new Map(); // module file name -> Promise<module | null>
+// `langModulesDir` is an internal option (tests point it at an empty dir); the CLI never sets it.
+const LANG_MODULES_DIR = join(GRAPH_DIR, "lang");
+const moduleCache = new Map(); // module absolute path -> Promise<module | null>
 
-function loadLangModule(name) {
-  if (!moduleCache.has(name)) {
-    const abs = join(GRAPH_DIR, "lang", `${name}.mjs`);
+function loadLangModule(dir, name) {
+  const abs = join(dir, `${name}.mjs`);
+  if (!moduleCache.has(abs)) {
     const promise = existsSync(abs)
       ? import(pathToFileURL(abs).href).then((m) => (typeof m.extractFile === "function" && m.lang ? m : null))
       : Promise.resolve(null);
-    moduleCache.set(name, promise);
+    moduleCache.set(abs, promise);
   }
-  return moduleCache.get(name);
+  return moduleCache.get(abs);
 }
 
-async function loadLangModules(langIds) {
+async function loadLangModules(dir, langIds) {
   const modules = new Map();
   for (const langId of sortedUnique(langIds)) {
-    const mod = await loadLangModule(LANG_MODULE_FILE[langId]);
+    const mod = await loadLangModule(dir, LANG_MODULE_FILE[langId]);
     if (mod) modules.set(langId, mod);
   }
   return modules;
@@ -114,7 +119,7 @@ async function loadLangModules(langIds) {
 async function prepare(opts) {
   const o = normalizeOptions(opts);
   const walked = walkFiles({ projectDir: o.root, scopeRealpath: o.scope, excludes: o.excludes });
-  const langModules = await loadLangModules(walked.map((w) => w.langId));
+  const langModules = await loadLangModules(o.langModulesDir, walked.map((w) => w.langId));
   const files = walked.map((w) => {
     const file = { path: w.path, langId: w.langId, stack: LANG_STACK[w.langId], status: w.status, skip_reason: w.skip_reason };
     if (w.status !== "ok") return file;
@@ -126,15 +131,18 @@ async function prepare(opts) {
     file.sha256 = createHash("sha256").update(file.bytes).digest("hex");
     return file;
   });
+  // Every walked file is in the cache key — a newly added skipped file (too large, minified,
+  // out of scope) changes the graph's file nodes and stats just like a parsed one.
+  const walkDigest = files.map((f) => ({ path: f.path, status: f.status, skip_reason: f.skip_reason ?? null, sha256: f.sha256 ?? null }));
   const configs = loadResolutionConfigs(o.root, o.scope);
   const referenceStacks = sortedUnique(files.filter((f) => f.status === "ok" && langModules.has(f.langId)).map((f) => f.stack));
   const references = referenceStacks.map((stack) => ({ stack, sha256: fileSha256(join(o.referencesDir, `${stack}.md`)) }));
-  return { o, files, langModules, configs, references };
+  return { o, files, walkDigest, langModules, configs, references };
 }
 
-function inputDigest({ o, files, configs, references }) {
+function inputDigest({ o, walkDigest, configs, references }) {
   return sha256Hex(canonicalize({
-    files: files.filter((f) => f.sha256).map((f) => ({ path: f.path, sha256: f.sha256 })),
+    files: walkDigest,
     configs: configs.read,
     references,
     stacks: o.stacks,
@@ -144,8 +152,22 @@ function inputDigest({ o, files, configs, references }) {
   }));
 }
 
-function versionDigest(vendorDir) {
-  return sha256Hex(dirVersionDigest(GRAPH_DIR) + ":" + (fileSha256(join(vendorDir, "web-tree-sitter.mjs")) ?? "missing"));
+// Code outside graph/ that decides the output: the vendored loader, the out-of-tree helpers graph/
+// imports (surface-scan, confine-path, cache-wrap, validate-output and its generated validators),
+// and the graph schema.
+export function versionFiles(vendorDir) {
+  const scripts = join(GRAPH_DIR, "..");
+  return [
+    join(vendorDir, "web-tree-sitter.mjs"),
+    ...["validate-output.mjs", "validators.mjs", "confine-path.mjs", "cache-wrap.mjs", "surface-scan.mjs"].map((f) => join(scripts, f)),
+    join(scripts, "..", "schemas", "graph.schema.json")
+  ];
+}
+
+// PURE over its inputs: dirVersionDigest(graphDir) plus the bytes of each listed file, in order
+// (a missing file contributes "missing"). Paths themselves are not hashed.
+export function versionDigest(files, { graphDir = GRAPH_DIR } = {}) {
+  return sha256Hex([dirVersionDigest(graphDir), ...files.map((f) => fileSha256(f) ?? "missing")].join(":"));
 }
 
 // ---- stage 3: decode + parse + extract ------------------------------------------------------------
@@ -254,7 +276,7 @@ function importedFile(file, text, importMap, extractsByPath) {
 function classifyUses(parsed, resolved, importMap, notExtracted) {
   const extractsByPath = new Map(parsed.map((f) => [f.path, f.extract]));
   const globals = new Map(); // path -> [{ path_pattern, start_byte, mws: [{ file, text }] }]
-  const mountOf = new Map(); // mounted path -> { file, path_pattern, start_byte, mws }
+  const mountOf = new Map(); // mounted path -> { file, stack, text, path_pattern, start_byte, mws }
   for (const file of parsed) {
     for (const route of file.extract.routes ?? []) {
       if (route.http_method !== "USE") continue;
@@ -264,31 +286,50 @@ function classifyUses(parsed, resolved, importMap, notExtracted) {
         continue;
       }
       const target = importedFile(file, route.handler_text, importMap, extractsByPath);
-      if (target && !mountOf.has(target)) mountOf.set(target, { file: file.path, path_pattern: route.path_pattern, start_byte: route.start_byte, mws });
+      if (target && !mountOf.has(target)) mountOf.set(target, { file: file.path, stack: file.stack, text: route.handler_text, path_pattern: route.path_pattern, start_byte: route.start_byte, mws });
       else notExtracted(file.stack).add(target ? `mount:${route.handler_text}(mounted twice)` : `mount:${route.handler_text}`);
     }
   }
+  breakMountCycles(mountOf, notExtracted);
   return { globals, mountOf };
+}
+
+// Each file has at most one parent mount, so a cycle is a simple loop. Its root is the cycle's
+// smallest path: the mount that targets the root (the one closing the cycle) is dropped and
+// recorded in the mounting file's not_extracted as "mount:<text>(cycle)"; the root stays unprefixed.
+function breakMountCycles(mountOf, notExtracted) {
+  for (const start of [...mountOf.keys()].sort(compare)) {
+    const chain = [];
+    let current = start;
+    while (mountOf.has(current) && !chain.includes(current)) {
+      chain.push(current);
+      current = mountOf.get(current).file;
+    }
+    if (!chain.includes(current)) continue;
+    const root = chain.slice(chain.indexOf(current)).sort(compare)[0];
+    const closing = mountOf.get(root);
+    mountOf.delete(root);
+    notExtracted(closing.stack).add(`mount:${closing.text}(cycle)`);
+  }
 }
 
 const globalsBefore = (globals, path, startByte, pathPattern) =>
   (globals.get(path) ?? []).filter((g) => g.start_byte < startByte && underPrefix(g.path_pattern, pathPattern)).flatMap((g) => g.mws);
 
-// The path prefix and inherited middlewares of a file, composed along its chain of mounts (cycle-guarded).
-function mountContext(path, { globals, mountOf }, memo, visiting = new Set()) {
+// The path prefix and inherited middlewares of a file, composed along its (acyclic, see
+// breakMountCycles) chain of mounts.
+function mountContext(path, { globals, mountOf }, memo) {
   if (memo.has(path)) return memo.get(path);
   const mount = mountOf.get(path);
   let ctx = { prefix: null, mws: [] };
-  if (mount && !visiting.has(path)) {
-    visiting.add(path);
-    const parent = mountContext(mount.file, { globals, mountOf }, memo, visiting);
-    visiting.delete(path);
+  if (mount) {
+    const parent = mountContext(mount.file, { globals, mountOf }, memo);
     ctx = {
       prefix: parent.prefix === null ? joinPath("", mount.path_pattern) : joinPath(parent.prefix, mount.path_pattern),
       mws: [...parent.mws, ...globalsBefore(globals, mount.file, mount.start_byte, mount.path_pattern), ...mount.mws]
     };
   }
-  if (!visiting.size) memo.set(path, ctx);
+  memo.set(path, ctx);
   return ctx;
 }
 
@@ -343,11 +384,12 @@ function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
 
 const fnRefId = (ref) => nodeId("function", ref.path, ref.qualified_name, ref.start_byte);
 
-// Innermost function of the file whose [start_byte, end_byte] contains the offset; null at module level.
+// Innermost function of the file whose [start_byte, end_byte) contains the offset (tree-sitter end
+// offsets are exclusive); null at module level.
 function enclosingFn(file, startByte) {
   let best = null;
   for (const fn of file.extract.functions) {
-    if (fn.start_byte <= startByte && startByte <= fn.end_byte && (!best || fn.start_byte > best.start_byte)) best = fn;
+    if (fn.start_byte <= startByte && startByte < fn.end_byte && (!best || fn.start_byte > best.start_byte)) best = fn;
   }
   return best && nodeId("function", file.path, best.qualified_name, best.start_byte);
 }
@@ -552,7 +594,7 @@ async function main(args) {
 
   let digests = null;
   if (checkpointDir) {
-    digests = { inputDigest: inputDigest(prep), versionDigest: versionDigest(prep.o.vendorDir) };
+    digests = { inputDigest: inputDigest(prep), versionDigest: versionDigest(versionFiles(prep.o.vendorDir)) };
     const lookup = cacheLookup({ checkpointDir, helperName: "build-graph", ...digests, requiredPayloadKey: "output" });
     if (lookup.hit) {
       writeOut(outFile, lookup.wrapper.output);
@@ -569,7 +611,7 @@ async function main(args) {
   }
   const output = result.graph ?? { graph: null, reason: result.reason };
   writeOut(outFile, output);
-  if (digests) {
+  if (digests && result.graph) { // a { graph: null } envelope is never cached: it may be transient
     try {
       cacheStore({ checkpointDir, helperName: "build-graph", ...digests, payload: { output } });
     } catch (e) {

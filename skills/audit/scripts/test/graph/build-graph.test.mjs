@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { buildGraph, FRAMEWORK_STACK } from "../../graph/build-graph.mjs";
+import { buildGraph, FRAMEWORK_STACK, versionDigest, versionFiles } from "../../graph/build-graph.mjs";
 import { nodeId, edgeKey } from "../../graph/ids.mjs";
 import { parserAvailable } from "../../graph/parser.mjs";
 import { validate } from "../../validate-output.mjs";
@@ -144,6 +144,19 @@ test("(3) two sinks on one line are two sink nodes with distinct ids", async (t)
   assert.deepEqual(sinks.map((s) => s.class).sort(), ["cmd-exec", "eval"]);
 });
 
+test("enclosing_fn: end_byte is exclusive; a sink in an arrow inside a method belongs to the arrow", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "a.js", "function f(){}eval(x);\n");
+  put(dir, "b.js", "class K {\n  m() {\n    const g = () => { eval(y); };\n    execSync(z);\n  }\n}\n");
+  const { graph } = await build(dir);
+  const sinks = nodesOf(graph, "sink");
+  assert.equal(sinks.find((s) => s.file === "a.js").enclosing_fn, null);
+  const arrow = nodesOf(graph, "function").find((n) => n.file === "b.js" && n.kind === "arrow");
+  assert.ok(arrow);
+  assert.equal(sinks.find((s) => s.file === "b.js" && s.class === "eval").enclosing_fn, arrow.id);
+  assert.equal(sinks.find((s) => s.file === "b.js" && s.class === "cmd-exec").enclosing_fn, fnNamed(graph, "b.js", "K.m").id);
+});
+
 // ---- (4) invalid UTF-8 ----------------------------------------------------------------------------
 
 test("(4) a file with invalid UTF-8 is parse_status error; the rest of the graph is built", async (t) => {
@@ -176,14 +189,16 @@ test("a syntax error still extracts the partial tree; CRLF and LF checkouts give
 test("files without an extractor are skipped 'no extractor'; zero supported files is a valid empty graph", async (t) => {
   const dir = tempDir(t);
   put(dir, "a.py", "def f():\n    pass\n");
+  put(dir, "b.js", "function g() {}\n");
   put(dir, "README.md", "# x\n");
-  const { graph } = await build(dir, { stacks: ["python"], frameworks: ["flask"] });
+  const noModules = tempDir(t, "oswe-build-graph-nolang-"); // no language has an extractor here
+  const { graph } = await build(dir, { stacks: ["python"], frameworks: ["flask"], langModulesDir: noModules });
   assert.equal(validate("graph", graph).valid, true);
-  if (!existsSync(join(SCRIPTS_DIR, "graph", "lang", "python.mjs"))) {
-    assert.deepEqual(nodesOf(graph, "file"), [{ type: "file", id: nodeId("file", "a.py"), path: "a.py", stack: "python", lang: "python", parse_status: "skipped", skip_reason: "no extractor" }]);
-    assert.equal(graph.stats.files_skipped, 1);
-    assert.deepEqual(graph.stats.coverage_matrix.python, { frameworks_detected: ["flask"], extractors_applied: [], not_extracted: [], patterns_unmatched: [] });
-  }
+  const skipped = (path, stack, lang) => ({ type: "file", id: nodeId("file", path), path, stack, lang, parse_status: "skipped", skip_reason: "no extractor" });
+  assert.deepEqual(nodesOf(graph, "file"), [skipped("a.py", "python", "python"), skipped("b.js", "node", "javascript")].sort((a, b) => (a.id < b.id ? -1 : 1)));
+  assert.equal(graph.stats.files_skipped, 2);
+  assert.deepEqual(graph.stats.coverage_matrix.python, { frameworks_detected: ["flask"], extractors_applied: [], not_extracted: [], patterns_unmatched: [] });
+  assert.deepEqual(graph.stats.coverage_matrix.node, { frameworks_detected: [], extractors_applied: [], not_extracted: [], patterns_unmatched: [] });
   const empty = tempDir(t);
   put(empty, "notes.txt", "x");
   const r = await build(empty);
@@ -297,6 +312,34 @@ test("(6) auth: a Nest @UseGuards guard is authenticated; an unguarded controlle
   assert.deepEqual(routes["GET /d/e"].middlewares, []);
 });
 
+test("(6) a mount cycle drops the cycle-closing mount: the root's routes stay unprefixed", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "a.js", "const b = require('./b');\napp.use('/b', b);\napp.get('/x', (req, res) => {});\nmodule.exports = app;\n");
+  put(dir, "b.js", "const a = require('./a');\nrouter.use('/a', a);\nrouter.get('/y', (req, res) => {});\nmodule.exports = router;\n");
+  const { graph } = await build(dir);
+  const routes = nodesOf(graph, "route").map((r) => r.file + " " + r.path_pattern).sort();
+  assert.deepEqual(routes, ["a.js /x", "b.js /b/y"]);
+  assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["mount:a(cycle)"]);
+});
+
+test("(6) a router mounted twice keeps the first mount; AllowAnonymous forces unauthenticated", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "app.js", [
+    "const r = require('./r');",
+    "function ensureAuthenticated(req, res, next) { next(); }",
+    "function h(req, res) {}",
+    "app.use('/one', r);",
+    "app.use('/two', r);",
+    "app.get('/open', ensureAuthenticated, AllowAnonymous, h);",
+    ""
+  ].join("\n"));
+  put(dir, "r.js", "router.get('/z', (req, res) => {});\nmodule.exports = router;\n");
+  const { graph } = await build(dir);
+  const routes = Object.fromEntries(nodesOf(graph, "route").map((r) => [r.path_pattern, r.auth]));
+  assert.deepEqual(routes, { "/one/z": "unauthenticated", "/open": "unauthenticated" });
+  assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["mount:r(mounted twice)"]);
+});
+
 // ---- (7) cache ------------------------------------------------------------------------------------
 
 test("(7) cache: a second CLI run hits; editing the reference page or tsconfig.json misses", async (t) => {
@@ -335,6 +378,49 @@ test("(7) cache: a second CLI run hits; editing the reference page or tsconfig.j
   assert.equal(fourth.status, 0, fourth.stderr);
   assert.doesNotMatch(fourth.stderr, /cache hit/);
   assert.equal(cacheFiles().length, 3);
+});
+
+test("(7) cache: adding a walk-skipped file (.min.js) misses and the rebuilt graph lists it", async (t) => {
+  const project = join(tempDir(t), "project");
+  cpSync(NODE_FIXTURE, project, { recursive: true });
+  const checkpointDir = tempDir(t, "oswe-build-graph-ckpt-");
+  const input = { projectDir: project, scope_realpath: project, stacks: ["node"], frameworks: ["express"], referencesDir: REFERENCES_DIR };
+  const first = runCli(t, input, { checkpointDir });
+  assert.equal(first.status, 0, first.stderr);
+  writeFileSync(join(project, "lib.min.js"), "var a=1;\n");
+  const second = runCli(t, input, { checkpointDir });
+  assert.equal(second.status, 0, second.stderr);
+  assert.doesNotMatch(second.stderr, /cache hit/);
+  const before = JSON.parse(first.out);
+  const after = JSON.parse(second.out);
+  assert.equal(after.stats.files_total, before.stats.files_total + 1);
+  assert.deepEqual(nodesOf(after, "file").find((n) => n.path === "lib.min.js"), { type: "file", id: nodeId("file", "lib.min.js"), path: "lib.min.js", stack: "node", lang: "javascript", parse_status: "skipped", skip_reason: "minified" });
+});
+
+test("(7) a { graph: null } envelope is never cached", (t) => {
+  const checkpointDir = tempDir(t, "oswe-build-graph-ckpt-");
+  const input = { projectDir: NODE_FIXTURE, scope_realpath: NODE_FIXTURE, stacks: ["node"], frameworks: ["express"], referencesDir: REFERENCES_DIR, vendorDir: tempDir(t) };
+  const r = runCli(t, input, { checkpointDir });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.out).graph, null);
+  const dir = join(checkpointDir, "build-graph");
+  assert.deepEqual(existsSync(dir) ? readdirSync(dir) : [], []);
+});
+
+test("version digest covers the out-of-tree helpers and the graph schema; a schema byte change moves it", (t) => {
+  const slash = (f) => f.split("\\").join("/");
+  const files = versionFiles(join(REPO_ROOT, "skills", "audit", "vendor", "tree-sitter"));
+  for (const rel of ["vendor/tree-sitter/web-tree-sitter.mjs", "scripts/validate-output.mjs", "scripts/confine-path.mjs", "scripts/cache-wrap.mjs", "schemas/graph.schema.json"]) {
+    assert.ok(files.some((f) => slash(f).endsWith(rel)), rel);
+  }
+  const copy = join(tempDir(t), "graph.schema.json");
+  cpSync(join(REPO_ROOT, "skills", "audit", "schemas", "graph.schema.json"), copy);
+  const list = files.map((f) => (slash(f).endsWith("schemas/graph.schema.json") ? copy : f));
+  const d1 = versionDigest(list);
+  assert.match(d1, /^[0-9a-f]{64}$/);
+  assert.equal(versionDigest(list), d1);
+  writeFileSync(copy, readFileSync(copy, "utf8") + " ");
+  assert.notEqual(versionDigest(list), d1);
 });
 
 // ---- CLI input contract ---------------------------------------------------------------------------
