@@ -11,7 +11,9 @@ const KIND_TO_EXPORT = {
   "chain": "chain",
   "verdict": "verdict",
   "report": "report",
-  "checkpoint-manifest": "checkpointManifest"
+  "checkpoint-manifest": "checkpointManifest",
+  "graph": "graph",
+  "structural-check": "structuralCheck"
 };
 
 export function validate(kind, data) {
