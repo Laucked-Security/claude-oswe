@@ -270,6 +270,16 @@ function receiverParameter(node) {
   return name?.type === "identifier" ? name.text : null;
 }
 
+// Declared positional parameters (`param_count`) without a method's receiver parameter; null when
+// any parameter is a splat, keyword-only or has a default (Python has no overloads: this only
+// needs to be harmless).
+const UNCOUNTED_PARAMETERS = new Set(["list_splat_pattern", "dictionary_splat_pattern", "default_parameter", "typed_default_parameter", "keyword_separator"]);
+function parameterCount(node, receiver) {
+  const params = namedOf(field(node, "parameters")).filter((p) => p.type !== "positional_separator");
+  if (params.some((p) => UNCOUNTED_PARAMETERS.has(p.type))) return null;
+  return params.length - (receiver ? 1 : 0);
+}
+
 function addParameters(node, frame) {
   for (const param of namedOf(field(node, "parameters"))) {
     const name = parameterName(param);
@@ -304,6 +314,7 @@ function onFunction(node, st, ctx) {
     if (atModule(st)) st.topLevel.push([name, node.startIndex]);
     else bind(st, name);
   }
+  const selfName = cls ? receiverParameter(node) : null;
   st.functions.push({
     name,
     qualified_name: qualifiedName,
@@ -311,6 +322,7 @@ function onFunction(node, st, ctx) {
     line_end: node.endPosition.row + 1,
     start_byte: node.startIndex,
     end_byte: node.endIndex,
+    param_count: parameterCount(node, selfName),
     kind: node.type === "lambda" ? "lambda" : cls ? "method" : "function",
     exported: false,
     class: cls
@@ -318,7 +330,7 @@ function onFunction(node, st, ctx) {
   if (ctx.parentType === "decorated_definition") decoratorRoutes(childrenOfType(node.parent, "decorator"), node, qualifiedName, st);
   const frame = newFrame(node.startIndex, qualifiedName);
   addParameters(node, frame);
-  if (cls) Object.assign(frame, { selfName: receiverParameter(node), fieldTypes: top.cls.fieldTypes });
+  if (cls) Object.assign(frame, { selfName, fieldTypes: top.cls.fieldTypes });
   st.scopes.push({ frame });
   return () => st.scopes.pop();
 }
@@ -522,7 +534,11 @@ function onCall(node, st, ctx) {
   if (!fn) return;
   const calleeText = textOf(fn);
   const anchor = calleeAnchor(fn, node);
-  st.calls.push({ anchor, calleeText, ...receiverOf(fn), frames: functionFrames(st) });
+  // arguments at the call site (`arg_count`): null with a `*args` / `**kwargs` argument
+  const args = field(node, "arguments");
+  const listed = args?.type === "argument_list" ? namedOf(args) : [args].filter(Boolean);
+  const argCount = listed.some((a) => a.type === "list_splat" || a.type === "dictionary_splat") ? null : listed.length;
+  st.calls.push({ anchor, calleeText, argCount, ...receiverOf(fn), frames: functionFrames(st) });
   emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: true, sinkAt: anchor });
 }
 
@@ -591,7 +607,7 @@ function receiverFrame(name, frames) {
 
 // Receiver hints (spec §1.4 rules 1b and 3): `self.m()` -> receiver "this"; `self.a.m()` -> the
 // declared class of attribute a on the method's class; `x.m()` -> the class x is bound to.
-function finishCall({ anchor, calleeText, receiverName, receiverAttribute, frames }, st) {
+function finishCall({ anchor, calleeText, argCount, receiverName, receiverAttribute, frames }, st) {
   const names = new Set(st.module.bindings);
   for (const frame of frames) for (const name of frame.bindings) names.add(name);
   const self = receiverName ? receiverFrame(receiverName, frames) : null;
@@ -602,6 +618,7 @@ function finishCall({ anchor, calleeText, receiverName, receiverAttribute, frame
     line: lineOf(anchor),
     start_byte: anchor.startIndex,
     callee_text: calleeText,
+    arg_count: argCount,
     enclosing_start_byte: frames.at(-1)?.startIndex ?? null,
     receiver: self && receiverAttribute === null ? "this" : null,
     receiver_class: receiverClassName,

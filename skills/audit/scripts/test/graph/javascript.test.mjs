@@ -5,6 +5,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSource } from "../../graph/parser.mjs";
 import { loadSurface } from "../../graph/surface.mjs";
+import { resolveImports, buildClassIndex, resolveCalls } from "../../graph/resolve.mjs";
+import * as javascriptModule from "../../graph/lang/javascript.mjs";
 import { lang, extractFile, resolveImportSpecifier } from "../../graph/lang/javascript.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -353,4 +355,30 @@ test("resolveImportSpecifier: tsconfig paths resolve @svc/user to src/services/u
     path: "src/services/user.ts",
     confidence: "heuristic"
   });
+});
+
+// ---- arity and lexical this ---------------------------------------------------------------------
+
+async function resolveSource(path, text) {
+  const files = [{ path, langId: "javascript", stack: "node", extract: await extract(text, { path }) }];
+  const langModules = new Map([["javascript", javascriptModule]]);
+  const importMap = resolveImports(files, { langModules, filePaths: new Set([path]), configs: {} });
+  return { extract: files[0].extract, results: resolveCalls(files, importMap, { classIndex: buildClassIndex(files, importMap), langModules }) };
+}
+
+test("arity: param_count (rest ⇒ null) and arg_count (spread ⇒ null)", async () => {
+  const x = await extract("function f(a, b = 1) {}\nconst g = (...r) => r;\nconst h = x => x;\nf(1, 2); f(...xs); h(1);\n");
+  assert.deepEqual(x.functions.map((f) => [f.name, f.param_count]), [["f", 2], ["g", null], ["h", 1]]);
+  assert.deepEqual(x.calls.map((c) => [c.callee_text, c.arg_count]), [["f", 2], ["f", null], ["h", 1]]);
+});
+
+test("an arrow inside a method acts for the method's class: this.m() resolves; a function expression does not", async () => {
+  const { results } = await resolveSource(
+    "src/k.js",
+    "class K {\n  m() {}\n  run(xs) {\n    xs.forEach((x) => this.m());\n    xs.forEach(function () { this.m(); });\n  }\n}\n"
+  );
+  assert.deepEqual(
+    results.map((r) => [r.line, r.callee_text, r.to?.qualified_name ?? null, r.confidence]),
+    [[4, "xs.forEach", null, "unresolved"], [4, "this.m", "K.m", "exact"], [5, "xs.forEach", null, "unresolved"], [5, "this.m", null, "unresolved"]]
+  );
 });

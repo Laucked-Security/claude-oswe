@@ -39,7 +39,7 @@
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
 import { sinkClassFor } from "../sink-classes.mjs";
-import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass } from "./common.mjs";
+import { lookup, field, namedOf as namedNodes, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass } from "./common.mjs";
 
 export const lang = { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false };
 
@@ -73,6 +73,8 @@ const SOURCE_KINDS = {
 
 // ---- small AST helpers ----------------------------------------------------------------------------
 
+// Named children without Java's line / block comments.
+const namedOf = (node) => namedNodes(node).filter((c) => c.type !== "line_comment" && c.type !== "block_comment");
 const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
 const hasModifier = (node, keyword) => childrenOfType(node, "modifiers")[0]?.children.some((c) => c.type === keyword) ?? false;
 const annotationsOf = (node) => namedOf(childrenOfType(node, "modifiers")[0]).filter((c) => c.type === "annotation" || c.type === "marker_annotation");
@@ -354,6 +356,15 @@ function onClassBody(node, st, ctx) {
 
 // ---- functions and routes -------------------------------------------------------------------------
 
+// Declared parameters (`param_count`): null with a varargs parameter; a compact constructor takes
+// its record's components.
+function parameterCount(node) {
+  const params = node.type === "compact_constructor_declaration" ? field(node.parent?.parent, "parameters") : field(node, "parameters");
+  if (params?.type === "identifier") return 1; // `x -> ...`
+  const list = namedOf(params).filter((p) => p.type !== "receiver_parameter");
+  return list.some((p) => p.type === "spread_parameter") ? null : list.length;
+}
+
 function lambdaName(node, ctx) {
   if (ctx.parentType !== "variable_declarator" || ctx.field !== "value" || node.parent.parent?.type !== "local_variable_declaration") return null;
   return field(node.parent, "name")?.text ?? null;
@@ -378,6 +389,7 @@ function onFunction(node, st, ctx) {
     line_end: node.endPosition.row + 1,
     start_byte: node.startIndex,
     end_byte: node.endIndex,
+    param_count: parameterCount(node),
     kind: fn.kind,
     exported: fn.exported,
     class: fn.class
@@ -463,6 +475,7 @@ function onCall(node, st) {
     line: lineOf(name),
     start_byte: name.startIndex,
     callee_text: calleeText,
+    arg_count: namedOf(field(node, "arguments")).length,
     enclosing_start_byte: innermostFunction(st)?.startIndex ?? null,
     receiver,
     receiver_class: cls,

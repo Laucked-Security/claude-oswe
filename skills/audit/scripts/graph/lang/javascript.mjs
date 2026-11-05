@@ -211,6 +211,14 @@ function typeName(node) {
   }
 }
 
+// Declared parameters (`param_count`): null with a rest parameter (`...a`, TS `...a: T[]`).
+function parameterCount(node) {
+  const single = field(node, "parameter");
+  const params = single ? [single] : namedOf(field(node, "parameters"));
+  const isRest = (p) => p.type === "rest_pattern" || field(p, "pattern")?.type === "rest_pattern";
+  return params.some(isRest) ? null : params.length;
+}
+
 function addParameters(node, frame) {
   const single = field(node, "parameter");
   const params = single ? [single] : namedOf(field(node, "parameters"));
@@ -260,6 +268,7 @@ function onFunction(node, st, ctx) {
     line_end: node.endPosition.row + 1,
     start_byte: node.startIndex,
     end_byte: node.endIndex,
+    param_count: parameterCount(node),
     kind: isMethod ? "method" : node.type === "arrow_function" ? "arrow" : "function",
     exported: false,
     class: cls
@@ -510,7 +519,9 @@ function onCall(node, st, ctx) {
     else st.notExtracted.add("dynamic require");
   }
   const anchor = calleeAnchor(fn, node);
-  st.calls.push({ anchor, calleeText, ...receiverOf(fn, st), frames: [...st.fnStack] });
+  // arguments at the call site (`arg_count`): null with a spread argument or a tagged template
+  const argCount = argsNode?.type === "arguments" && !args.some((a) => a.type === "spread_element") ? args.length : null;
+  st.calls.push({ anchor, calleeText, argCount, ...receiverOf(fn, st), frames: [...st.fnStack] });
   emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: !literalRequire, sinkAt: anchor });
   if (fn.type === "member_expression") expressRoute(node, fn, args, st);
 }
@@ -648,13 +659,14 @@ const CURSOR_HANDLERS = new Map([
 
 // ---- finish ---------------------------------------------------------------------------------------
 
-function finishCall({ anchor, calleeText, receiver, receiverName, fieldClass, frames }, st) {
+function finishCall({ anchor, calleeText, argCount, receiver, receiverName, fieldClass, frames }, st) {
   const names = new Set(st.module.bindings);
   for (const frame of frames) for (const name of frame.bindings) names.add(name);
   return {
     line: lineOf(anchor),
     start_byte: anchor.startIndex,
     callee_text: calleeText,
+    arg_count: argCount,
     enclosing_start_byte: frames.at(-1)?.startIndex ?? null,
     receiver,
     receiver_class: fieldClass ?? (receiverName ? receiverClass(receiverName, frames, st.module) : null),

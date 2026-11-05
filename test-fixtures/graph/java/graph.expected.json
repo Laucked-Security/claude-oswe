@@ -8,9 +8,9 @@
     "files_skipped": 0,
     "functions": 10,
     "calls_total": 12,
-    "calls_exact": 0,
-    "calls_name_only": 1,
-    "calls_unresolved": 11,
+    "calls_exact": 1,
+    "calls_name_only": 2,
+    "calls_unresolved": 9,
     "routes_by_auth": {
       "unauthenticated": 1,
       "authenticated": 1,
@@ -251,10 +251,10 @@
     {
       "type": "calls",
       "from": "00698bea4101",
-      "to": null,
+      "to": "b01a6f906fac",
       "line": 13,
       "callee_text": "exec",
-      "confidence": "unresolved"
+      "confidence": "name-only"
     },
     {
       "type": "calls",
@@ -267,10 +267,10 @@
     {
       "type": "calls",
       "from": "19b1227d6a7f",
-      "to": null,
+      "to": "18df57f791be",
       "line": 21,
       "callee_text": "userService.run",
-      "confidence": "unresolved"
+      "confidence": "exact"
     },
     {
       "type": "calls",

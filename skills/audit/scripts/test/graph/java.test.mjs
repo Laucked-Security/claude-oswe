@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { parseSource } from "../../graph/parser.mjs";
 import { loadSurface } from "../../graph/surface.mjs";
 import { buildGraph } from "../../graph/build-graph.mjs";
+import { resolveImports, buildClassIndex, resolveCalls } from "../../graph/resolve.mjs";
+import * as javaModule from "../../graph/lang/java.mjs";
 import { lang, extractFile, resolveImportSpecifier } from "../../graph/lang/java.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -314,6 +316,34 @@ test("every emitted list is sorted by start_byte", async () => {
 
 // ---- through build-graph ------------------------------------------------------------------------
 
+// Resolve the calls of in-memory Java sources ({ path: text }) with the Java module.
+async function resolveSources(sources) {
+  const files = [];
+  for (const [path, text] of Object.entries(sources)) files.push({ path, langId: "java", stack: "java", extract: await extract(text, { path }) });
+  const langModules = new Map([["java", javaModule]]);
+  const importMap = resolveImports(files, { langModules, filePaths: new Set(Object.keys(sources)), configs: {} });
+  return { files, results: resolveCalls(files, importMap, { classIndex: buildClassIndex(files, importMap), langModules }) };
+}
+
+test("arity: param_count / arg_count, varargs ⇒ null", async () => {
+  const x = await extractFixture("service/UserService.java");
+  assert.deepEqual(x.functions.map((f) => [f.qualified_name, f.param_count]), [["UserService.run", 1], ["UserService.exec", 1], ["UserService.run", 2], ["UserService.run.r", 0]]);
+  assert.deepEqual(x.calls.map((c) => [c.callee_text, c.arg_count]), [["exec", 1], ["Runtime.getRuntime", 0], ["Runtime.getRuntime.exec", 1], ["exec", 1], ["r.run", 0]]);
+  const y = await extract("record R(int a, int b) {\n  R { }\n  void v(String f, Object... rest) { m(a, /* c */ b); }\n  Fn g = (p, q) -> p;\n  Fn h = p -> p;\n}\n");
+  assert.deepEqual(y.functions.map((f) => [f.qualified_name, f.param_count]), [["R.R", 2], ["R.v", null], ["R.<anon>@4:10", 2], ["R.<anon>@5:10", 1]]);
+  assert.deepEqual(y.calls.map((c) => c.arg_count), [2]);
+});
+
+test("arity: run(cmd) and run(cmd, 3) resolve exact to their own overloads; a lambda's bare call acts for its method's class", async () => {
+  const { results } = await resolveSources({
+    "K.java": "class K {\n  void run(String c) { }\n  void run(String c, int n) { }\n  void go(String cmd) {\n    run(cmd, 3);\n    this.run(cmd);\n    Runnable r = () -> run(cmd);\n  }\n}\n"
+  });
+  assert.deepEqual(
+    results.map((r) => [r.line, r.callee_text, r.to?.start_byte ?? null, r.confidence]),
+    [[5, "run", 37, "exact"], [6, "this.run", 12, "exact"], [7, "run", 12, "exact"]]
+  );
+});
+
 test("the java fixture through build-graph: route auth, implicit-this override grading, sinks in their methods", async () => {
   const dir = realpathSync(FIXTURE_DIR);
   const { graph, reason } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["java"], frameworks: ["spring"], referencesDir: REFERENCES_DIR });
@@ -321,12 +351,17 @@ test("the java fixture through build-graph: route auth, implicit-this override g
   const routes = graph.nodes.filter((n) => n.type === "route").map((r) => [r.http_method, r.path_pattern, r.auth]);
   assert.deepEqual(routes.sort(), [["GET", "/api/health", "unauthenticated"], ["POST", "/api/run", "authenticated"]]);
   const fn = (file, qn) => graph.nodes.filter((n) => n.type === "function" && n.file === `${SRC}/${file}` && n.qualified_name === qn);
-  const [run1, run2] = fn("service/UserService.java", "UserService.run");
+  const [run1, run2] = fn("service/UserService.java", "UserService.run").sort((a, b) => a.line_start - b.line_start);
   assert.ok(run1 && run2 && run1.id !== run2.id, "two UserService.run overloads with distinct ids");
   const exec = fn("service/UserService.java", "UserService.exec")[0];
+  const lambda = fn("service/UserService.java", "UserService.run.r")[0];
   const calls = graph.edges.filter((e) => e.type === "calls");
   const bareExec = calls.find((e) => e.from === run1.id && e.callee_text === "exec");
   assert.deepEqual([bareExec.to, bareExec.confidence], [exec.id, "name-only"]); // AdminService overrides exec
+  const lambdaExec = calls.find((e) => e.from === lambda.id && e.callee_text === "exec");
+  assert.deepEqual([lambdaExec.to, lambdaExec.confidence], [exec.id, "name-only"]); // the lambda acts for UserService
+  const svcRun = calls.find((e) => e.callee_text === "userService.run");
+  assert.deepEqual([svcRun.to, svcRun.confidence], [run1.id, "exact"]); // the 1-parameter overload
   const cmd = graph.nodes.find((n) => n.type === "sink" && n.class === "cmd-exec");
   assert.equal(cmd.enclosing_fn, exec.id);
   const sql = graph.nodes.find((n) => n.type === "sink" && n.class === "sql");
