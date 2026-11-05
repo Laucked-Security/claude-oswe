@@ -37,7 +37,7 @@ import { normalizeToken } from "../surface.mjs";
 import { sinkClassFor } from "../sink-classes.mjs";
 import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass, repoPath } from "./common.mjs";
 
-export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true };
+export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true, callableLocals: true };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 

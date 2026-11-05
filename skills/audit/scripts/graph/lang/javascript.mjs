@@ -17,7 +17,7 @@ import { normalizeToken } from "../surface.mjs";
 import { sinkClassFor } from "../sink-classes.mjs";
 import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass, repoPath } from "./common.mjs";
 
-export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false };
+export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false, callableLocals: true };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 

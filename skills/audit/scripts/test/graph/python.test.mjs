@@ -29,7 +29,7 @@ const names = (list) => list.map((x) => x.name);
 const routeRows = (x) => x.routes.map((r) => [r.http_method, r.path_pattern, r.handler_text, r.middleware_texts, r.framework]);
 
 test("lang descriptor", () => {
-  assert.deepEqual(lang, { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true });
+  assert.deepEqual(lang, { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true, callableLocals: true });
 });
 
 // ---- routes -------------------------------------------------------------------------------------

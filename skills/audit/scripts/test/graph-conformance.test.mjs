@@ -16,7 +16,7 @@ const FIXTURES_DIR = join(REPO_ROOT, "test-fixtures", "graph");
 const REFERENCES_DIR = join(REPO_ROOT, "skills", "audit", "references");
 
 // [stack, language module id under graph/lang/]
-const IMPLEMENTED = [["node", "javascript"], ["python", "python"]];
+const IMPLEMENTED = [["node", "javascript"], ["python", "python"], ["java", "java"]];
 
 // Unbalanced braces/parens: a syntax error in every supported grammar (PHP needs its open tag,
 // otherwise the text is inline HTML).
@@ -110,9 +110,16 @@ for (const [stack, moduleId] of IMPLEMENTED) {
     assert.ok(sinks.some((s) => s.class === "cmd-exec"));
   });
 
-  test(`${stack}: (f) a call whose scope_names shadow its callee_text`, async () => {
-    const calls = all((await load()).files, "calls");
-    assert.ok(calls.some((c) => c.scope_names.includes(c.callee_text)));
+  // A language whose bare calls can never name a variable (lang.callableLocals false: Java, C#, PHP)
+  // emits no scope names at all, so the resolver's shadowing rule never fires for it.
+  test(`${stack}: (f) a call whose scope_names shadow its callee_text (none at all without callable locals)`, async () => {
+    const { mod, files } = await load();
+    const calls = all(files, "calls");
+    if (mod.lang.callableLocals) assert.ok(calls.some((c) => c.scope_names.includes(c.callee_text)));
+    else {
+      assert.ok(calls.length > 0, "the fixture has calls");
+      for (const c of calls) assert.equal(c.scope_names.length, 0, `${c.path}: ${c.callee_text}`);
+    }
   });
 
   test(`${stack}: (g) a class with a non-null extends`, async () => {
