@@ -125,11 +125,11 @@ function newState(path, surface) {
   return {
     moduleName: path.split("/").at(-1).replace(/\.[^.]*$/, ""),
     surface: { sources: surface?.sources ?? [], sinks: surface?.sinks ?? [] },
-    functions: [], calls: [], imports: [], exports: [], aliasExports: [], classes: [], routes: [], sources: [], sinks: [],
+    functions: [], calls: [], imports: [], exports: [], defaultRefs: [], classes: [], routes: [], sources: [], sinks: [],
     notExtracted: new Set(),
     anonNames: new Map(), // function start index -> qualified name given by a route argument
     requireImports: new Set(), // start index of require() calls already recorded by their declarator
-    topLevel: new Set(), // module-level function / class names
+    topLevel: new Map(), // module-level function / class name -> start byte of its definition
     module: newFrame(null, null),
     fnStack: [],
     classStack: []
@@ -200,14 +200,33 @@ function onDecorator(node, st) {
 
 // ---- scopes and functions -------------------------------------------------------------------------
 
+// The base class name of a TypeScript type or a `new` target: `Repo<T>` / `ns.Repo` / `ns.Repo<T>`
+// -> `Repo`; anything else (unions, arrays, predefined types) -> null.
+function typeName(node) {
+  switch (node?.type) {
+    case "type_annotation":
+      return typeName(namedOf(node)[0]);
+    case "type_identifier":
+    case "identifier":
+      return node.text;
+    case "generic_type":
+    case "nested_type_identifier":
+      return typeName(field(node, "name"));
+    case "member_expression":
+      return field(node, "property")?.text ?? null;
+    default:
+      return null;
+  }
+}
+
 function addParameters(node, frame) {
   const single = field(node, "parameter");
   const params = single ? [single] : namedOf(field(node, "parameters"));
   for (const param of params) {
     for (const name of patternNames(param)) frame.bindings.add(name);
     const pattern = field(param, "pattern");
-    const type = namedOf(field(param, "type"))[0];
-    if (pattern?.type === "identifier" && type?.type === "type_identifier") frame.classOf.set(pattern.text, type.text);
+    const type = typeName(field(param, "type"));
+    if (pattern?.type === "identifier" && type) frame.classOf.set(pattern.text, type);
   }
 }
 
@@ -240,7 +259,7 @@ function onFunction(node, st, ctx) {
   }
   if (DECLARATION_FUNCTIONS.has(node.type) && name !== "<anon>") {
     if (enclosing) enclosing.bindings.add(name);
-    else st.topLevel.add(name);
+    else st.topLevel.set(name, node.startIndex);
   }
   st.functions.push({
     name,
@@ -268,13 +287,14 @@ function onDeclarator(node, st) {
     return;
   }
   if (!st.fnStack.length && value && DEFINITION_VALUES.has(value.type)) {
-    if (nameNode?.type === "identifier") st.topLevel.add(nameNode.text); // a top-level definition, not a local
+    if (nameNode?.type === "identifier") st.topLevel.set(nameNode.text, value.startIndex); // a definition, not a local
     return;
   }
   const frame = currentFrame(st);
   for (const name of patternNames(nameNode)) frame.bindings.add(name);
-  const ctor = value?.type === "new_expression" ? field(value, "constructor") : null;
-  if (nameNode?.type === "identifier" && ctor?.type === "identifier") frame.classOf.set(nameNode.text, ctor.text);
+  // a declared type (`let r: Repo`) wins over the constructed class (`= new C()`)
+  const cls = typeName(field(node, "type")) ?? (value?.type === "new_expression" ? typeName(field(value, "constructor")) : null);
+  if (nameNode?.type === "identifier" && cls) frame.classOf.set(nameNode.text, cls);
 }
 
 function onCatchOrForIn(node, st) {
@@ -288,8 +308,9 @@ function onCatchOrForIn(node, st) {
 function classHeritage(node) {
   const heritage = childrenOfType(node, "class_heritage")[0];
   if (!heritage) return null;
-  const clause = childrenOfType(heritage, "extends_clause")[0]; // TypeScript wraps the target
-  const target = clause ? field(clause, "value") : namedOf(heritage)[0];
+  // TypeScript wraps the targets in extends_clause / implements_clause; `implements` is not `extends`.
+  const clauses = namedOf(heritage).filter((c) => c.type === "extends_clause" || c.type === "implements_clause");
+  const target = clauses.length ? field(clauses.find((c) => c.type === "extends_clause"), "value") : namedOf(heritage)[0];
   return target ? textOf(target) : null;
 }
 
@@ -303,11 +324,37 @@ function onClass(node, st, ctx) {
   if (name) {
     const methods = childrenOfType(body, "method_definition").map((m) => field(m, "name")?.text).filter(Boolean);
     st.classes.push({ name, extends: classHeritage(node), methods, start_byte: node.startIndex });
-    if (!st.fnStack.length) st.topLevel.add(name);
+    if (!st.fnStack.length) st.topLevel.set(name, node.startIndex);
     nestRoutes(node, name, body, st);
   }
-  st.classStack.push({ name });
+  st.classStack.push({ name, fieldTypes: fieldTypes(body) });
   return () => st.classStack.pop();
+}
+
+// Declared class of each `this.<prop>` receiver, first source wins: (i) a typed property declaration
+// `private svc: S;`, (ii) a constructor parameter property `constructor(private svc: S)`, (iii) an
+// assignment `this.svc = new S()` anywhere in the class body.
+function fieldTypes(body) {
+  const types = new Map();
+  const add = (prop, type) => prop && type && !types.has(prop) && types.set(prop, type);
+  for (const member of namedOf(body)) {
+    if (member.type === "public_field_definition") add(field(member, "name")?.text, typeName(field(member, "type")));
+    if (member.type === "method_definition" && field(member, "name")?.text === "constructor") {
+      for (const param of namedOf(field(member, "parameters"))) {
+        const isProperty = param.children.some((c) => c.type === "accessibility_modifier" || c.type === "readonly");
+        const pattern = field(param, "pattern");
+        if (isProperty && pattern?.type === "identifier") add(pattern.text, typeName(field(param, "type")));
+      }
+    }
+  }
+  for (const assignment of body?.descendantsOfType("assignment_expression") ?? []) {
+    const left = field(assignment, "left");
+    const right = field(assignment, "right");
+    if (left?.type === "member_expression" && field(left, "object")?.type === "this" && right?.type === "new_expression") {
+      add(field(left, "property")?.text, typeName(field(right, "constructor")));
+    }
+  }
+  return types;
 }
 
 // Class decorators sit on the class, or on the wrapping `export` statement.
@@ -433,12 +480,20 @@ function calleeAnchor(callee, expression) {
   return field(expression, "arguments") ?? expression;
 }
 
-function receiverOf(fn) {
-  if (fn.type !== "member_expression") return { receiver: null, name: null };
-  let root = field(fn, "object");
-  const name = root?.type === "identifier" ? root.text : null;
-  while (root?.type === "member_expression") root = field(root, "object");
-  return { receiver: root?.type === "this" ? "this" : null, name };
+// Receiver hints for a member callee (spec §1.4 rules 1b and 3): `this.m()` -> receiver "this";
+// `x.m()` -> the name x, resolved against the scopes when the walk ends; `this.p.m()` -> the
+// declared class of field p on the enclosing class. Deeper chains carry no hint.
+function receiverOf(fn, st) {
+  const none = { receiver: null, receiverName: null, fieldClass: null };
+  if (fn.type !== "member_expression") return none;
+  const object = field(fn, "object");
+  if (object?.type === "this") return { ...none, receiver: "this" };
+  if (object?.type === "identifier") return { ...none, receiverName: object.text };
+  if (object?.type === "member_expression" && field(object, "object")?.type === "this") {
+    const prop = field(object, "property")?.text;
+    return { ...none, fieldClass: st.classStack.at(-1)?.fieldTypes.get(prop) ?? null };
+  }
+  return none;
 }
 
 function onCall(node, st, ctx) {
@@ -459,9 +514,8 @@ function onCall(node, st, ctx) {
     if (literalRequire) st.imports.push({ line: lineOf(node), specifier: stringContent(args[0]), bindings: [], local: null });
     else st.notExtracted.add("dynamic require");
   }
-  const { receiver, name } = receiverOf(fn);
   const anchor = calleeAnchor(fn, node);
-  st.calls.push({ anchor, calleeText, receiver, receiverName: name, frames: [...st.fnStack] });
+  st.calls.push({ anchor, calleeText, ...receiverOf(fn, st), frames: [...st.fnStack] });
   emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: !literalRequire, sinkAt: anchor });
   if (fn.type === "member_expression") expressRoute(node, fn, args, st);
 }
@@ -522,10 +576,7 @@ function onExport(node, st) {
   const clause = childrenOfType(node, "export_clause")[0];
   if (source) st.imports.push({ line: lineOf(node), specifier: stringContent(source), bindings: [], local: null });
   if (node.children.some((c) => c.type === "default")) {
-    st.exports.push({ name: "default", start_byte: node.startIndex });
-    const target = declaration ?? field(node, "value");
-    const alias = target?.type === "identifier" ? target.text : EXPORTABLE_DECLARATIONS.has(target?.type) ? field(target, "name")?.text : null;
-    if (alias) st.aliasExports.push({ name: alias, start_byte: node.startIndex });
+    pushDefaultExport(declaration ?? field(node, "value"), node, st);
     return;
   }
   if (declaration?.type === "lexical_declaration" || declaration?.type === "variable_declaration") {
@@ -540,6 +591,16 @@ function onExport(node, st) {
     if (named) st.exports.push({ name: exportName(named), start_byte: spec.startIndex });
   }
   if (source && !clause) st.notExtracted.add("export * from");
+}
+
+// A single "default" export. Its start_byte is the definition's when the exported value is a
+// same-file function / class (inline, or an identifier naming a top-level one, fixed up in finish),
+// so resolve.mjs can bind `default` by offset; otherwise the export statement's.
+function pushDefaultExport(value, statement, st) {
+  const definition = DEFINITION_VALUES.has(value?.type) || EXPORTABLE_DECLARATIONS.has(value?.type);
+  const entry = { name: "default", start_byte: definition ? value.startIndex : statement.startIndex };
+  st.exports.push(entry);
+  if (value?.type === "identifier") st.defaultRefs.push({ entry, name: value.text });
 }
 
 function moduleExportsObject(object, st) {
@@ -559,8 +620,7 @@ function onAssignment(node, st) {
   const target = textOf(left);
   if (target === "module.exports") {
     if (right.type === "object") return moduleExportsObject(right, st);
-    st.exports.push({ name: "default", start_byte: node.startIndex });
-    if (right.type === "identifier") st.aliasExports.push({ name: right.text, start_byte: node.startIndex });
+    pushDefaultExport(right, node, st);
     return;
   }
   const named = /^(?:module\.)?exports\.([^.]+)$/.exec(target);
@@ -635,7 +695,7 @@ function receiverClass(name, frames, moduleFrame) {
   return moduleFrame.classOf.get(name) ?? null;
 }
 
-function finishCall({ anchor, calleeText, receiver, receiverName, frames }, st) {
+function finishCall({ anchor, calleeText, receiver, receiverName, fieldClass, frames }, st) {
   const names = new Set(st.module.bindings);
   for (const frame of frames) for (const name of frame.bindings) names.add(name);
   return {
@@ -644,7 +704,7 @@ function finishCall({ anchor, calleeText, receiver, receiverName, frames }, st) 
     callee_text: calleeText,
     enclosing_start_byte: frames.at(-1)?.startIndex ?? null,
     receiver,
-    receiver_class: receiverName ? receiverClass(receiverName, frames, st.module) : null,
+    receiver_class: fieldClass ?? (receiverName ? receiverClass(receiverName, frames, st.module) : null),
     scope_names: [...names].sort()
   };
 }
@@ -652,11 +712,16 @@ function finishCall({ anchor, calleeText, receiver, receiverName, frames }, st) 
 const byStart = (a, b) => a.start_byte - b.start_byte;
 
 function finish(st) {
-  for (const alias of st.aliasExports) if (st.topLevel.has(alias.name)) st.exports.push(alias);
+  for (const { entry, name } of st.defaultRefs) if (st.topLevel.has(name)) entry.start_byte = st.topLevel.get(name);
   const exported = new Set(st.exports.map((e) => e.name));
+  const defaultStarts = new Set(st.exports.filter((e) => e.name === "default").map((e) => e.start_byte));
+  const classStart = new Map(st.classes.map((c) => [c.name, c.start_byte]));
   for (const fn of st.functions) {
-    // a method is exported with its class; a function only when top-level (qualified_name === name)
-    fn.exported = fn.class ? exported.has(fn.class) : fn.qualified_name === fn.name && exported.has(fn.name);
+    // a method is exported with its class; a function when top-level (qualified_name === name) and
+    // named in exports, or when it is the default export's definition
+    fn.exported = fn.class
+      ? exported.has(fn.class) || defaultStarts.has(classStart.get(fn.class))
+      : (fn.qualified_name === fn.name && exported.has(fn.name)) || defaultStarts.has(fn.start_byte);
   }
   return {
     functions: st.functions.sort(byStart),

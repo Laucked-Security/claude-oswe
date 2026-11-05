@@ -4,17 +4,19 @@
 // already been through normalizeToken. Each shape accepts a fixed set of candidate categories and
 // compares on `.`-separated segments (spec §2.5):
 //   call       call/new/member        text equals the pattern or ends with "." + pattern
-//   member     call/member            last segment equals the pattern
+//   member     call                   last segment equals the pattern
 //   decorator  decorator              first segment equals the pattern
 //   chain      member/identifier/call text equals the pattern or starts with pattern + "."
 //   key        key                    equality
 //   word       identifier/type/call/new  last segment equals the pattern
 //   literal    literal                equality
+// `member` patterns (`.query(`, `->raw(`) name a method being CALLED, so a plain member reference such
+// as `req.query` never matches them.
 // PURE: no I/O. An unknown shape or category never matches.
 
 const CATEGORIES_BY_SHAPE = {
   call: new Set(["call", "new", "member"]),
-  member: new Set(["call", "member"]),
+  member: new Set(["call"]),
   decorator: new Set(["decorator"]),
   chain: new Set(["member", "identifier", "call"]),
   key: new Set(["key"]),

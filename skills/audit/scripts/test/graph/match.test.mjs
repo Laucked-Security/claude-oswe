@@ -20,6 +20,8 @@ const CASES = [
   ["member: last segment of a callee", sink(".query("), c("call", "db.pool.query"), true],
   ["member: other last segment", sink(".query("), c("call", "query.run"), false],
   ["member: new category rejected", sink(".spawn("), c("new", "spawn"), false],
+  ["member: a called db.query matches", sink(".query("), c("call", "db.query"), true],
+  ["member: a plain member reference req.query is not a call", sink(".query("), c("member", "req.query"), false],
   // decorator: category decorator; first segment equality
   ["decorator: first segment", source("@Body("), c("decorator", "Body"), true],
   ["decorator: dotted decorator compares the first segment", source("@Body("), c("decorator", "nest.Body"), false],

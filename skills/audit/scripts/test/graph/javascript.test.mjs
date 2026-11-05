@@ -47,9 +47,25 @@ test("export forms: declarations, clause with alias, exports.a, module.exports =
     "export function f() {}\nexport const k = 1, j = 2;\nexport class C {}\nconst a = 1, b = 2;\nexport { a, b as c };\n" +
       "exports.q = 1;\nmodule.exports.r = 2;\nfunction main() {}\nmodule.exports = main;\nmodule.exports = { s: 1, 't': 2, m() {} };\n"
   );
-  assert.deepEqual(names(x.exports), ["f", "k", "j", "C", "a", "c", "q", "r", "default", "main", "s", "t", "m"]);
+  assert.deepEqual(names(x.exports), ["f", "k", "j", "C", "a", "c", "q", "r", "default", "s", "t", "m"]);
   const main = x.functions.find((f) => f.name === "main");
+  assert.equal(x.exports.find((e) => e.name === "default").start_byte, main.start_byte, "default bound to main by offset");
   assert.equal(main.exported, true);
+});
+
+test("export default function f: a single default export at the function's start_byte", async () => {
+  const x = await extract("const pad = 1;\nexport default function f() {}\n");
+  assert.deepEqual(x.exports, [{ name: "default", start_byte: x.functions[0].start_byte }]);
+  assert.equal(x.functions[0].exported, true);
+  const cls = await extract("export default class C { m() {} }\n");
+  assert.deepEqual(cls.exports, [{ name: "default", start_byte: cls.classes[0].start_byte }]);
+  assert.equal(cls.functions[0].exported, true);
+});
+
+test("module.exports = router: a single default export at the statement offset", async () => {
+  const src = "const router = makeRouter();\nmodule.exports = router;\n";
+  const x = await extract(src);
+  assert.deepEqual(x.exports, [{ name: "default", start_byte: src.indexOf("module.exports") }]);
 });
 
 // ---- imports ------------------------------------------------------------------------------------
@@ -213,18 +229,65 @@ test("calls: scope_names exclude imports and top-level definitions, include para
 
 test("calls: receiver this and receiver_class from new C() or a TypeScript parameter type", async () => {
   const x = await extract(
-    "const svc = new UserService();\nclass K {\n  m(repo: Repo, other) {\n    this.a.b();\n    svc.run();\n    repo.save();\n    other.go();\n  }\n}\n",
+    "const svc = new UserService();\nclass K {\n  m(repo: Repo, other) {\n    this.b();\n    svc.run();\n    repo.save();\n    other.go();\n  }\n}\n",
     { langId: "typescript", path: "k.ts" }
   );
   assert.deepEqual(
     x.calls.map((c) => [c.callee_text, c.receiver, c.receiver_class]),
     [
-      ["this.a.b", "this", null],
+      ["this.b", "this", null],
       ["svc.run", null, "UserService"],
       ["repo.save", null, "Repo"],
       ["other.go", null, null]
     ]
   );
+});
+
+const receivers = (x) => x.calls.map((c) => [c.callee_text, c.receiver, c.receiver_class]);
+
+test("receiver_class: annotated variables, and type names reduced to their base identifier", async () => {
+  const x = await extract(
+    "let repo: Repo;\nconst s: Svc = make();\nfunction f(g: Repo<User>, h: ns.Store, k: ns.Cache<T>) {\n  const n = new ns.C();\n" +
+      "  repo.save();\n  s.go();\n  g.find();\n  h.put();\n  k.get();\n  n.run();\n}\n",
+    { langId: "typescript", path: "r.ts" }
+  );
+  assert.deepEqual(receivers(x).filter(([callee]) => callee !== "make"), [
+    ["repo.save", null, "Repo"],
+    ["s.go", null, "Svc"],
+    ["g.find", null, "Repo"],
+    ["h.put", null, "Store"],
+    ["k.get", null, "Cache"],
+    ["n.run", null, "C"]
+  ]);
+});
+
+test("receiver_class: this.<prop>.m() takes the declared field type; this.m() is receiver this", async () => {
+  const x = await extract(
+    "class A {\n  private svc: UserService;\n  constructor(private readonly repo: Repo<User>, plain: Other) {\n    this.cache = new ns.Cache();\n  }\n" +
+      "  m() {\n    this.svc.run();\n    this.repo.save();\n    this.cache.get();\n    this.unknown.m();\n    this.a.b.c();\n    this.own();\n  }\n}\n",
+    { langId: "typescript", path: "a.ts" }
+  );
+  assert.deepEqual(receivers(x), [
+    ["this.svc.run", null, "UserService"],
+    ["this.repo.save", null, "Repo"],
+    ["this.cache.get", null, "Cache"],
+    ["this.unknown.m", null, null],
+    ["this.a.b.c", null, null],
+    ["this.own", "this", null]
+  ]);
+  const js = await extract("class B {\n  constructor() { this.svc = new UserService(); }\n  m() { this.svc.run(); }\n}\n");
+  assert.deepEqual(receivers(js), [["this.svc.run", null, "UserService"]]);
+});
+
+test("extends reads only the extends clause: implements is not extends", async () => {
+  const x = await extract("class A implements B {}\nclass C extends D implements E {}\nclass F extends G {}\n", { langId: "typescript", path: "c.ts" });
+  assert.deepEqual(x.classes.map((c) => [c.name, c.extends]), [["A", null], ["C", "D"], ["F", "G"]]);
+});
+
+test("a bare req.query reference is a query source, not a sql sink", async () => {
+  const x = await extract("function h(req) { validate(req.query); const q = req.query; }\n");
+  assert.deepEqual(x.sinks, []);
+  assert.deepEqual(x.sources.map((s) => s.kind), ["query", "query"]);
 });
 
 test("the node fixture: rule 1b receiver, this-dispatch, shadowing, mount", async () => {
