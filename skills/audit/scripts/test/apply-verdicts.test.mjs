@@ -5,7 +5,8 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, real
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyVerdicts, validateBoundBatch } from "../apply-verdicts.mjs";
+import { applyVerdicts, validateBoundBatch, verdictsInputDigest } from "../apply-verdicts.mjs";
+import { canonicalize, sha256Hex } from "../cache-wrap.mjs";
 import { validate } from "../validate-output.mjs";
 
 const CLI = fileURLToPath(new URL("../apply-verdicts.mjs", import.meta.url));
@@ -658,4 +659,222 @@ test("apply-verdicts --checkpoint-dir hit on second call short-circuits with sam
   const second = runAV(minimalAVInput(), ckpt);
   assert.match(second.stderr, /cache hit/i);
   assert.deepEqual(second.out, first.out);
+});
+
+// --- SP10 Task 16: structural confidence ceiling (design §3.4 "Authoritative channel") ---
+// structural is check-chain-structure's output (structural-check schema). One deterministic rule runs
+// AFTER the verdicts are applied and BEFORE chain gating: final_confidence "strong static proof" +
+// structural_path "absent" => "to verify" + verification_notes "structural: absent". The verdict itself
+// is unchanged; every finding listed in structural.findings gets its structural_path recorded.
+const structuralOf = (map) => ({
+  findings: Object.fromEntries(Object.entries(map).map(([id, p]) => [id, { structural_path: p, reason: "test " + p }])),
+  transitions: {}
+});
+const criticalInput = () => ({ findings: bothFindings(), chains: [chain()], batches: vresp([...acceptBoth, acceptChain]) });
+const byId = (r, id) => r.findings.find((f) => f.finding_id === id);
+
+test("structural omitted (or undefined/empty) => output identical to today; digest unchanged", () => {
+  const input = criticalInput();
+  const base = applyVerdicts(input);
+  assert.equal(base.chains[0].severity, "Critical");
+  assert.deepEqual(applyVerdicts({ ...input, structural: undefined }), base);
+  assert.deepEqual(applyVerdicts({ ...input, structural: { findings: {}, transitions: {} } }), base);
+  for (const f of base.findings) {
+    assert.equal("structural_path" in f, false);
+    assert.equal("verification_notes" in f, false);
+  }
+  // Cache key: absent structural => exactly today's digest (no structural key added).
+  assert.equal(verdictsInputDigest(input), sha256Hex(canonicalize(input)));
+  assert.equal(verdictsInputDigest({ ...input, structural: undefined }), verdictsInputDigest(input));
+  assert.notEqual(verdictsInputDigest({ ...input, structural: structuralOf({ "OSWE-1": "absent" }) }), verdictsInputDigest(input));
+  assert.notEqual(
+    verdictsInputDigest({ ...input, structural: structuralOf({ "OSWE-1": "absent" }) }),
+    verdictsInputDigest({ ...input, structural: structuralOf({ "OSWE-1": "proven" }) })
+  );
+});
+
+test("accepted strong static proof + absent => to verify + note; verdict unchanged", () => {
+  const r = applyVerdicts({ ...criticalInput(), structural: structuralOf({ "OSWE-1": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  const f = byId(r, "OSWE-1");
+  assert.equal(f.verification_status, "accepted");
+  assert.equal(f.final_severity, "High");
+  assert.equal(f.final_confidence, "to verify");
+  assert.equal(f.structural_path, "absent");
+  assert.deepEqual(f.verification_notes, ["structural: absent"]);
+  assert.equal(f.confidence, "strong static proof"); // the provisional claim is not rewritten
+  // OSWE-2 is not in structural.findings => untouched
+  const g = byId(r, "OSWE-2");
+  assert.equal(g.final_confidence, "strong static proof");
+  assert.equal("structural_path" in g, false);
+  assert.equal("verification_notes" in g, false);
+  assertResultSchemaValid(r);
+});
+
+test("likely + absent => confidence unchanged, structural_path set, no note", () => {
+  const verdicts = [
+    { target_type: "finding", target_id: "OSWE-1", verdict: "downgraded", new_severity: "Medium", new_confidence: "likely", justification: "x", counterexamples: HOLDS }
+  ];
+  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], batches: vresp(verdicts), structural: structuralOf({ "OSWE-1": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  const f = r.findings[0];
+  assert.equal(f.verification_status, "downgraded");
+  assert.equal(f.final_confidence, "likely");
+  assert.equal(f.structural_path, "absent");
+  assert.equal("verification_notes" in f, false);
+  assertResultSchemaValid(r);
+});
+
+for (const p of ["proven", "n/a"]) {
+  test(`structural_path ${p} => unchanged except structural_path`, () => {
+    const input = criticalInput();
+    const base = applyVerdicts(input);
+    const r = applyVerdicts({ ...input, structural: structuralOf({ "OSWE-1": p, "OSWE-2": p }) });
+    assert.equal(r.ok, true, r.error);
+    for (const f of r.findings) {
+      assert.equal(f.structural_path, p);
+      const { structural_path, ...rest } = f;
+      assert.deepEqual(rest, base.findings.find((b) => b.finding_id === f.finding_id));
+    }
+    assert.deepEqual(r.chains, base.chains); // still Critical
+    assert.deepEqual(r.decisions, base.decisions);
+    assertResultSchemaValid(r);
+  });
+}
+
+test("a rejected finding gets structural_path and nothing else", () => {
+  const verdicts = [{ target_type: "finding", target_id: "OSWE-1", verdict: "rejected", justification: "x" }];
+  const input = { findings: [finding("OSWE-1")], chains: [], batches: vresp(verdicts) };
+  const base = applyVerdicts(input);
+  const r = applyVerdicts({ ...input, structural: structuralOf({ "OSWE-1": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  const { structural_path, ...rest } = r.findings[0];
+  assert.equal(structural_path, "absent");
+  assert.deepEqual(rest, base.findings[0]);
+  assert.equal("final_confidence" in r.findings[0], false);
+  assert.equal("verification_notes" in r.findings[0], false);
+  assertResultSchemaValid(r);
+});
+
+test("a not-requested strong finding + absent is also capped to to verify", () => {
+  const batches = [{ batch_id: "Be", expected_targets: [{ target_type: "finding", target_id: "OSWE-1" }], response: { status: "error", verdicts: [] } }];
+  const r = applyVerdicts({ findings: [finding("OSWE-1")], chains: [], batches, structural: structuralOf({ "OSWE-1": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.findings[0].verification_status, "not-requested");
+  assert.equal(r.findings[0].final_confidence, "to verify");
+  assert.deepEqual(r.findings[0].verification_notes, ["structural: absent"]);
+});
+
+test("a Critical chain is no longer Critical when one member is structurally absent", () => {
+  const input = criticalInput();
+  assert.equal(applyVerdicts(input).chains[0].severity, "Critical");
+  const r = applyVerdicts({ ...input, structural: structuralOf({ "OSWE-1": "proven", "OSWE-2": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  const c = r.chains[0];
+  assert.equal(c.verification_status, "accepted"); // the chain verdict is unchanged
+  // Existing gate: not every member at strong static proof => severity = max member final_severity,
+  // confidence = weakest member confidence.
+  assert.equal(c.severity, "High");
+  assert.equal(c.confidence, "to verify");
+  // decisions[] gains no new outcome kind
+  assert.deepEqual(r.decisions.map((d) => d.outcome), applyVerdicts(input).decisions.map((d) => d.outcome));
+  assertResultSchemaValid(r);
+});
+
+test("re-applying the same structural does not duplicate the note (idempotent)", () => {
+  const structural = structuralOf({ "OSWE-1": "absent" });
+  const first = applyVerdicts({ ...criticalInput(), structural });
+  // Feed a finding that already carries the note (as a previous run produced it) back in.
+  const findings = bothFindings().map((f) => (f.finding_id === "OSWE-1" ? { ...f, verification_notes: ["structural: absent"] } : f));
+  const second = applyVerdicts({ ...criticalInput(), findings, structural });
+  assert.equal(second.ok, true, second.error);
+  assert.deepEqual(byId(second, "OSWE-1").verification_notes, ["structural: absent"]);
+  assert.deepEqual(byId(second, "OSWE-1"), byId(first, "OSWE-1"));
+  // Pre-existing notes are kept (and the input array is not mutated).
+  const other = bothFindings().map((f) => (f.finding_id === "OSWE-1" ? { ...f, verification_notes: ["earlier note"] } : f));
+  const third = applyVerdicts({ ...criticalInput(), findings: other, structural });
+  assert.deepEqual(byId(third, "OSWE-1").verification_notes, ["earlier note", "structural: absent"]);
+  assert.deepEqual(other[0].verification_notes, ["earlier note"]);
+});
+
+test("invalid structural input is an orchestrator-input error", () => {
+  const bad = [
+    { findings: { "OSWE-1": { structural_path: "yes", reason: "x" } }, transitions: {} },
+    { findings: {} },                       // transitions missing
+    null,
+    "absent"
+  ];
+  for (const structural of bad) {
+    const r = applyVerdicts({ ...criticalInput(), structural });
+    assert.equal(r.ok, false, JSON.stringify(structural));
+    assert.equal(r.error_kind, "orchestrator-input");
+    assert.equal(r.error_batch_id, null);
+    assert.match(r.error, /^structural input invalid: /);
+  }
+});
+
+function runAVStructural(input, structuralPath, checkpointDir) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "oswe-av-st-")));
+  const inP = join(dir, "in.json");
+  const outP = join(dir, "out.json");
+  writeFileSync(inP, JSON.stringify(input));
+  const args = [CLI_AV, "--file", inP, "--out", outP];
+  if (structuralPath) args.push("--structural", structuralPath);
+  if (checkpointDir) args.push("--checkpoint-dir", checkpointDir);
+  const r = spawnSync(process.execPath, args, { encoding: "utf8" });
+  return { code: r.status, stderr: r.stderr, out: existsSync(outP) ? JSON.parse(readFileSync(outP, "utf8")) : null };
+}
+const writeStructural = (obj) => {
+  const p = join(realpathSync(mkdtempSync(join(tmpdir(), "oswe-st-"))), "structural.json");
+  writeFileSync(p, JSON.stringify(obj));
+  return p;
+};
+
+test("CLI --structural: applied; missing file => exit 2; invalid => exit 1 with ok:false", () => {
+  const sp = writeStructural(structuralOf({ "OSWE-2": "absent" }));
+  const ok = runAVStructural(criticalInput(), sp);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(ok.out.chains[0].severity, "High");
+  assert.equal(ok.out.findings.find((f) => f.finding_id === "OSWE-2").final_confidence, "to verify");
+
+  const missing = runAVStructural(criticalInput(), join(tmpdir(), "oswe-no-such-dir-" + Date.now(), "structural.json"));
+  assert.equal(missing.code, 2);
+  assert.match(missing.stderr, /--structural/);
+
+  const garbled = join(realpathSync(mkdtempSync(join(tmpdir(), "oswe-st-"))), "s.json");
+  writeFileSync(garbled, "{not json");
+  assert.equal(runAVStructural(criticalInput(), garbled).code, 2);
+
+  const inv = runAVStructural(criticalInput(), writeStructural({ findings: { "OSWE-1": { structural_path: "yes", reason: "x" } }, transitions: {} }));
+  assert.equal(inv.code, 1);
+  assert.equal(inv.out.ok, false);
+  assert.equal(inv.out.error_kind, "orchestrator-input");
+
+  const usage = spawnSync(process.execPath, [CLI_AV, "--file", "x.json", "--out", "y.json", "--structural"], { encoding: "utf8" });
+  assert.equal(usage.status, 2);
+});
+
+test("CLI --structural participates in the cache key (--checkpoint-dir)", () => {
+  const ckpt = realpathSync(mkdtempSync(join(tmpdir(), "oswe-av-ckpt-")));
+  const input = criticalInput(); // built ONCE: vresp() batch ids are unique per call
+  const absent = writeStructural(structuralOf({ "OSWE-2": "absent" }));
+  const proven = writeStructural(structuralOf({ "OSWE-2": "proven" }));
+  const a1 = runAVStructural(input, absent, ckpt);
+  assert.equal(a1.code, 0, a1.stderr);
+  assert.doesNotMatch(a1.stderr, /cache hit/i);
+  assert.equal(readdirSync(join(ckpt, "apply-verdicts")).length, 1);
+
+  const p1 = runAVStructural(input, proven, ckpt); // different structural => miss
+  assert.equal(p1.code, 0, p1.stderr);
+  assert.doesNotMatch(p1.stderr, /cache hit/i);
+  assert.equal(p1.out.chains[0].severity, "Critical");
+  assert.equal(readdirSync(join(ckpt, "apply-verdicts")).length, 2);
+
+  const a2 = runAVStructural(input, absent, ckpt); // same structural => hit
+  assert.match(a2.stderr, /cache hit/i);
+  assert.deepEqual(a2.out, a1.out);
+
+  const none = runAVStructural(input, null, ckpt); // no structural => its own key
+  assert.doesNotMatch(none.stderr, /cache hit/i);
+  assert.equal(none.out.chains[0].severity, "Critical");
 });

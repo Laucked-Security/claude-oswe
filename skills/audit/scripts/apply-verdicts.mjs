@@ -1,5 +1,5 @@
 // Deterministic application of verifier verdicts to findings and chains. Pure logic + a thin CLI.
-// applyVerdicts({ findings, chains, batches })
+// applyVerdicts({ findings, chains, batches, structural })
 //   -> { ok, error, error_kind, error_batch_id, findings, chains, gaps, decisions }
 //   decisions: [{ target_type, target_id, outcome, reason }] — auditable log of settled outcomes;
 //     outcome:"rejected" entries (incl. a chain rejected because a member was rejected) drive the
@@ -21,9 +21,22 @@
 //                          canonical id, chain→unknown finding, invalid topology, batch expecting an
 //                          unknown target, overlapping expected_targets).
 // gaps: [{ target_type, target_id, reason }] for expected-but-unverified targets.
+//
+// structural (SP10, optional): check-chain-structure's result (structural-check schema). It is NOT a
+// verifier counterexample; it feeds ONE deterministic rule, applied after every finding verdict and
+// before chain gating (applyStructuralCeiling): each finding listed in structural.findings gets its
+// structural_path recorded (any verification status, rejected included); a finding whose
+// final_confidence is "strong static proof" with structural_path "absent" is capped to "to verify"
+// and carries verification_notes "structural: absent" (never duplicated). The verdict
+// (accept/downgrade/reject) and final_severity never change; the existing Critical gate (every member
+// "strong static proof") then sees the capped member. Findings absent from structural.findings, and
+// ids there that match no finding, are ignored. structural.transitions is verifier context only — not
+// consumed here. decisions[] gains no new outcome kind (the note is the audit trail). An invalid
+// structural is "orchestrator-input". Omitted/undefined => output identical to pre-SP10.
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "./cache-wrap.mjs";
+import { validate } from "./validate-output.mjs";
 
 // Deterministic ordering so a "downgrade" can never RAISE severity or confidence.
 const SEV_INDEX = { Info: 0, Low: 1, Medium: 2, High: 3, Critical: 4 };
@@ -160,13 +173,37 @@ export function validateBoundBatch(batch, { findingById, chainById }) {
   return { ok: true };
 }
 
-export function applyVerdicts({ findings, chains, batches } = {}) {
+// SP10 structural confidence ceiling (design §3.4): mutates the freshly-built outFindings copies
+// (never the caller's finding objects or their verification_notes arrays).
+const STRUCTURAL_ABSENT_NOTE = "structural: absent";
+function applyStructuralCeiling(outFindings, structural) {
+  for (const nf of outFindings) {
+    if (!Object.hasOwn(structural.findings, nf.finding_id)) continue;
+    const { structural_path } = structural.findings[nf.finding_id];
+    nf.structural_path = structural_path;
+    if (nf.final_confidence === "strong static proof" && structural_path === "absent") {
+      nf.final_confidence = "to verify";
+      const notes = Array.isArray(nf.verification_notes) ? nf.verification_notes : [];
+      nf.verification_notes = notes.includes(STRUCTURAL_ABSENT_NOTE) ? [...notes] : [...notes, STRUCTURAL_ABSENT_NOTE];
+    }
+  }
+}
+
+export function applyVerdicts({ findings, chains, batches, structural } = {}) {
   const fail = (error, error_kind, error_batch_id = null) =>
     ({ ok: false, error, error_kind, error_batch_id, findings, chains, gaps: [] });
 
   // Defensive: a malformed orchestrator call yields a structured orchestrator-input error, not a throw.
   if (!Array.isArray(findings) || !Array.isArray(chains) || !Array.isArray(batches))
     return fail("findings, chains, and batches must be arrays", "orchestrator-input");
+
+  if (structural !== undefined) {
+    const sv = validate("structural-check", structural);
+    if (!sv.valid) {
+      const e = sv.errors[0] || {};
+      return fail(`structural input invalid: ${e.instancePath || "/"} ${e.message || "schema mismatch"}`, "orchestrator-input");
+    }
+  }
 
   const idCheck = checkCanonicalIds(findings, chains);
   if (!idCheck.ok) return fail(idCheck.error, idCheck.error_kind);
@@ -262,6 +299,10 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
     decisions.push({ target_type: "finding", target_id: f.finding_id, outcome: v.verdict, reason: v.justification });
     return nf;
   });
+
+  // SP10: the structural ceiling — AFTER every finding verdict is settled, BEFORE chain gating reads
+  // member confidences below.
+  if (structural !== undefined) applyStructuralCeiling(outFindings, structural);
 
   const statusById = new Map(outFindings.map((f) => [f.finding_id, f.verification_status]));
   const sevById = new Map(outFindings.map((f) => [f.finding_id, f.final_severity]));
@@ -365,8 +406,22 @@ export function applyVerdicts({ findings, chains, batches } = {}) {
   return { ok: true, error: null, error_kind: null, error_batch_id: null, findings: outFindings, chains: outChains, gaps, decisions };
 }
 
-// CLI: node apply-verdicts.mjs --file <input.json> --out <result.json> [--checkpoint-dir <abs>]
+// Cache-key digest of an applyVerdicts input. `structural` is part of the input object, so a changed
+// structural result is a cache miss; an absent (or undefined) `structural` is dropped first so the
+// digest is byte-identical to the pre-SP10 one (canonicalize would otherwise serialise the key).
+export function verdictsInputDigest(input) {
+  if (input && typeof input === "object" && !Array.isArray(input) && "structural" in input && input.structural === undefined) {
+    const { structural, ...rest } = input;
+    return sha256Hex(canonicalize(rest));
+  }
+  return sha256Hex(canonicalize(input));
+}
+
+// CLI: node apply-verdicts.mjs --file <input.json> --out <result.json> [--structural <structural.json>]
+//        [--checkpoint-dir <abs>]
 //   input.json: { "findings": [...], "chains": [...], "batches": [...] }
+//   --structural: check-chain-structure's structural.json, applied as input.structural (and so part of
+//   the cache key); unreadable/unparsable => exit 2, schema-invalid => ok:false orchestrator-input.
 //   exit 0 when result.ok, 1 when !ok (see error_kind/error_batch_id), 2 on usage/IO error.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
@@ -378,8 +433,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exit(2);
   }
   const checkpointDir = ci !== -1 ? args[ci + 1] : null;
+  const si = args.indexOf("--structural");
+  if (si !== -1 && (!args[si + 1] || args[si + 1].startsWith("--"))) {
+    process.stderr.write("usage: apply-verdicts.mjs ... --structural <structural.json>   (--structural requires a path argument, got: " + (args[si + 1] ?? "<end of args>") + ")\n");
+    process.exit(2);
+  }
   if (fileIdx === -1 || outIdx === -1) {
-    process.stderr.write("usage: apply-verdicts.mjs --file <input.json> --out <result.json> [--checkpoint-dir <abs>]\n");
+    process.stderr.write("usage: apply-verdicts.mjs --file <input.json> --out <result.json> [--structural <structural.json>] [--checkpoint-dir <abs>]\n");
     process.exit(2);
   }
   let input;
@@ -389,9 +449,19 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.stderr.write("cannot read --file: " + e.message + "\n");
     process.exit(2);
   }
+  if (si !== -1) {
+    let structural;
+    try {
+      structural = JSON.parse(readFileSync(args[si + 1], "utf8"));
+    } catch (e) {
+      process.stderr.write("cannot read --structural: " + e.message + "\n");
+      process.exit(2);
+    }
+    input = { ...input, structural };
+  }
 
   if (checkpointDir) {
-    const inputDigest = sha256Hex(canonicalize(input));
+    const inputDigest = verdictsInputDigest(input);
     const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
     const lookup = cacheLookup({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest, requiredPayloadKey: "output" });
     if (lookup.hit) {
@@ -411,7 +481,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   }
 
   if (checkpointDir && result.ok) {
-    const inputDigest = sha256Hex(canonicalize(input));
+    const inputDigest = verdictsInputDigest(input);
     const versionDigest = helperVersionDigest(fileURLToPath(import.meta.url));
     try { cacheStore({ checkpointDir, helperName: "apply-verdicts", inputDigest, versionDigest, payload: { output: result } }); }
     catch (e) { process.stderr.write("apply-verdicts: cache store failed (non-fatal): " + e.message + "\n"); }
