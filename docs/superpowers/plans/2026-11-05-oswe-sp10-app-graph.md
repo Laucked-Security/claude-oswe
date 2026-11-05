@@ -150,7 +150,7 @@ test("parserAvailable reports ok:false with a reason on a missing vendor dir, ne
   1. contains `://`, or matches `/^[A-Z][A-Za-z0-9]*(-[A-Za-z0-9]+)+$/` → `literal`, normalized = raw.
   2. starts with `@`, `[`, or `#[` → `decorator`; strip those prefixes and any trailing `(`/`]`.
   3. matches `/^\$[a-z]+$/` → `key` (Mongo operators); normalized = raw.
-  4. starts with `.` or `->` → `member`; strip the prefix and a trailing `(`; strip a trailing `('` fragment (`->middleware('auth` → `middleware`).
+  4. starts with `.` or `->` → `member`; strip the prefix and a trailing `(`; strip a trailing `('` fragment (`->middleware('auth` → `middleware`) — but keep that fragment as `arg_prefix` (`"auth"`): `build-graph`'s auth check treats a route middleware text that starts with a marker's `arg_prefix` (`auth`, `auth:api`) as a marker match, since "a middleware named auth*" is what the token means.
   5. ends with `(` → `call`; strip `(`; normalize `::` to `.`.
   6. contains `.`, `::`, or `->`, or starts with `$` → role `sinks`/`sanitizers` ⇒ `call` (dotted, suffix match); role `sources`/`auth_markers` ⇒ `chain` (prefix match). Normalize `::`→`.`, `->`→`.`, remove `()`.
   7. otherwise → `word`.
