@@ -15,7 +15,7 @@
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
 import { sinkClassFor } from "../sink-classes.mjs";
-import { matchesPattern } from "../match.mjs";
+import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass, repoPath } from "./common.mjs";
 
 export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false };
 
@@ -43,16 +43,9 @@ const EXPRESS_VERBS = { get: "GET", post: "POST", put: "PUT", patch: "PATCH", de
 const NEST_VERBS = { Get: "GET", Post: "POST", Put: "PUT", Patch: "PATCH", Delete: "DELETE", Head: "HEAD", Options: "OPTIONS", All: "ANY" };
 const SOURCE_KINDS = { query: "query", body: "body", params: "params", param: "params", headers: "header", cookies: "cookie", files: "file", env: "env" };
 
-const lookup = (table, key) => (key != null && Object.hasOwn(table, key) ? table[key] : null);
-
 // ---- small AST helpers ----------------------------------------------------------------------------
 
-const field = (node, name) => node?.childForFieldName(name) ?? null;
-const namedOf = (node) => (node ? node.namedChildren.filter((c) => c.type !== "comment") : []);
-const childrenOfType = (node, type) => (node ? node.namedChildren.filter((c) => c.type === type) : []);
-const lineOf = (node) => node.startPosition.row + 1;
 const stringContent = (node) => node.text.slice(1, -1);
-const anonLabel = (node) => `<anon>@${node.startPosition.row + 1}:${node.startPosition.column + 1}`;
 
 // Callee / member text with call arguments dropped (`a.b(x).c` -> `a.b.c`) and a string subscript
 // read as a member (`h['x']` -> `h.x`); other subscripts collapse to their object.
@@ -139,7 +132,6 @@ const currentFrame = (st) => st.fnStack.at(-1) ?? st.module;
 
 // ---- sources and sinks ----------------------------------------------------------------------------
 
-const firstMatch = (patterns, candidates) => patterns.find((p) => candidates.some((c) => matchesPattern(p, c))) ?? null;
 const sourceKind = (pattern) => lookup(SOURCE_KINDS, pattern.normalized.split(".").at(-1).toLowerCase()) ?? "body";
 
 // At most one source and one sink per AST node: the first matching pattern in surface order. A sink
@@ -654,49 +646,7 @@ const CURSOR_HANDLERS = new Map([
   ["shorthand_property_identifier", onIdentifier]
 ]);
 
-// Pre-order walk. A handler may return an exit callback, run when the walk leaves that node.
-function walk(tree, st) {
-  const cursor = tree.walk();
-  const types = [];
-  const exits = [];
-  let depth = 0;
-  try {
-    for (;;) {
-      const type = (types[depth] = cursor.nodeType);
-      const handler = HANDLERS.get(type);
-      const cursorHandler = handler ? undefined : CURSOR_HANDLERS.get(type);
-      if ((handler || cursorHandler) && cursor.nodeIsNamed) {
-        const ctx = { parentType: depth > 0 ? types[depth - 1] : null, field: cursor.currentFieldName };
-        const exit = handler ? handler(cursor.currentNode, st, ctx) : cursorHandler(cursor, st, ctx);
-        if (exit) exits.push({ depth, exit });
-      }
-      if (cursor.gotoFirstChild()) {
-        depth++;
-        continue;
-      }
-      for (;;) {
-        while (exits.length && exits.at(-1).depth >= depth) exits.pop().exit();
-        if (cursor.gotoNextSibling()) break;
-        if (!cursor.gotoParent()) return;
-        depth--;
-      }
-    }
-  } finally {
-    cursor.delete();
-  }
-}
-
 // ---- finish ---------------------------------------------------------------------------------------
-
-// The class a receiver name is demonstrably bound to: the innermost scope declaring the name wins
-// (a plain parameter or local shadows an outer `new C()` binding).
-function receiverClass(name, frames, moduleFrame) {
-  for (const frame of [...frames].reverse()) {
-    if (frame.classOf.has(name)) return frame.classOf.get(name);
-    if (frame.bindings.has(name)) return null;
-  }
-  return moduleFrame.classOf.get(name) ?? null;
-}
 
 function finishCall({ anchor, calleeText, receiver, receiverName, fieldClass, frames }, st) {
   const names = new Set(st.module.bindings);
@@ -711,8 +661,6 @@ function finishCall({ anchor, calleeText, receiver, receiverName, fieldClass, fr
     scope_names: [...names].sort()
   };
 }
-
-const byStart = (a, b) => a.start_byte - b.start_byte;
 
 function finish(st) {
   for (const { entry, name } of st.defaultRefs) if (st.topLevel.has(name)) entry.start_byte = st.topLevel.get(name);
@@ -742,20 +690,13 @@ function finish(st) {
 
 export function extractFile({ tree, path, surface }) {
   const st = newState(path, surface);
-  walk(tree, st);
+  walk(tree, st, HANDLERS, CURSOR_HANDLERS);
   return finish(st);
 }
 
 // ---- import resolution ----------------------------------------------------------------------------
 
 const PROBE_EXTENSIONS = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts"];
-
-// Repo-relative normal form; null when the path escapes the repository root.
-function repoPath(path) {
-  const normal = posix.normalize(path);
-  if (normal === ".." || normal.startsWith("../") || posix.isAbsolute(normal)) return null;
-  return normal === "." ? "" : normal;
-}
 
 function probe(base, filePaths) {
   if (base === null) return null;

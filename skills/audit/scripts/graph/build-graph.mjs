@@ -252,11 +252,13 @@ function resolveAll(parsed, langModules, configs, filePaths) {
 // ---- stage 5: routes, mounts, auth ----------------------------------------------------------------
 
 // Mounted path: collapse `//`; the child's own trailing `/` is kept (Django `api/` + `ping/` ->
-// `/api/ping/`) and none is added (`/users` + `/:id/run`); a bare `/` child is the prefix itself.
+// `/api/ping/`) and none is added (`/users` + `/:id/run`); a bare child (`/`, ``) is the mount path
+// as is (Express `/api` + `/` -> `/api`, Django `api/` + `` -> `/api/`).
 function joinPath(prefix, own) {
   const joined = `${prefix}/${own}`.replace(/\/{2,}/g, "/");
   if (joined.length === 1) return joined;
-  return own.endsWith("/") && own.replace(/^\/+/, "") !== "" ? joined : joined.replace(/\/$/, "");
+  const bare = own.replace(/^\/+/, "") === "";
+  return (bare ? prefix.endsWith("/") : own.endsWith("/")) ? joined : joined.replace(/\/$/, "");
 }
 
 // Express prefix semantics: `/` matches everything; `/a` matches `/a` and `/a/...`, never `/ab`.

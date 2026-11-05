@@ -348,6 +348,14 @@ test("(6) mounted paths keep the child's trailing slash, add none, and a bare / 
   assert.deepEqual(nodesOf(graph, "route").map((r) => r.path_pattern).sort(), ["/api", "/api/:id/run", "/api/ping/"]);
 });
 
+test("(6) a bare child under a slash-ending mount keeps the mount path as is: Django api/ + '' -> /api/", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "urls.py", "from django.urls import include, path\n\nurlpatterns = [path('api/', include('api.urls'))]\n");
+  put(dir, "api/urls.py", "from django.urls import path\n\n\ndef home(request):\n    pass\n\n\nurlpatterns = [path('', home), path('x/', home)]\n");
+  const { graph } = await build(dir, { stacks: ["python"], frameworks: ["django"] });
+  assert.deepEqual(nodesOf(graph, "route").map((r) => r.path_pattern).sort(), ["/api/", "/api/x/"]);
+});
+
 // ---- (7) cache ------------------------------------------------------------------------------------
 
 test("(7) cache: a second CLI run hits; editing the reference page or tsconfig.json misses", async (t) => {

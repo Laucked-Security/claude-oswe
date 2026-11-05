@@ -18,10 +18,12 @@
 //              assignment / loop / with / except / walrus / comprehension targets, nested def and
 //              class names) plus the module's assignment targets. Imports and module-level def /
 //              class names never shadow. A class body binds nothing visible to its methods.
-//   receivers  `self.m()` / `cls.m()` -> receiver "this"; `self.a.m()` -> the declared class of
-//              attribute a; `x.m()` -> the class x is bound to (`x = C(...)`, `x: C`, parameter
-//              `x: C`) in the innermost scope that binds x. A name bound twice to different
-//              things carries no class.
+//   receivers  `self` is a method's first parameter, whatever its name (`self`, `cls`, `me`), as
+//              long as the method does not rebind it: `self.m()` -> receiver "this"; `self.a.m()`
+//              -> the declared class of attribute a; any other `x.m()` (a loop variable named
+//              `cls` included) -> the class x is bound to (`x = C(...)`, `x: C`, parameter `x: C`)
+//              in the innermost scope that binds x. A name bound twice to different things
+//              carries no class.
 //   routes     Flask `@<x>.route(path, methods=[...])` / `@<x>.<verb>(path)`; FastAPI the same
 //              verbs on a FastAPI / APIRouter receiver (or in a file importing fastapi), plus
 //              `Depends.<name>` middleware texts; Django module-level `urlpatterns` `path()` /
@@ -33,7 +35,7 @@
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
 import { sinkClassFor } from "../sink-classes.mjs";
-import { matchesPattern } from "../match.mjs";
+import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, firstMatch, byStart, walk, receiverClass, repoPath } from "./common.mjs";
 
 export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true };
 
@@ -64,15 +66,8 @@ const SOURCE_KINDS = {
   headers: "header", META: "header", cookies: "cookie", COOKIES: "cookie", files: "file", FILES: "file", environ: "env"
 };
 
-const lookup = (table, key) => (key != null && Object.hasOwn(table, key) ? table[key] : null);
-
 // ---- small AST helpers ----------------------------------------------------------------------------
 
-const field = (node, name) => node?.childForFieldName(name) ?? null;
-const namedOf = (node) => (node ? node.namedChildren.filter((c) => c.type !== "comment") : []);
-const childrenOfType = (node, type) => (node ? node.namedChildren.filter((c) => c.type === type) : []);
-const lineOf = (node) => node.startPosition.row + 1;
-const anonLabel = (node) => `<anon>@${node.startPosition.row + 1}:${node.startPosition.column + 1}`;
 const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
 const positionalArgs = (call) => namedOf(field(call, "arguments")).filter((a) => a.type !== "keyword_argument");
 const keywordArg = (call, name) => namedOf(field(call, "arguments")).find((a) => a.type === "keyword_argument" && field(a, "name")?.text === name) ?? null;
@@ -148,7 +143,9 @@ function constructedClass(value) {
 
 // ---- state ----------------------------------------------------------------------------------------
 
-const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map() });
+// A method's frame also records its receiver parameter (`selfName`, the first parameter, whatever its
+// name), whether the body rebinds it, and its class's attribute types (see receiverOf).
+const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map(), selfName: null, selfRebound: false, fieldTypes: null });
 
 function newState(path, surface) {
   return {
@@ -167,7 +164,6 @@ function newState(path, surface) {
 
 const functionFrames = (st) => st.scopes.filter((s) => s.frame).map((s) => s.frame);
 const innermostFrame = (st) => st.scopes.findLast((s) => s.frame)?.frame ?? null;
-const innermostClass = (st) => st.scopes.findLast((s) => s.cls)?.cls ?? null;
 const atModule = (st) => st.scopes.length === 0;
 
 // Record `name` as bound in `frame`; a second binding to a different class (or to no class) drops
@@ -180,17 +176,19 @@ function addBinding(frame, name, cls) {
 }
 
 // Bind in the innermost scope. A class body binds nothing (its names are attributes, invisible to
-// its methods); at module level only assignment targets are recorded (`assignment: true`).
+// its methods); at module level only assignment targets are recorded (`assignment: true`). Binding a
+// method's receiver parameter again (`self = ...`, `for self in ...`) makes it an ordinary name.
 function bind(st, name, { cls = null, assignment = false } = {}) {
   const top = st.scopes.at(-1);
   if (top?.cls) return;
-  if (top) addBinding(top.frame, name, cls);
-  else if (assignment) addBinding(st.module, name, cls);
+  if (top) {
+    addBinding(top.frame, name, cls);
+    if (top.frame.selfName === name) top.frame.selfRebound = true;
+  } else if (assignment) addBinding(st.module, name, cls);
 }
 
 // ---- sources and sinks ----------------------------------------------------------------------------
 
-const firstMatch = (patterns, candidates) => patterns.find((p) => candidates.some((c) => matchesPattern(p, c))) ?? null;
 const sourceKind = (pattern) => lookup(SOURCE_KINDS, lastSegment(pattern.normalized)) ?? "body";
 
 // At most one source and one sink per AST node: the first matching pattern in surface order. A sink
@@ -261,6 +259,14 @@ function parameterName(param) {
   }
 }
 
+// A method's receiver parameter: its first parameter, unless that is a splat or a separator.
+function firstParameterName(node) {
+  const first = namedOf(field(node, "parameters"))[0];
+  if (!first || !["identifier", "typed_parameter", "default_parameter", "typed_default_parameter"].includes(first.type)) return null;
+  const name = parameterName(first);
+  return name?.type === "identifier" ? name.text : null;
+}
+
 function addParameters(node, frame) {
   for (const param of namedOf(field(node, "parameters"))) {
     const name = parameterName(param);
@@ -309,6 +315,7 @@ function onFunction(node, st, ctx) {
   if (ctx.parentType === "decorated_definition") decoratorRoutes(childrenOfType(node.parent, "decorator"), node, qualifiedName, st);
   const frame = newFrame(node.startIndex, qualifiedName);
   addParameters(node, frame);
+  if (cls) Object.assign(frame, { selfName: firstParameterName(node), fieldTypes: top.cls.fieldTypes });
   st.scopes.push({ frame });
   return () => st.scopes.pop();
 }
@@ -346,8 +353,11 @@ function onLoopOrAsTarget(node, st) {
 
 // ---- classes --------------------------------------------------------------------------------------
 
+const definedFunction = (node) => (node.type === "decorated_definition" ? field(node, "definition") : node);
+
 // Declared class of each `self.<attr>` receiver, first source wins: (i) a class-level annotation
-// `attr: C`, (ii) an annotated assignment `self.attr: C = ...`, (iii) `self.attr = C(...)`.
+// `attr: C`, (ii) an annotated assignment `self.attr: C = ...`, (iii) `self.attr = C(...)`, where
+// `self` is the receiver parameter (first parameter) of the method the assignment is in.
 function fieldTypes(body) {
   const types = new Map();
   const add = (attr, type) => attr && type && !types.has(attr) && types.set(attr, type);
@@ -357,16 +367,17 @@ function fieldTypes(body) {
       if (left?.type === "identifier") add(left.text, typeName(field(assignment, "type")));
     }
   }
-  const selfAssignments = (body?.descendantsOfType("assignment") ?? []).filter((a) => {
-    const left = field(a, "left");
-    return left?.type === "attribute" && field(left, "object")?.type === "identifier" && field(left, "object").text === "self";
+  const selfAssignments = namedOf(body).map(definedFunction).filter((d) => d?.type === "function_definition").flatMap((method) => {
+    const selfName = firstParameterName(method);
+    return field(method, "body").descendantsOfType("assignment").filter((a) => {
+      const left = field(a, "left");
+      return selfName && left?.type === "attribute" && field(left, "object")?.type === "identifier" && field(left, "object").text === selfName;
+    });
   });
   for (const a of selfAssignments) add(field(field(a, "left"), "attribute")?.text, typeName(field(a, "type")));
   for (const a of selfAssignments) add(field(field(a, "left"), "attribute")?.text, constructedClass(field(a, "right")));
   return types;
 }
-
-const definedFunction = (node) => (node.type === "decorated_definition" ? field(node, "definition") : node);
 
 function onClass(node, st) {
   const name = field(node, "name")?.text ?? null;
@@ -491,21 +502,15 @@ function calleeAnchor(callee, call) {
   return field(call, "arguments") ?? call;
 }
 
-const isSelf = (node) => node?.type === "identifier" && (node.text === "self" || node.text === "cls");
 
-// Receiver hints for an attribute callee (spec §1.4 rules 1b and 3): `self.m()` -> "this"; `x.m()`
-// -> the name x, resolved against the scopes when the walk ends; `self.a.m()` -> the declared class
-// of attribute a on the enclosing class. Deeper chains carry no hint.
-function receiverOf(fn, st) {
-  const none = { receiver: null, receiverName: null, fieldClass: null };
-  if (fn.type !== "attribute") return none;
-  const object = field(fn, "object");
-  if (isSelf(object)) return { ...none, receiver: "this" };
-  if (object?.type === "identifier") return { ...none, receiverName: object.text };
-  if (object?.type === "attribute" && isSelf(field(object, "object"))) {
-    return { ...none, fieldClass: innermostClass(st)?.fieldTypes.get(field(object, "attribute")?.text) ?? null };
-  }
-  return none;
+// The receiver of an attribute callee, decided when the walk ends (finishCall): `x.m()` -> { name: x,
+// attribute: null }; `x.a.m()` -> { name: x, attribute: a }. Deeper chains carry no hint.
+function receiverOf(fn) {
+  const object = fn.type === "attribute" ? field(fn, "object") : null;
+  if (object?.type === "identifier") return { receiverName: object.text, receiverAttribute: null };
+  const inner = object?.type === "attribute" ? field(object, "object") : null;
+  if (inner?.type === "identifier") return { receiverName: inner.text, receiverAttribute: field(object, "attribute")?.text ?? null };
+  return { receiverName: null, receiverAttribute: null };
 }
 
 function onCall(node, st, ctx) {
@@ -514,7 +519,7 @@ function onCall(node, st, ctx) {
   if (!fn) return;
   const calleeText = textOf(fn);
   const anchor = calleeAnchor(fn, node);
-  st.calls.push({ anchor, calleeText, ...receiverOf(fn, st), frames: functionFrames(st) });
+  st.calls.push({ anchor, calleeText, ...receiverOf(fn), frames: functionFrames(st) });
   emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: true, sinkAt: anchor });
 }
 
@@ -571,65 +576,35 @@ const CURSOR_HANDLERS = new Map([
   ["identifier", onIdentifier]
 ]);
 
-// Pre-order walk. A handler may return an exit callback, run when the walk leaves that node.
-function walk(tree, st) {
-  const cursor = tree.walk();
-  const types = [];
-  const exits = [];
-  let depth = 0;
-  try {
-    for (;;) {
-      const type = (types[depth] = cursor.nodeType);
-      const handler = HANDLERS.get(type);
-      const cursorHandler = handler ? undefined : CURSOR_HANDLERS.get(type);
-      if ((handler || cursorHandler) && cursor.nodeIsNamed) {
-        const ctx = { parentType: depth > 0 ? types[depth - 1] : null, field: cursor.currentFieldName };
-        const exit = handler ? handler(cursor.currentNode, st, ctx) : cursorHandler(cursor, st, ctx);
-        if (exit) exits.push({ depth, exit });
-      }
-      if (cursor.gotoFirstChild()) {
-        depth++;
-        continue;
-      }
-      for (;;) {
-        while (exits.length && exits.at(-1).depth >= depth) exits.pop().exit();
-        if (cursor.gotoNextSibling()) break;
-        if (!cursor.gotoParent()) return;
-        depth--;
-      }
-    }
-  } finally {
-    cursor.delete();
-  }
-}
-
 // ---- finish ---------------------------------------------------------------------------------------
 
-// The class a receiver name is demonstrably bound to: the innermost scope binding the name wins (a
-// plain parameter or local shadows an outer `C()` binding).
-function receiverClass(name, frames, moduleFrame) {
-  for (const frame of [...frames].reverse()) {
-    if (frame.classOf.has(name)) return frame.classOf.get(name);
-    if (frame.bindings.has(name)) return null;
-  }
-  return moduleFrame.classOf.get(name) ?? null;
+// The method frame whose receiver parameter `name` is, as seen from the call: the innermost frame
+// binding `name` must be a method whose first parameter it is, never rebound there. null otherwise
+// (a loop variable or local spelled `self` / `cls`, a plain function's parameter `self`).
+function receiverFrame(name, frames) {
+  const frame = [...frames].reverse().find((f) => f.bindings.has(name));
+  return frame && frame.selfName === name && !frame.selfRebound ? frame : null;
 }
 
-function finishCall({ anchor, calleeText, receiver, receiverName, fieldClass, frames }, st) {
+// Receiver hints (spec §1.4 rules 1b and 3): `self.m()` -> receiver "this"; `self.a.m()` -> the
+// declared class of attribute a on the method's class; `x.m()` -> the class x is bound to.
+function finishCall({ anchor, calleeText, receiverName, receiverAttribute, frames }, st) {
   const names = new Set(st.module.bindings);
   for (const frame of frames) for (const name of frame.bindings) names.add(name);
+  const self = receiverName ? receiverFrame(receiverName, frames) : null;
+  let receiverClassName = null;
+  if (receiverAttribute !== null) receiverClassName = self?.fieldTypes.get(receiverAttribute) ?? null;
+  else if (receiverName && !self) receiverClassName = receiverClass(receiverName, frames, st.module);
   return {
     line: lineOf(anchor),
     start_byte: anchor.startIndex,
     callee_text: calleeText,
     enclosing_start_byte: frames.at(-1)?.startIndex ?? null,
-    receiver,
-    receiver_class: fieldClass ?? (receiverName ? receiverClass(receiverName, frames, st.module) : null),
+    receiver: self && receiverAttribute === null ? "this" : null,
+    receiver_class: receiverClassName,
     scope_names: [...names].sort()
   };
 }
-
-const byStart = (a, b) => a.start_byte - b.start_byte;
 
 // One export per top-level def / class name (its first definition), filtered by `__all__` when set.
 function moduleExports(st) {
@@ -662,18 +637,11 @@ function finish(st) {
 
 export function extractFile({ tree, path, surface }) {
   const st = newState(path, surface);
-  walk(tree, st);
+  walk(tree, st, HANDLERS, CURSOR_HANDLERS);
   return finish(st);
 }
 
 // ---- import resolution ----------------------------------------------------------------------------
-
-// Repo-relative normal form; null when the path escapes the repository root.
-function repoPath(path) {
-  const normal = posix.normalize(path);
-  if (normal === ".." || normal.startsWith("../") || posix.isAbsolute(normal)) return null;
-  return normal === "." ? "" : normal;
-}
 
 // A module `base` is `base.py` or the package `base/__init__.py`; a bare package reference
 // (`from . import x`) is only the package.

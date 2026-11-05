@@ -126,8 +126,8 @@ test("sinks: subprocess.run is cmd-exec anchored at the callee's last identifier
   const text = readFileSync(join(FIXTURE_DIR, "services/runner.py"), "utf8").replace(/\r\n/g, "\n");
   assert.equal(run.start_byte, text.indexOf("run(c, shell=True)"));
   assert.ok(!x.sinks.some((s) => s.callee === "self.exec"), "the method self.exec is not the builtin exec(");
-  const z = await extract("class K:\n    def m(self, c):\n        self.exec(c)\n        exec(c)\n");
-  assert.deepEqual(z.sinks.map((s) => [s.callee, s.class, s.line]), [["exec", "eval", 4]]);
+  const z = await extract("import jinja2\n\nclass K:\n    def m(self, c, t):\n        self.exec(c)\n        exec(c)\n        jinja2.Template(t)\n");
+  assert.deepEqual(z.sinks.map((s) => [s.callee, s.class, s.line]), [["exec", "eval", 6], ["jinja2.Template", "template", 7]]);
   const y = await extract("exec(code)\nos.system(cmd)\nrender_template_string(t)\n");
   assert.deepEqual(y.sinks.map((s) => [s.callee, s.class]), [["exec", "eval"], ["os.system", "cmd-exec"], ["render_template_string", "template"]]);
 });
@@ -209,18 +209,19 @@ test("calls: the fixture's shadowing case, decorators are not calls, anchors at 
   assert.equal(run.receiver, null);
 });
 
-test("calls: receiver this for self / cls, receiver_class from construction, annotations and self attributes", async () => {
+test("calls: receiver this for the method's first parameter, receiver_class from construction, annotations and self attributes", async () => {
   const x = await extract(
     "svc = Service()\nmod_typed: Repo = make()\n\nclass K:\n    db: Database\n\n    def __init__(self):\n        self.cache: Cache = make()\n        self.client = http.Client()\n\n" +
       "    def m(self, p: Parser, q):\n        self.go()\n        cls.make()\n        self.db.query()\n        self.cache.get()\n        self.client.send()\n        self.other.x()\n" +
       "        p.parse()\n        q.parse()\n        svc.run()\n        mod_typed.find()\n        local = pkg.Thing(1)\n        local.do()\n        a.b.c()\n\n" +
+      "    @classmethod\n    def build(cls):\n        cls.make()\n        cls.db.query()\n\n" +
       "def shadow(svc):\n    svc.run()\n"
   );
   const rows = x.calls.filter((c) => c.callee_text.split(".").length > 1).map((c) => [c.callee_text, c.receiver, c.receiver_class]);
   assert.deepEqual(rows, [
     ["http.Client", null, null],
     ["self.go", "this", null],
-    ["cls.make", "this", null],
+    ["cls.make", null, null], // cls is not m's first parameter
     ["self.db.query", null, "Database"],
     ["self.cache.get", null, "Cache"],
     ["self.client.send", null, "Client"],
@@ -232,8 +233,30 @@ test("calls: receiver this for self / cls, receiver_class from construction, ann
     ["pkg.Thing", null, null],
     ["local.do", null, "Thing"],
     ["a.b.c", null, null],
+    ["cls.make", "this", null], // classmethod shape: cls is build's first parameter
+    ["cls.db.query", null, "Database"],
     ["svc.run", null, null]
   ]);
+});
+
+test("calls: self / cls are receivers only as a method's unrebound first parameter", async () => {
+  const x = await extract(
+    "class Registry:\n    def run(self):\n        pass\n\n    def run_all(self, handlers):\n        for cls in handlers:\n            cls.run()\n\n" +
+      "    def named(me):\n        me.run()\n\n    def rebound(self):\n        self = other()\n        self.run()\n\n" +
+      "    def nested(self):\n        def inner(self):\n            self.run()\n        return lambda: self.run()\n\n" +
+      "def g(self):\n    self.x()\n    self.attr.y()\n"
+  );
+  const rows = x.calls.filter((c) => c.callee_text.includes(".")).map((c) => [c.line, c.callee_text, c.receiver, c.receiver_class]);
+  assert.deepEqual(rows, [
+    [7, "cls.run", null, null], // a loop variable named cls
+    [10, "me.run", "this", null], // the first parameter, whatever its name
+    [14, "self.run", null, null], // rebound in the method
+    [18, "self.run", null, null], // a nested plain function's parameter
+    [19, "self.run", "this", null], // a lambda closing over the method's self
+    [22, "self.x", null, null], // a module-level function is not a method
+    [23, "self.attr.y", null, null]
+  ]);
+  assert.ok(x.calls.find((c) => c.line === 7).scope_names.includes("cls"), "the loop variable shadows, so the call stays unresolved");
 });
 
 // ---- imports ------------------------------------------------------------------------------------
