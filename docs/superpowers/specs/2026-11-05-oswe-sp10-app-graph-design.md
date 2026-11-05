@@ -94,8 +94,17 @@ text**: identifiers and line numbers only, so it carries no secrets and needs no
 
 ### 1.3 Determinism and identity
 
-- Node id = first 12 hex chars of SHA-1 over `"<type>:<path>:<qualified_name or line>"`. Edge order and
-  node order are sorted by `(type, id)`. **Two builds of identical input are byte-identical.**
+- Node id = first 12 hex chars of SHA-1 over a per-type identity string that includes the AST
+  **start byte offset**, so two constructs on one line never collide (`exec(a); eval(b);` are two
+  sinks):
+  - `function`: `"fn:<path>:<qualified_name>:<start_byte>"` — overloads (Java/C#) and anonymous
+    functions are distinct by offset; anonymous functions get `name: "<anon>"` and
+    `qualified_name: "<enclosing>.<anon>@<line>:<col>"`.
+  - `source` / `sink`: `"<type>:<path>:<start_byte>"`.
+  - `route`: `"route:<path>:<start_byte>"`.
+  - `file`: `"file:<path>"`.
+  Edge identity = `(type, from, to, line, start_byte)`. Edge order and node order are sorted by
+  `(type, id)`. **Two builds of identical input are byte-identical.**
 - `auth` on a route is computed deterministically from the `auth_markers` list already present in the
   `surface` block of `references/<stack>.md`: a resolved middleware/decorator/attribute whose name
   matches a marker → `authenticated`; all middlewares resolved and none match → `unauthenticated`; any
@@ -110,16 +119,27 @@ text**: identifiers and line numbers only, so it carries no secrets and needs no
 Resolution happens in `resolve.mjs`, language-independent, driven by hints the language module emits
 (declared names, exports, import bindings, class membership):
 
-1. callee defined in the same file → `exact`
-2. callee is an imported binding → export of the resolved target file → `exact`
-3. `this.x()` / `self.x()` / `$this->x()` → method of the enclosing class (same file or resolved parent
-   file) → `exact`
-4. callee name is unique across all parsed functions in scope → `name-only`
-5. otherwise → `unresolved` (`to: null`); `callee_text` kept so sink matching still works
+`exact` is reserved for bindings the graph can **demonstrate**; anything with a plausible alternative
+target is downgraded. Each language module emits, per call site, the set of names declared in the
+enclosing lexical scopes (parameters, locals, closure variables) so the resolver can detect shadowing.
 
-Explicit non-goals: type inference, virtual dispatch resolution, interprocedural taint summaries,
-dynamic requires / reflection. A homonymous function defined in two files is **never** resolved to
-either; it yields `unresolved` with a stats counter, and a test guards that.
+1. callee is a **top-level or class-member definition in the same file** and the name is **not
+   shadowed** by a parameter/local/closure binding in any enclosing scope of the call site → `exact`.
+   Shadowed → `unresolved` (the callee is a runtime value the graph cannot see).
+2. callee is an **imported binding** (not shadowed) → the export of the resolved target file → `exact`.
+   If the import resolves to a file but the export is not found → `unresolved`.
+3. `this.x()` / `self.x()` / `$this->x()` → the method `x` of the enclosing class, resolved in the same
+   file or the resolved parent file, **only if no parsed class in scope extends that class and
+   redefines `x`**. If any subclass overrides `x` → `name-only` (dispatch is dynamic; the graph names a
+   candidate, not a proof).
+4. callee name is unique across all parsed functions in scope → `name-only`.
+5. otherwise → `unresolved` (`to: null`); `callee_text` kept so sink matching still works.
+
+Explicit non-goals: type inference, virtual dispatch resolution beyond rule 3's conservative check,
+interprocedural taint summaries, dynamic requires / reflection. A homonymous function defined in two
+files is **never** resolved to either; it yields `unresolved` with a stats counter. Tests guard:
+parameter shadowing a same-file function, local shadowing an import, subclass override of a
+`this.x()` target, and the two-file homonym.
 
 ---
 
@@ -203,10 +223,25 @@ not silently missed.
 ### 2.5 Sources and sinks
 
 The `sources` / `sinks` / `sanitizers` / `auth_markers` lists in each `references/<stack>.md` `surface`
-block remain the **single source of truth**. The extractor matches them against the callee text of
-`call_expression` / `member_expression` / attribute nodes in the AST — so an `eval` inside a comment or
-a string literal no longer counts. **`surface-scan.mjs` is not modified in SP10** (zero regression on
-budget allocation); replacing it with graph-derived counts is SP11 scope.
+block remain the **single source of truth**. They are written as grep-style text (`eval(`, `.query(`,
+`$_GET`, `$where`, `@RequestParam`, `[FromBody]`, `ProcessBuilder`), so `surface.mjs` **classifies
+each pattern by shape** and the extractor matches it against a specific AST node category. An `eval`
+inside a comment or a string literal no longer counts.
+
+| pattern shape | example | normalisation | AST nodes matched |
+|---|---|---|---|
+| call, trailing `(` | `eval(`, `system(`, `getParameter` (bare word also treated as call) | strip `(` | callee identifier of `call_expression` / `new_expression` / `object_creation`; for a dotted name (`os.system`, `pickle.loads`, `Runtime.getRuntime().exec`) the callee text must **end with** the dotted sequence |
+| member, leading `.` | `.query(`, `.readObject(`, `.raw(` | strip `.` and `(` | last segment of `member_expression` / `attribute` / `member_access` used as a callee |
+| decorator / attribute | `@RequestParam`, `@login_required`, `[FromBody]`, `[Authorize]`, `#[IsGranted` | strip `@`, `[`, `#[`, `(` | `decorator` / `annotation` / `attribute` nodes (name match on the first segment) |
+| variable / global / member chain | `$_GET`, `request.args`, `req.body`, `Request.Query`, `$request->input(` | strip trailing `(` | `identifier` / `variable_name` / `member_expression` whose text **starts with** the chain |
+| object key, leading `$` (Mongo operators) | `$where`, `$ne`, `$gt`, `$regex` | none | property keys of object literals and string literals **used as keys** (never free-standing string literals) |
+| bare type / word | `ProcessBuilder`, `BinaryFormatter`, `XStream`, `TypeNameHandling` | none | `identifier` / `type_identifier` in `new_expression`, `object_creation`, type references, or as a callee |
+| scheme / header | `php://input`, `X-User-Role` | none | **string literals only**, matched by equality; flagged `pattern_kind: "literal"` so they never seed a `sink` node on their own |
+
+A pattern that fits no shape is listed in `stats.coverage_matrix.<stack>.patterns_unmatched` — never
+silently dropped. The classification is unit-tested against every entry of every `surface` block (a
+new entry that fits no shape fails CI). **`surface-scan.mjs` is not modified in SP10** (zero regression
+on budget allocation); replacing it with graph-derived counts is SP11 scope.
 
 ### 2.6 Import resolution per language (hints consumed by `resolve.mjs`)
 
@@ -231,9 +266,19 @@ NodeGoat (~60 files) < 2 s; 10 000 files < 60 s; single process, no parallelism 
 ### 3.1 §1.5 Build app graph (new phase)
 
 After recon (stacks/frameworks known, scope confined), before §2 partition. Wrapped by `cache-wrap`
-like other helpers; cache key = content digest of every file that `walk.mjs` would parse + helper
-version + `MANIFEST.json` digest. The artifact lives in `.oswe/tmp/` under the standard hygiene (purged
-at end/abort) and is checkpointed under `.oswe/checkpoints/<run-id>/` for resume.
+like other helpers. The cache key must cover **every input that can change the graph**:
+
+- `input_digest` = canonical digest over: the content digest of every file `walk.mjs` would parse; the
+  content digest of every **resolution config** read in §2.6 (`tsconfig*.json`, `jsconfig.json`,
+  `package.json` (`main`/`exports`), `composer.json`, `pyproject.toml`/`setup.cfg` package roots); the
+  content digest of every `references/<stack>.md` for the detected stacks (the `surface` blocks); the
+  `stacks[]`/`frameworks[]`/`excludes[]` values; and the `MANIFEST.json` digest.
+- `version_digest` = digest over **all** of `scripts/graph/**/*.mjs` (a new `dirVersionDigest` in
+  `cache-wrap.mjs`, alongside the existing single-file `helperVersionDigest`) + the vendored loader.
+
+A test edits a reference file between a kill and a resume and asserts a cache miss; another edits
+`tsconfig.json` paths and asserts the same. The artifact lives in `.oswe/tmp/` under the standard
+hygiene (purged at end/abort) and is checkpointed under `.oswe/checkpoints/<run-id>/` for resume.
 
 ### 3.2 §2 Partition by reachability — `partition-graph.mjs`
 
@@ -257,24 +302,59 @@ at end/abort) and is checkpointed under `.oswe/checkpoints/<run-id>/` for resume
 - `agents/oswe-analyzer.md` gains one instruction block: candidate paths are *structural* hints; confirm
   or refute each *semantically* (sanitizers, auth, attacker control); flows not in the list are still
   expected.
-- `finding.schema.json` gains an optional `candidate_path_id`. Additive, backward compatible.
+- `finding.schema.json` gains an optional `candidate_path_id` (analyzer output). Additive, backward
+  compatible.
+- **Aggregation preserves it.** `aggregate-findings.mjs` rebuilds every merged finding field
+  explicitly (`aggregate-findings.mjs:54-73`), so the merged record gains
+  `candidate_path_ids: uniqSortedStrings(group.flatMap(f => f.candidate_path_id ? [f.candidate_path_id] : []))`
+  and `final-finding.schema.json` / `report.schema.json` carry it through to `report.json`. Without this
+  the metric below cannot be computed.
+- **`candidate_path_hit_rate`, fixed now:** numerator = findings in `report.json` with
+  `verification_status ∈ {accepted, downgraded}` **and** non-empty `candidate_path_ids`; denominator =
+  all findings with `verification_status ∈ {accepted, downgraded}`. Findings the graph could not see
+  count against the metric on purpose — that is a graph failure, not an excuse.
 
 ### 3.4 §5 Verify — structural proof — `check-chain-structure.mjs`
 
-Runs deterministically **before** the LLM verifier, on the aggregated findings and candidate chains.
+Runs deterministically **before** the LLM verifier, on the aggregated findings and candidate chains,
+and writes its own artifact `structural.json` (schema `structural-check.schema.json`), keyed by
+`OSWE-N` finding id and `CHAIN-N` + transition index.
 
-- Per finding: is there a path `enclosing_fn(source) → enclosing_fn(sink)` using **only `exact`**
-  `calls` edges (or source and sink in the same function)? → `structural_path: "proven" | "absent"`.
-  A finding whose source or sink line maps to no graph node → `"n/a"` (graph did not see it; not
-  evidence either way).
-- Per chain transition: only `call-path` transitions are structurally checkable; `shared-state` and
-  `auth-gain` transitions (e.g. mass-assignment → admin route) get `"n/a"` and remain the verifier's
-  call. The helper does not pretend to prove what it cannot.
-- Output is injected into the verifier input as an additional counterexample entry
-  (`"structural_path"`), and `apply-verdicts.mjs` applies one new deterministic rule:
-  **`confidence: "strong static proof"` and `structural_path: "absent"` ⇒ downgraded to `"to verify"`.**
-  The verifier may still accept the finding, but never again at "strong static proof" against the graph.
-  No existing rule changes.
+**Per finding** — let `S` = `enclosing_fn(source)`, `K` = `enclosing_fn(sink)`:
+
+| condition | `structural_path` |
+|---|---|
+| `S == K`, or a **forward** path `S → … → K` over `exact` `calls` edges (depth ≤ 6) | `"proven"` |
+| no forward path, but a **reverse** path `K → … → S` over `exact` edges — the source is read inside a callee and flows back through a return value (`handler() { eval(readInput()); }`) | `"n/a"` (return-value flow is real but not modelled; the graph must not contradict it) |
+| `S` and `K` connected only through `name-only` / `unresolved` edges, in either direction | `"n/a"` |
+| source or sink line maps to no graph node | `"n/a"` |
+| `S` and `K` both mapped, and **no** connection at all over any edge confidence within depth 6, forward or reverse | `"absent"` |
+
+`"absent"` is therefore a strong claim: the graph saw both ends and found nothing linking them. Every
+other uncertainty is `"n/a"`.
+
+**Per chain transition** — `chain.schema.json` gains an optional typed field on each transition:
+`kind: "call-path" | "shared-state" | "auth-gain"` plus optional anchors `from_anchor` / `to_anchor`
+(`fileline`). The orchestrator sets `kind` when it builds the chain (§4); legacy chains without `kind`
+are treated as `"n/a"` (backward compatible, no re-validation of old reports). Only `call-path`
+transitions are checked, with the same table applied between `to_anchor` of the source finding and
+`from_anchor` of the target. `shared-state` and `auth-gain` (mass-assignment → admin route) are
+`"n/a"` and remain the verifier's call. The helper does not pretend to prove what it cannot.
+
+**Authoritative channel.** The result is **not** injected as a verifier counterexample — the verifier
+contract (`apply-verdicts.mjs:141`) rejects an `accepted` verdict with an unrefuted counterexample, which
+would make "verifier may still accept" impossible. Instead:
+
+1. `structural.json` is passed to the verifier dispatch as read-only context
+   (`dispatch_input.structural`), so it is part of the verifier cache key and a graph change
+   invalidates verifier caches.
+2. `apply-verdicts.mjs` takes a new `--structural <path>` input and applies **one** new deterministic
+   rule after the verdict is applied: **`confidence == "strong static proof"` and
+   `structural_path == "absent"` ⇒ `confidence = "to verify"`**, recorded in the finding's
+   `verification_notes` as `"structural: absent"`. The verifier's verdict (accept/downgrade/reject) is
+   unchanged; only the confidence ceiling is. Through the existing Critical gate (every member at
+   "strong static proof"), a chain with such a member can no longer be Critical.
+3. No existing rule changes; the 320 pipeline tests stay green with `--structural` omitted.
 
 ### 3.5 §7 Report
 
@@ -304,12 +384,27 @@ resolution ratio, per-stack coverage matrix, multi-file chain count. `report.sch
   call, `name-only` call, route + auth middleware, source, sink, non-fatal parse error.
 - **Determinism** — build twice, byte-identical.
 - **Resolution** — per-language edge cases (`index.js`, `__init__.py`, PSR-4, C# namespaces, homonymous
-  class in two packages ⇒ `unresolved`, never `exact`).
+  class in two packages ⇒ `unresolved`, never `exact`); **shadowing**: parameter shadows a same-file
+  function ⇒ `unresolved`, local shadows an import ⇒ `unresolved`; **override**: `this.x()` with a
+  subclass redefining `x` ⇒ `name-only`, without ⇒ `exact`.
+- **Identity** — two sinks on one line ⇒ two distinct ids; Java/C# overloads ⇒ distinct function ids;
+  anonymous functions ⇒ distinct, deterministic ids.
+- **Surface classification** — every entry of every `surface` block maps to exactly one shape of the
+  §2.5 table (CI fails on a new unclassifiable entry); `eval` in a comment/string ⇒ no sink; `$where`
+  as a free-standing string ⇒ no sink, as an object key ⇒ sink.
 - **`partition-graph`** — zero-regression byte-equality when no routes; grouping rules; bounds.
 - **`enumerate-paths`** — depth/cap, deterministic order, `min_confidence` labelling.
-- **`check-chain-structure`** — `exact`-only ⇒ `proven`; one `name-only` link ⇒ `absent`;
-  `shared-state` transition ⇒ `n/a`; unmapped line ⇒ `n/a`.
-- **`apply-verdicts`** — the single new downgrade rule; all 320 existing tests stay green.
+- **`check-chain-structure`** — forward `exact` path ⇒ `proven`; same function ⇒ `proven`; reverse-only
+  path (return-value flow) ⇒ `n/a`; path containing a `name-only` link ⇒ `n/a`; unmapped line ⇒ `n/a`;
+  both ends mapped and disconnected ⇒ `absent`; transition `kind: "shared-state"` ⇒ `n/a`; legacy
+  transition without `kind` ⇒ `n/a`.
+- **`aggregate-findings`** — `candidate_path_ids` merged across duplicates (union, sorted); absent on
+  findings that never cited one.
+- **`apply-verdicts`** — `--structural` omitted ⇒ byte-identical output to today; `absent` + "strong
+  static proof" ⇒ "to verify" with note; `absent` + "likely" ⇒ unchanged; a Critical chain whose member
+  is downgraded this way is no longer Critical. All 320 existing tests stay green.
+- **Cache invalidation** — resume after editing a `references/<stack>.md`, a `tsconfig.json`, or a
+  `graph/lang/*.mjs` module ⇒ graph cache miss and verifier cache miss.
 - **E2E replay** — both existing replay tests (no-cache, kill-then-resume) extended with the graph stage
   and its cache hit.
 - **CI** — `MANIFEST.json` ↔ binaries hash check, `vendor/` ≤ 10 MiB, structure gate extended (each
