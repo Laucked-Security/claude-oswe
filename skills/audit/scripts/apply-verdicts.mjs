@@ -29,7 +29,11 @@
 // final_confidence is "strong static proof" with structural_path "absent" is capped to "to verify"
 // and carries verification_notes "structural: absent" (never duplicated). The verdict
 // (accept/downgrade/reject) and final_severity never change; the existing Critical gate (every member
-// "strong static proof") then sees the capped member. Findings absent from structural.findings, and
+// "strong static proof") then sees the capped member. A chain DOWNGRADE that is within the ceiling
+// computed from the pre-cap member confidences but above the post-cap one is clamped to the post-cap
+// ceiling (severity and confidence) with chain verification_notes "structural: member cap" instead of
+// failing (the verifier could not know the cap); above even the pre-cap ceiling it stays a
+// verifier-output error. Findings absent from structural.findings, and
 // ids there that match no finding, are ignored. structural.transitions is verifier context only — not
 // consumed here. decisions[] gains no new outcome kind (the note is the audit trail). An invalid
 // structural is "orchestrator-input". Omitted/undefined => output identical to pre-SP10.
@@ -176,6 +180,7 @@ export function validateBoundBatch(batch, { findingById, chainById }) {
 // SP10 structural confidence ceiling (design §3.4): mutates the freshly-built outFindings copies
 // (never the caller's finding objects or their verification_notes arrays).
 const STRUCTURAL_ABSENT_NOTE = "structural: absent";
+const STRUCTURAL_MEMBER_CAP_NOTE = "structural: member cap";
 function applyStructuralCeiling(outFindings, structural) {
   for (const nf of outFindings) {
     if (!Object.hasOwn(structural.findings, nf.finding_id)) continue;
@@ -301,7 +306,8 @@ export function applyVerdicts({ findings, chains, batches, structural } = {}) {
   });
 
   // SP10: the structural ceiling — AFTER every finding verdict is settled, BEFORE chain gating reads
-  // member confidences below.
+  // member confidences below. The pre-cap confidences are kept only to judge a chain DOWNGRADE.
+  const preCapConfById = structural !== undefined ? new Map(outFindings.map((f) => [f.finding_id, f.final_confidence])) : null;
   if (structural !== undefined) applyStructuralCeiling(outFindings, structural);
 
   const statusById = new Map(outFindings.map((f) => [f.finding_id, f.verification_status]));
@@ -364,32 +370,49 @@ export function applyVerdicts({ findings, chains, batches, structural } = {}) {
       continue;
     }
 
-    // Weakest member confidence — the chain is only as strong as its weakest verified link.
-    const minMemberConfIdx = Math.min(...c.finding_ids.map((id) => CONF_INDEX[confById.get(id) ?? "to verify"]));
-    const minMemberConf = ["to verify", "likely", "strong static proof"][minMemberConfIdx];
-
-    // Critical requires every member accepted AND every member confidence "strong static proof".
-    const canBeCritique =
-      allMembersAccepted && minMemberConfIdx === CONF_INDEX["strong static proof"] &&
-      c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
-    const naturalSev = canBeCritique
-      ? "Critical"
-      : SEV_BY_INDEX[Math.max(0, ...c.finding_ids.map((id) => SEV_INDEX[sevById.get(id) ?? "Info"]))];
-    const naturalConf = canBeCritique ? "strong static proof" : minMemberConf;
+    // The chain's natural level from a member-confidence map (the post-cap one for every decision;
+    // the pre-cap one only to judge whether a downgrade was legal before the structural cap).
+    const naturalLevel = (memberConf) => {
+      // Weakest member confidence — the chain is only as strong as its weakest verified link.
+      const minMemberConfIdx = Math.min(...c.finding_ids.map((id) => CONF_INDEX[memberConf.get(id) ?? "to verify"]));
+      const minMemberConf = ["to verify", "likely", "strong static proof"][minMemberConfIdx];
+      // Critical requires every member accepted AND every member confidence "strong static proof".
+      const canBeCritique =
+        allMembersAccepted && minMemberConfIdx === CONF_INDEX["strong static proof"] &&
+        c.entry_point.auth === "unauthenticated" && c.final_impact === "unauth-rce";
+      const naturalSev = canBeCritique
+        ? "Critical"
+        : SEV_BY_INDEX[Math.max(0, ...c.finding_ids.map((id) => SEV_INDEX[sevById.get(id) ?? "Info"]))];
+      const naturalConf = canBeCritique ? "strong static proof" : minMemberConf;
+      return { naturalSev, naturalConf };
+    };
+    const { naturalSev, naturalConf } = naturalLevel(confById);
 
     if (v.verdict === "downgraded") {
       // A downgrade may not exceed EITHER the candidate's originally-claimed level (c.severity/
       // c.confidence) OR the natural computed level. Use the lower of the two as the ceiling.
-      const ceilSev = SEV_BY_INDEX[Math.min(SEV_INDEX[c.severity], SEV_INDEX[naturalSev])];
-      const ceilConf = ["to verify", "likely", "strong static proof"][
-        Math.min(CONF_INDEX[c.confidence], CONF_INDEX[naturalConf])
-      ];
-      if (!notIncrease(ceilSev, ceilConf, v.new_severity, v.new_confidence)) {
-        return fail(`downgraded chain ${c.chain_id} raises severity/confidence above its ceiling`, "verifier-output", verdictOf.get(tkey("chain", c.chain_id)).batch_id);
+      const ceilingOf = ({ naturalSev: s, naturalConf: cf }) => ({
+        sev: SEV_BY_INDEX[Math.min(SEV_INDEX[c.severity], SEV_INDEX[s])],
+        conf: ["to verify", "likely", "strong static proof"][Math.min(CONF_INDEX[c.confidence], CONF_INDEX[cf])]
+      });
+      const ceil = ceilingOf({ naturalSev, naturalConf });
+      let newSev = v.new_severity, newConf = v.new_confidence;
+      if (!notIncrease(ceil.sev, ceil.conf, newSev, newConf)) {
+        // SP10: the verifier could not know the structural cap. A downgrade within the PRE-cap
+        // ceiling is clamped to the post-cap one (both axes: the cap can also remove the Critical
+        // natural severity) and noted; one above even the pre-cap ceiling is still a verifier error.
+        const pre = preCapConfById ? ceilingOf(naturalLevel(preCapConfById)) : null;
+        if (!pre || !notIncrease(pre.sev, pre.conf, newSev, newConf)) {
+          return fail(`downgraded chain ${c.chain_id} raises severity/confidence above its ceiling`, "verifier-output", verdictOf.get(tkey("chain", c.chain_id)).batch_id);
+        }
+        newSev = SEV_BY_INDEX[Math.min(SEV_INDEX[newSev], SEV_INDEX[ceil.sev])];
+        newConf = ["to verify", "likely", "strong static proof"][Math.min(CONF_INDEX[newConf], CONF_INDEX[ceil.conf])];
+        const notes = Array.isArray(nc.verification_notes) ? nc.verification_notes : [];
+        nc.verification_notes = notes.includes(STRUCTURAL_MEMBER_CAP_NOTE) ? [...notes] : [...notes, STRUCTURAL_MEMBER_CAP_NOTE];
       }
       nc.verification_status = "downgraded";
-      nc.severity = v.new_severity;
-      nc.confidence = v.new_confidence;
+      nc.severity = newSev;
+      nc.confidence = newConf;
       decisions.push({ target_type: "chain", target_id: c.chain_id, outcome: "downgraded", reason: v.justification });
       outChains.push(nc);
       continue;

@@ -34,7 +34,8 @@
     "final_impact": { "type": "string", "minLength": 1 },
     "severity": { "enum": ["Critical", "High", "Medium", "Low", "Info"] },
     "confidence": { "enum": ["strong static proof", "likely", "to verify"] },
-    "verification_status": { "enum": ["not-requested", "accepted", "downgraded", "rejected"] }
+    "verification_status": { "enum": ["not-requested", "accepted", "downgraded", "rejected"] },
+    "verification_notes": { "type": "array", "items": { "type": "string", "minLength": 1 } }
   },
   "if": { "properties": { "severity": { "const": "Critical" } }, "required": ["severity"] },
   "then": {

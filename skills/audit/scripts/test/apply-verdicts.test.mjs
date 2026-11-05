@@ -878,3 +878,74 @@ test("CLI --structural participates in the cache key (--checkpoint-dir)", () => 
   assert.doesNotMatch(none.stderr, /cache hit/i);
   assert.equal(none.out.chains[0].severity, "Critical");
 });
+
+// --- SP10 Task 16 fix: a downgraded chain within its PRE-cap ceiling is clamped, not failed ---
+// The verifier cannot know the structural cap, so a chain downgrade that only exceeds the POST-cap
+// ceiling is clamped to it (+ chain verification_notes "structural: member cap"); a downgrade above
+// the pre-cap ceiling is still a verifier-output error.
+const dnChainV = (sev, conf) => ({ ...acceptChain, verdict: "downgraded", new_severity: sev, new_confidence: conf });
+
+test("downgraded chain within the pre-cap ceiling is clamped to the structural member cap", () => {
+  const input = { findings: bothFindings(), chains: [chain()], batches: vresp([...acceptBoth, dnChainV("High", "likely")]) };
+  const r = applyVerdicts({ ...input, structural: structuralOf({ "OSWE-2": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  const c = r.chains[0];
+  assert.equal(c.verification_status, "downgraded");
+  assert.equal(c.confidence, "to verify");
+  assert.equal(c.severity, "High");
+  assert.deepEqual(c.verification_notes, ["structural: member cap"]);
+  assert.equal(r.decisions.find((d) => d.target_type === "chain").outcome, "downgraded");
+  assertResultSchemaValid(r);
+  // A chain that already carries the note does not get it twice.
+  const again = applyVerdicts({ ...input, chains: [chain({ verification_notes: ["structural: member cap"] })], structural: structuralOf({ "OSWE-2": "absent" }) });
+  assert.deepEqual(again.chains[0].verification_notes, ["structural: member cap"]);
+});
+
+test("the same downgraded chain without structural is unchanged (likely, no note)", () => {
+  const r = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp([...acceptBoth, dnChainV("High", "likely")]) });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.chains[0].verification_status, "downgraded");
+  assert.equal(r.chains[0].confidence, "likely");
+  assert.equal(r.chains[0].severity, "High");
+  assert.equal("verification_notes" in r.chains[0], false);
+});
+
+test("the member cap also clamps severity when it removes the Critical natural level", () => {
+  // Medium/strong members, unauth-rce: pre-cap the natural level is Critical, so a High/likely
+  // downgrade is legal; post-cap the natural level is Medium/to verify (max member severity).
+  const fm = [finding("OSWE-1", "Medium"), finding("OSWE-2", "Medium")];
+  const input = { findings: fm, chains: [chain()], batches: vresp([...acceptBoth, dnChainV("High", "likely")]) };
+  const plain = applyVerdicts(input);
+  assert.equal(plain.ok, true, plain.error);
+  assert.equal(plain.chains[0].severity, "High");
+  const r = applyVerdicts({ ...input, structural: structuralOf({ "OSWE-1": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.chains[0].verification_status, "downgraded");
+  assert.equal(r.chains[0].severity, "Medium");
+  assert.equal(r.chains[0].confidence, "to verify");
+  assert.deepEqual(r.chains[0].verification_notes, ["structural: member cap"]);
+  assertResultSchemaValid(r);
+});
+
+test("a chain downgrade above the PRE-cap ceiling still fails as verifier-output", () => {
+  const st = structuralOf({ "OSWE-2": "absent" });
+  // candidate confidence is "likely": strong static proof exceeds it with or without the cap
+  const r1 = applyVerdicts({ findings: bothFindings(), chains: [chain()], batches: vresp([...acceptBoth, dnChainV("High", "strong static proof")]), structural: st });
+  assert.equal(r1.ok, false);
+  assert.equal(r1.error_kind, "verifier-output");
+  assert.match(r1.error, /raises severity\/confidence above its ceiling/);
+  assert.ok(r1.error_batch_id);
+  // candidate severity Medium: High exceeds it with or without the cap
+  const r2 = applyVerdicts({ findings: bothFindings(), chains: [chain({ severity: "Medium" })], batches: vresp([...acceptBoth, dnChainV("High", "likely")]), structural: st });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.error_kind, "verifier-output");
+});
+
+test("an accepted chain with a capped member follows the min-member rule, no chain note", () => {
+  const r = applyVerdicts({ ...criticalInput(), structural: structuralOf({ "OSWE-1": "absent" }) });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.chains[0].verification_status, "accepted");
+  assert.equal(r.chains[0].confidence, byId(r, "OSWE-1").final_confidence);
+  assert.equal(r.chains[0].confidence, "to verify");
+  assert.equal("verification_notes" in r.chains[0], false);
+});
