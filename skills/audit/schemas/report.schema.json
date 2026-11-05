@@ -47,6 +47,17 @@
     "findings": { "type": "array", "items": { "$ref": "final-finding.schema.json" } },
     "chains": { "type": "array", "items": { "$ref": "chain.schema.json" } },
     "verdicts": { "type": "array", "items": { "$ref": "verdict.schema.json" } },
+    "app_graph": {
+      "$comment": "SP10: summary of the deterministic app graph for this run. available:false carries the reason the graph could not be built; stats is graph.schema.json's stats object; multi_file_chain_count is computed by write-report.mjs.",
+      "type": "object", "additionalProperties": false,
+      "required": ["available", "multi_file_chain_count"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "stats": { "$ref": "graph.schema.json#/properties/stats" },
+        "multi_file_chain_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "lead_adjudications": {
       "type": "array",
       "items": {

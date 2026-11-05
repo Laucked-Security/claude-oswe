@@ -26,7 +26,11 @@
     "final_severity": { "enum": ["High", "Medium", "Low", "Info"] },
     "final_confidence": { "enum": ["strong static proof", "likely", "to verify"] },
     "origin": { "enum": ["llm-discovered", "sast-lead", "both"] },
-    "source_lead_ids": { "type": "array", "items": { "type": "string", "pattern": "^L[0-9]{3,}$" } }
+    "source_lead_ids": { "type": "array", "items": { "type": "string", "pattern": "^L[0-9]{3,}$" } },
+    "candidate_path_id": { "type": "string", "pattern": "^CP-.+-[0-9]+$" },
+    "candidate_path_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^CP-.+-[0-9]+$" } },
+    "structural_path": { "enum": ["proven", "absent", "n/a"] },
+    "verification_notes": { "type": "array", "items": { "type": "string", "minLength": 1 } }
   },
   "allOf": [
     {

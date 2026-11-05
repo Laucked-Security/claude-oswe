@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { validate } from "../../validate-output.mjs";
 
 const ID = (n) => n.toString(16).padStart(12, "0");
@@ -189,4 +192,33 @@ test("structural-check: malformed keys, missing fields and extra entry fields ar
     { findings: {} }
   ];
   for (const doc of bad) assert.equal(validate("structural-check", doc).valid, false, JSON.stringify(doc));
+});
+
+// --- SP10 Task 14: coverage_matrix keys are the five stack ids ---
+const STACK_ENTRY = { frameworks_detected: [], extractors_applied: [], not_extracted: [], patterns_unmatched: [] };
+
+test("graph: coverage_matrix accepts each of the five stack ids as a key", () => {
+  const g = minimalGraph();
+  g.stats.coverage_matrix = Object.fromEntries(["php", "node", "python", "java", "dotnet"].map((s) => [s, STACK_ENTRY]));
+  const r = validate("graph", g);
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("graph: coverage_matrix rejects a key outside the five stack ids (ruby, javascript)", () => {
+  for (const key of ["ruby", "javascript", "Node", ""]) {
+    const g = minimalGraph();
+    g.stats.coverage_matrix = { [key]: STACK_ENTRY };
+    assert.equal(validate("graph", g).valid, false, `key ${JSON.stringify(key)} should be rejected`);
+  }
+});
+
+test("graph: every committed golden still validates (they use the stack-id keys)", () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..", "test-fixtures", "graph");
+  const stacks = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
+  assert.deepEqual(stacks, ["dotnet", "java", "node", "php", "python"]);
+  for (const stack of stacks) {
+    const g = JSON.parse(readFileSync(join(root, stack, "graph.expected.json"), "utf8"));
+    const r = validate("graph", g);
+    assert.equal(r.valid, true, `${stack}: ${JSON.stringify(r.errors)}`);
+  }
 });

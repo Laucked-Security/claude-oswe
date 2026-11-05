@@ -51,6 +51,8 @@ export function aggregateFindings(rawFindings) {
       : (origins.has("llm-discovered") && origins.has("sast-lead")) ? "both"
         : (origins.has("both") ? "both" : [...origins].sort()[0]);
     const leadIds = uniqSortedStrings(group.flatMap((f) => f.source_lead_ids || []));
+    // SP10: raw findings cite one candidate_path_id; the merged finding carries the union as candidate_path_ids.
+    const candidatePathIds = uniqSortedStrings(group.flatMap((f) => (f.candidate_path_id ? [f.candidate_path_id] : [])));
     merged.push({
       finding_id: "PENDING",
       partition_id: rep.partition_id,
@@ -74,6 +76,7 @@ export function aggregateFindings(rawFindings) {
       origin: mergedOrigin
     });
     if (leadIds.length) merged[merged.length - 1].source_lead_ids = leadIds;
+    if (candidatePathIds.length) merged[merged.length - 1].candidate_path_ids = candidatePathIds;
   }
 
   merged.sort((a, b) =>

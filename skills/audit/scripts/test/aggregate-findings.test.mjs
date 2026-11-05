@@ -173,3 +173,59 @@ test("aggregate-findings --checkpoint-dir hit on second call short-circuits with
   assert.match(second.stderr, /cache hit/i);
   assert.deepEqual(second.out, first.out);
 });
+
+// --- SP10: candidate_path_id (raw, per member) -> candidate_path_ids (merged union) ---
+test("members carrying different candidate_path_id merge to a sorted candidate_path_ids union", () => {
+  const a = raw("auth-F001", "p", { candidate_path_id: "CP-p-2" });
+  const b = raw("api-F003", "p", { candidate_path_id: "CP-p-1" });
+  const r = aggregateFindings([a, b]);
+  assert.equal(r.findings.length, 1);
+  assert.deepEqual(r.findings[0].candidate_path_ids, ["CP-p-1", "CP-p-2"]);
+  assert.equal("candidate_path_id" in r.findings[0], false);   // the merged finding never carries the singular key
+  assert.equal(validate("finding", r.findings[0]).valid, true, JSON.stringify(validate("finding", r.findings[0]).errors));
+});
+
+test("candidate_path_ids is a unique union (the same id cited twice appears once) and input-order independent", () => {
+  const a = raw("auth-F001", "p", { candidate_path_id: "CP-p-1" });
+  const b = raw("api-F003", "p", { candidate_path_id: "CP-p-1" });
+  const c = raw("api-F004", "p", { candidate_path_id: "CP-p-3" });
+  const r1 = aggregateFindings([a, b, c]);
+  const r2 = aggregateFindings([c, b, a]);
+  assert.deepEqual(r1.findings[0].candidate_path_ids, ["CP-p-1", "CP-p-3"]);
+  assert.deepEqual(r1.findings, r2.findings);
+});
+
+test("a single member's candidate_path_id becomes a one-element candidate_path_ids", () => {
+  const r = aggregateFindings([raw("auth-F001", "p", { candidate_path_id: "CP-p-4" })]);
+  assert.deepEqual(r.findings[0].candidate_path_ids, ["CP-p-4"]);
+  assert.equal("candidate_path_id" in r.findings[0], false);
+});
+
+test("one member with a candidate_path_id and one without still yields candidate_path_ids", () => {
+  const r = aggregateFindings([raw("auth-F001", "p"), raw("api-F003", "p", { candidate_path_id: "CP-p-1" })]);
+  assert.equal(r.findings.length, 1);
+  assert.deepEqual(r.findings[0].candidate_path_ids, ["CP-p-1"]);
+});
+
+test("no member with a candidate_path_id => the key is ABSENT and the merged key set is unchanged", () => {
+  const r = aggregateFindings([raw("auth-F001", "auth"), raw("api-F003", "api")]);
+  assert.equal(r.findings.length, 1);
+  assert.equal("candidate_path_ids" in r.findings[0], false);
+  assert.equal("candidate_path_id" in r.findings[0], false);
+  // Byte-identity guard for every pre-SP10 fixture: the exact merged key set, in order.
+  assert.deepEqual(Object.keys(r.findings[0]), [
+    "finding_id", "partition_id", "title", "vuln_class", "source", "sink", "auth", "transformations", "sanitizers",
+    "prerequisites", "evidence", "provisional_severity", "confidence", "verification_status", "partitions",
+    "source_finding_ids", "origin"
+  ]);
+  assert.equal(JSON.stringify(r.findings).includes("candidate_path"), false);
+});
+
+test("candidate_path_ids rides along on the CLI output (spawnSync)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oswe-agg-cp-"));
+  const inP = join(dir, "in.json");
+  const outP = join(dir, "out.json");
+  writeFileSync(inP, JSON.stringify({ findings: [raw("p-F001", "p", { candidate_path_id: "CP-p-2" }), raw("p-F002", "p", { candidate_path_id: "CP-p-1" })] }));
+  assert.equal(spawnSync(process.execPath, [CLI, "--file", inP, "--out", outP]).status, 0);
+  assert.deepEqual(JSON.parse(readFileSync(outP, "utf8")).findings[0].candidate_path_ids, ["CP-p-1", "CP-p-2"]);
+});

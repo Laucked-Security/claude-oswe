@@ -3,15 +3,36 @@
 // every downstream consumer (benchmark ledger, baseline/diff, exports) keys on.
 //
 // CLI: node write-report.mjs --file <parts.json> --out <report.json>
-//   <parts.json> = { run, coverage, findings[], chains[], verdicts[], lead_adjudications[] }
+//   <parts.json> = { run, coverage, findings[], chains[], verdicts[], lead_adjudications[], app_graph? }
 //   exit 0 ok / 1 invalid report / 2 IO|usage.
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { validate } from "./validate-output.mjs";
 
-export function buildReport({ run, coverage, findings = [], chains = [], verdicts = [], lead_adjudications } = {}) {
+// SP10 multi-file chain metric — mirrors benchmark/score-nodegoat.mjs so the report and the scorer agree:
+// norm() = score-nodegoat.mjs:42-44, ACCEPTED_STATUSES = :77, multi_file_chains = :125-133 (accepted/downgraded
+// chains whose transitions[].evidence[].file set has >= 2 distinct normalised files).
+const ACCEPTED_STATUSES = new Set(["accepted", "downgraded"]);
+const norm = (p) => (p || "").replace(/\\/g, "/").toLowerCase();
+
+export function countMultiFileChains(chains = []) {
+  return chains.filter((c) => {
+    if (!ACCEPTED_STATUSES.has(c.verification_status)) return false;
+    const files = new Set();
+    for (const tr of (c.transitions || [])) {
+      for (const ev of (tr.evidence || [])) {
+        if (ev.file) files.add(norm(ev.file));
+      }
+    }
+    return files.size >= 2;
+  }).length;
+}
+
+export function buildReport({ run, coverage, findings = [], chains = [], verdicts = [], lead_adjudications, app_graph } = {}) {
   const report = { run, coverage, findings, chains, verdicts };
   if (lead_adjudications && lead_adjudications.length) report.lead_adjudications = lead_adjudications;
+  // multi_file_chain_count is computed here, never trusted from the caller (the caller's object is not mutated).
+  if (app_graph) report.app_graph = { ...app_graph, multi_file_chain_count: countMultiFileChains(chains) };
   return report;
 }
 

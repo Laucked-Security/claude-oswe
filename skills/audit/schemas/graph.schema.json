@@ -177,6 +177,7 @@
         },
         "coverage_matrix": {
           "type": "object",
+          "propertyNames": { "enum": ["php", "node", "python", "java", "dotnet"] },
           "additionalProperties": {
             "type": "object", "additionalProperties": false,
             "required": ["frameworks_detected", "extractors_applied", "not_extracted", "patterns_unmatched"],
