@@ -191,6 +191,41 @@ test("rule 2: X.m through a named class import is exact to the class's method", 
   assert.deepEqual(r.to, { path: "b.js", qualified_name: "Util.make", start_byte: 10 });
 });
 
+test("rule 2: X.m through a named import of a class the target does not export is unresolved", () => {
+  const a = file("a.js", { imports: [named("./b", "Util")], calls: [call("Util.make", 30)] });
+  const b = file("b.js", { classes: [cls("Util", 0, ["make"])], functions: [fn("make", 10, "Util")], exports: [{ name: "other", start_byte: 50 }] });
+  const r = only(resolveAll([a, b], { "./b": "b.js" }), "a.js", 30);
+  assert.deepEqual([r.to, r.confidence], [null, "unresolved"]);
+});
+
+test("rule 2: a named binding resolves to the class its export's offset anchors (export { Admin as UserService })", () => {
+  const a = file("a.js", { imports: [named("./b", "UserService")], calls: [call("UserService.make", 30)] });
+  const b = file("b.js", {
+    classes: [cls("Admin", 0, ["make"])], functions: [fn("make", 10, "Admin")],
+    exports: [{ name: "UserService", start_byte: 0 }]
+  });
+  assert.deepEqual(only(resolveAll([a, b], { "./b": "b.js" }), "a.js", 30).to, { path: "b.js", qualified_name: "Admin.make", start_byte: 10 });
+});
+
+test("rule 2: X.m on a default import is the method of the default-export class, not a top-level export m", () => {
+  const a = file("a.js", { imports: [whole("./b", "default", "Util")], calls: [call("Util.make", 30)] });
+  const b = file("b.js", {
+    classes: [cls("Util", 50, ["make"])],
+    functions: [fn("make", 0), fn("make", 60, "Util")],
+    exports: [{ name: "make", start_byte: 0 }, { name: "default", start_byte: 50 }]
+  });
+  const r = only(resolveAll([a, b], { "./b": "b.js" }), "a.js", 30);
+  assert.equal(r.confidence, "exact");
+  assert.deepEqual(r.to, { path: "b.js", qualified_name: "Util.make", start_byte: 60 });
+});
+
+test("rule 2: X.m on a default import whose default export is a function is unresolved", () => {
+  const a = file("a.js", { imports: [whole("./b", "default", "run")], calls: [call("run.make", 30)] });
+  const b = file("b.js", { functions: [fn("make", 0), fn("main", 40)], exports: [{ name: "make", start_byte: 0 }, { name: "default", start_byte: 40 }] });
+  const r = only(resolveAll([a, b], { "./b": "b.js" }), "a.js", 30);
+  assert.deepEqual([r.to, r.confidence], [null, "unresolved"]);
+});
+
 test("any other dotted callee is unresolved with callee_text kept", () => {
   const a = file("a.js", { functions: [fn("query", 0)], calls: [call("db.query", 30)] });
   const r = only(resolveAll([a]), "a.js", 30);
@@ -254,6 +289,40 @@ test("rule 3: this.m() outside any class is unresolved", () => {
   assert.equal(only(resolveAll([a]), "a.js", 25).confidence, "unresolved");
 });
 
+// UserService.go calls this.run; tests vary who subclasses UserService and how.
+const baseService = () => file("base.js", {
+  classes: [cls("UserService", 0, ["run", "go"])],
+  functions: [fn("run", 10, "UserService"), fn("go", 40, "UserService")],
+  calls: [call("this.run", 45, { enc: 40, receiver: "this" })],
+  exports: [{ name: "UserService", start_byte: 0 }]
+});
+
+test("rule 3: an override in a subclass whose parent is an aliased import ({ UserService as Base }) is name-only", () => {
+  const admin = file("admin.js", {
+    imports: [named("./base", ["UserService", "Base"])],
+    classes: [cls("Admin", 0, ["run"], "Base")], functions: [fn("run", 10, "Admin")]
+  });
+  const r = only(resolveAll([baseService(), admin], { "./base": "base.js" }), "base.js", 45);
+  assert.equal(r.confidence, "name-only");
+  assert.deepEqual(r.to, { path: "base.js", qualified_name: "UserService.run", start_byte: 10 });
+});
+
+test("rule 3: an override in a subclass whose parent is a dotted name (extends svc.UserService) is name-only", () => {
+  const admin = file("admin2.js", { classes: [cls("Admin2", 0, ["run"], "svc.UserService")], functions: [fn("run", 10, "Admin2")] });
+  assert.equal(only(resolveAll([baseService(), admin]), "base.js", 45).confidence, "name-only");
+});
+
+test("rule 3: a subclass of an unrelated same-named class in another file does not downgrade", () => {
+  const other = file("other.js", { classes: [cls("UserService", 0, ["run"])], functions: [fn("run", 10, "UserService")], exports: [{ name: "UserService", start_byte: 0 }] });
+  const sub = file("sub.js", {
+    imports: [named("./other", "UserService")],
+    classes: [cls("Sub", 0, ["run"], "UserService")], functions: [fn("run", 10, "Sub")]
+  });
+  const r = only(resolveAll([baseService(), other, sub], { "./other": "other.js" }), "base.js", 45);
+  assert.equal(r.confidence, "exact");
+  assert.deepEqual(r.to, { path: "base.js", qualified_name: "UserService.run", start_byte: 10 });
+});
+
 // ---- rule 1b: receiver_class ---------------------------------------------------------------------
 
 function routesFile() {
@@ -311,6 +380,24 @@ test("rule 1b: a default-imported class resolves at the default export's offset"
   const a = file("a.js", { imports: [whole("./b", "default", "Repo")], calls: [call("r.find", 30, { receiverClass: "Repo" })] });
   const b = file("b.js", { classes: [cls("Other", 0, ["find"]), cls("UserRepo", 60, ["find"])], functions: [fn("find", 10, "Other"), fn("find", 70, "UserRepo")], exports: [{ name: "default", start_byte: 60 }] });
   assert.deepEqual(only(resolveAll([a, b], { "./b": "b.js" }), "a.js", 30).to, { path: "b.js", qualified_name: "UserRepo.find", start_byte: 70 });
+});
+
+test("rule 1b: receiver_class bound through a named import of a class the target does not export is unresolved", () => {
+  const b = file("services/userService.js", { classes: [cls("UserService", 0, ["run"])], functions: [fn("run", 10, "UserService")], exports: [] });
+  const r = only(resolveAll([routesFile(), b], { "../services/userService": "services/userService.js" }), "routes/users.js", 30);
+  assert.deepEqual([r.to, r.confidence], [null, "unresolved"]);
+});
+
+test("rule 1b: a CommonJS require binding resolves to the default-export class, not a class merely named like the local", () => {
+  const a = file("a.js", { imports: [whole("./repo", "namespace", "Repo")], calls: [call("r.find", 30, { receiverClass: "Repo" })] });
+  const repo = file("repo.js", {
+    classes: [cls("Repo", 0, ["find"]), cls("Other", 50, ["find"])],
+    functions: [fn("find", 10, "Repo"), fn("find", 60, "Other")],
+    exports: [{ name: "default", start_byte: 50 }]
+  });
+  const r = only(resolveAll([a, repo], { "./repo": "repo.js" }), "a.js", 30);
+  assert.equal(r.confidence, "exact");
+  assert.deepEqual(r.to, { path: "repo.js", qualified_name: "Other.find", start_byte: 60 });
 });
 
 // ---- rules 4 and 5 -------------------------------------------------------------------------------
@@ -405,4 +492,15 @@ test("loadResolutionConfigs: scope files win over project files, both are read; 
   assert.equal(configs.setupCfg, "[metadata]\nname = x\n");
   assert.deepEqual(configs.read.map((r) => r.path).sort(), ["app/pyproject.toml", "app/tsconfig.json", "setup.cfg", "tsconfig.json"]);
   assert.deepEqual(configs.errors, []);
+});
+
+test("loadResolutionConfigs: a scope copy that fails to parse yields null, never the project copy's value", (t) => {
+  const dir = tempDir(t);
+  mkdirSync(join(dir, "app"));
+  writeFileSync(join(dir, "tsconfig.json"), '{ "compilerOptions": { "baseUrl": "." } }');
+  writeFileSync(join(dir, "app", "tsconfig.json"), '{ "compilerOptions": { "baseUrl": "lib" }, }');
+  const configs = loadResolutionConfigs(dir, join(dir, "app"));
+  assert.equal(configs.tsconfig, null);
+  assert.deepEqual(configs.errors.map((e) => e.file), ["app/tsconfig.json"]);
+  assert.deepEqual(configs.read.map((r) => r.path), ["tsconfig.json", "app/tsconfig.json"]);
 });

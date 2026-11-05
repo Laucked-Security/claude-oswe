@@ -14,7 +14,8 @@
 //   resolveImports(files, { langModules, filePaths, configs })
 //     -> Map<"<fromPath>\0<specifier>", { path, confidence }>   (unresolvable specifiers absent)
 //   buildClassIndex(files, importMap) -> { byName: Map<name, [{ path, name, extends, methods,
-//     start_byte }]>, parentOf: Map<"<path>\0<start_byte>", { entry, confidence } | null> }
+//     start_byte }]>, byKey: Map<"<path>\0<start_byte>", entry>, parentOf: Map<key, { entry,
+//     confidence } | null>, childrenOf: Map<key, entry[]>, danglingByName: Map<name, entry[]> }
 //   resolveCalls(files, importMap, { classIndex, langModules }) -> [{ from_fn_start_byte,
 //     from_path, line, start_byte, callee_text, to: { path, qualified_name, start_byte } | null,
 //     confidence }] ordered by (from_path, start_byte).
@@ -65,7 +66,7 @@ function readConfig(root, rel, format) {
   const text = bytes.toString("utf8");
   if (format === "text") return { sha256, value: text };
   try {
-    return { sha256, value: JSON.parse(text.replace(/^﻿/, "")) };
+    return { sha256, value: JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) }; // drop a BOM
   } catch (e) {
     return { sha256, error: e.message };
   }
@@ -77,14 +78,15 @@ export function loadResolutionConfigs(projectDir, scopeRealpath) {
   const dirs = scope === root ? [root] : [root, scope];
   const result = { tsconfig: null, jsconfig: null, packageJson: null, composerJson: null, pyproject: null, setupCfg: null, read: [], errors: [] };
   for (const [name, key, format] of CONFIG_FILES) {
-    // Project first, then scope: a scope file that parses overrides the project's value.
+    // Project first, then scope: a scope copy that exists overrides the project's value, even when
+    // it fails to parse (the value is then null, never the project copy's).
     for (const dir of dirs) {
       const rel = relative(root, join(dir, name)).split(sep).join("/");
       const loaded = readConfig(root, rel, format);
       if (!loaded) continue;
       if (loaded.sha256) result.read.push({ path: rel, sha256: loaded.sha256 });
       if (loaded.error !== undefined) result.errors.push({ file: rel, message: loaded.error });
-      else result[key] = loaded.value;
+      result[key] = loaded.error !== undefined ? null : loaded.value;
     }
   }
   return result;
@@ -155,10 +157,25 @@ const target = (path, fn, confidence) => ({ to: { path, qualified_name: fn.quali
 const classKey = (entry) => `${entry.path}\u0000${entry.start_byte}`;
 const classesIn = (ctx, path, name) => (ctx.classIndex.byName.get(name) ?? []).filter((e) => e.path === path);
 
+const classAt = (ctx, path, startByte) => ctx.classIndex.byKey.get(`${path}\u0000${startByte}`) ?? null;
+
 function defaultExportClass(ctx, path) {
   const entry = defaultExport(ctx, path);
-  if (!entry) return null;
-  return [...ctx.classIndex.byName.values()].flat().find((e) => e.path === path && e.start_byte === entry.start_byte) ?? null;
+  return entry ? classAt(ctx, path, entry.start_byte) : null;
+}
+
+// The class an import binding names in its resolved target file (rule 2's export check applies):
+// a named `{ imported: X }` needs an export named X — the class that export's offset anchors, else
+// the single class named X; a default / namespace (CommonJS) binding is the default-export class.
+function importedClass(ctx, binding, targetPath) {
+  if (binding.form !== "named") return defaultExportClass(ctx, targetPath);
+  const exported = (ctx.extracts.get(targetPath)?.exports ?? []).filter((e) => e.name === binding.imported);
+  if (!exported.length) return null;
+  for (const e of exported) {
+    const anchored = classAt(ctx, targetPath, e.start_byte);
+    if (anchored) return anchored;
+  }
+  return unique(classesIn(ctx, targetPath, binding.imported));
 }
 
 // Class `name` as seen from `fromPath` (rule 1b): same file, else the file's import binding, else
@@ -169,31 +186,39 @@ function lookupClass(name, fromPath, ctx) {
   const binding = importBinding(ctx.extracts.get(fromPath), name);
   if (binding) {
     const resolved = ctx.importMap.get(importKey(fromPath, binding.specifier));
-    if (!resolved) return null;
-    const entry = binding.form === "default"
-      ? defaultExportClass(ctx, resolved.path)
-      : unique(classesIn(ctx, resolved.path, binding.form === "namespace" ? name : binding.imported));
+    const entry = resolved ? importedClass(ctx, binding, resolved.path) : null;
     return entry ? { entry, confidence: weaker("exact", resolved.confidence) } : null;
   }
   const all = ctx.classIndex.byName.get(name) ?? [];
   return all.length === 1 ? { entry: all[0], confidence: "exact" } : null;
 }
 
+const lastSegment = (text) => text.slice(text.lastIndexOf(".") + 1);
+const pushTo = (map, key, value) => (map.has(key) ? map.get(key).push(value) : map.set(key, [value]));
+
+// byName / byKey index the classes; parentOf holds each class's resolved parent link; childrenOf
+// is its reverse; danglingByName lists the classes whose `extends` did not resolve, under the
+// last dotted segment of that text (for the conservative override check).
 export function buildClassIndex(files, importMap) {
   const byName = new Map();
+  const byKey = new Map();
   for (const file of byPath(files)) {
     const classes = [...file.extract.classes].sort((a, b) => a.start_byte - b.start_byte);
     for (const c of classes) {
-      if (!byName.has(c.name)) byName.set(c.name, []);
-      byName.get(c.name).push({ path: file.path, name: c.name, extends: c.extends, methods: c.methods, start_byte: c.start_byte });
+      const entry = { path: file.path, name: c.name, extends: c.extends, methods: c.methods, start_byte: c.start_byte };
+      pushTo(byName, c.name, entry);
+      if (!byKey.has(classKey(entry))) byKey.set(classKey(entry), entry);
     }
   }
-  const classIndex = { byName, parentOf: new Map() };
+  const classIndex = { byName, byKey, parentOf: new Map(), childrenOf: new Map(), danglingByName: new Map() };
   const ctx = context(files, importMap, classIndex);
   for (const entries of byName.values()) {
     for (const entry of entries) {
-      const parent = entry.extends == null ? null : lookupClass(entry.extends, entry.path, ctx);
-      classIndex.parentOf.set(classKey(entry), parent && parent.entry !== entry ? parent : null);
+      const found = entry.extends == null ? null : lookupClass(entry.extends, entry.path, ctx);
+      const parent = found && found.entry !== entry ? found : null;
+      classIndex.parentOf.set(classKey(entry), parent);
+      if (parent) pushTo(classIndex.childrenOf, classKey(parent.entry), entry);
+      else if (entry.extends != null) pushTo(classIndex.danglingByName, lastSegment(entry.extends), entry);
     }
   }
   return classIndex;
@@ -212,18 +237,22 @@ function findMethod(ref, method, ctx, maxDepth) {
   return null;
 }
 
-// Rule 3's override check: does any parsed class extending `className` (directly or through
-// intermediate subclasses) redefine `method`? Matched by name, conservatively.
-function isOverridden(className, method, byName) {
-  const seen = new Set([className]);
-  let frontier = new Set(seen);
-  for (let depth = 0; frontier.size && depth < MAX_EXTENDS_DEPTH; depth++) {
-    const next = new Set();
-    for (const entries of byName.values()) {
-      for (const e of entries) {
-        if (!frontier.has(e.extends)) continue;
-        if (e.methods.includes(method)) return true;
-        if (!seen.has(e.name)) { seen.add(e.name); next.add(e.name); }
+// Rule 3's override check: does any subclass of `entry` (up to 10 levels down) redefine `method`?
+// Subclasses are found through the resolved parent links, so an aliased or dotted parent name
+// counts and an unrelated same-named class does not; a class whose `extends` did not resolve
+// counts when the last dotted segment of that text names a class on the way (conservative).
+function isOverridden(entry, method, classIndex) {
+  const seen = new Set([classKey(entry)]);
+  let frontier = [entry];
+  for (let depth = 0; frontier.length && depth < MAX_EXTENDS_DEPTH; depth++) {
+    const next = [];
+    for (const node of frontier) {
+      const subclasses = [...(classIndex.childrenOf.get(classKey(node)) ?? []), ...(classIndex.danglingByName.get(node.name) ?? [])];
+      for (const sub of subclasses) {
+        if (seen.has(classKey(sub))) continue;
+        if (sub.methods.includes(method)) return true;
+        seen.add(classKey(sub));
+        next.push(sub);
       }
     }
     frontier = next;
@@ -235,7 +264,7 @@ function methodTarget(ref, method, ctx, maxDepth = MAX_EXTENDS_DEPTH) {
   if (!ref) return null;
   const found = findMethod(ref, method, ctx, maxDepth);
   if (!found) return null;
-  return target(found.path, found.fn, isOverridden(ref.entry.name, method, ctx.classIndex.byName) ? "name-only" : found.confidence);
+  return target(found.path, found.fn, isOverridden(ref.entry, method, ctx.classIndex) ? "name-only" : found.confidence);
 }
 
 // ---- call resolution ------------------------------------------------------------------------------
@@ -269,7 +298,9 @@ function resolveBare(site, name, ctx) {
   return definitions.length === 1 ? target(definitions[0].path, definitions[0].fn, "name-only") : null;
 }
 
-// Rule 2 for `ns.foo` / `X.m` whose head is an import binding.
+// Rule 2 for `ns.foo` / `X.m` whose head is an import binding: a namespace binding names the
+// target's export `foo`; a named or default binding names a class (importedClass), whose method
+// `m` is the target.
 function resolveImportMember(site, segments, ctx) {
   if (segments.length !== 2) return null;
   const [head, member] = segments;
@@ -278,12 +309,12 @@ function resolveImportMember(site, segments, ctx) {
   const resolved = ctx.importMap.get(importKey(site.path, binding.specifier));
   if (!resolved) return null;
   const confidence = weaker("exact", resolved.confidence);
-  if (binding.form === "named") {
-    const entry = unique(classesIn(ctx, resolved.path, binding.imported));
-    return methodTarget(entry && { entry, confidence }, member, ctx);
+  if (binding.form === "namespace") {
+    const fn = exportedFunction(ctx, resolved.path, member);
+    return fn ? target(resolved.path, fn, confidence) : null;
   }
-  const fn = exportedFunction(ctx, resolved.path, member);
-  return fn ? target(resolved.path, fn, confidence) : null;
+  const entry = importedClass(ctx, binding, resolved.path);
+  return methodTarget(entry && { entry, confidence }, member, ctx);
 }
 
 function resolveCall(site, ctx) {
