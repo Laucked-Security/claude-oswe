@@ -16,7 +16,7 @@ const FIXTURES_DIR = join(REPO_ROOT, "test-fixtures", "graph");
 const REFERENCES_DIR = join(REPO_ROOT, "skills", "audit", "references");
 
 // [stack, language module id under graph/lang/]
-const IMPLEMENTED = [["node", "javascript"]];
+const IMPLEMENTED = [["node", "javascript"], ["python", "python"]];
 
 // Unbalanced braces/parens: a syntax error in every supported grammar (PHP needs its open tag,
 // otherwise the text is inline HTML).
@@ -100,9 +100,9 @@ for (const [stack, moduleId] of IMPLEMENTED) {
     assert.ok(routes.some((r) => r.middleware_texts.length > 0), "a route with middleware_texts");
   });
 
-  test(`${stack}: (d) a source with kind params`, async () => {
+  test(`${stack}: (d) a source with kind params or query`, async () => {
     const sources = all((await load()).files, "sources");
-    assert.ok(sources.some((s) => s.kind === "params"));
+    assert.ok(sources.some((s) => s.kind === "params" || s.kind === "query"));
   });
 
   test(`${stack}: (e) a sink with class cmd-exec`, async () => {

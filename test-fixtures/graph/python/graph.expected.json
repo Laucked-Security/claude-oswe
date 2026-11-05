@@ -1,0 +1,400 @@
+{
+  "version": 1,
+  "generated_by": "oswe-build-graph/1",
+  "stats": {
+    "files_total": 5,
+    "files_parsed": 5,
+    "files_error": 0,
+    "files_skipped": 0,
+    "functions": 12,
+    "calls_total": 6,
+    "calls_exact": 2,
+    "calls_name_only": 1,
+    "calls_unresolved": 3,
+    "routes_by_auth": {
+      "unauthenticated": 3,
+      "authenticated": 1,
+      "unknown": 1
+    },
+    "coverage_matrix": {
+      "python": {
+        "frameworks_detected": [
+          "django",
+          "fastapi",
+          "flask"
+        ],
+        "extractors_applied": [
+          "django",
+          "fastapi",
+          "flask"
+        ],
+        "not_extracted": [],
+        "patterns_unmatched": []
+      }
+    },
+    "config_errors": []
+  },
+  "nodes": [
+    {
+      "type": "file",
+      "id": "067d26106d00",
+      "path": "app.py",
+      "stack": "python",
+      "lang": "python",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "235b8f0a5697",
+      "path": "services/runner.py",
+      "stack": "python",
+      "lang": "python",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "28f7cea3ba9c",
+      "path": "urls.py",
+      "stack": "python",
+      "lang": "python",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "96a2d38c01f5",
+      "path": "views/users.py",
+      "stack": "python",
+      "lang": "python",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "ec2e1a9f8c26",
+      "path": "api/urls.py",
+      "stack": "python",
+      "lang": "python",
+      "parse_status": "ok"
+    },
+    {
+      "type": "function",
+      "id": "15165c57a267",
+      "file": "views/users.py",
+      "name": "get_current_user",
+      "qualified_name": "get_current_user",
+      "line_start": 6,
+      "line_end": 7,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "24e58a11c878",
+      "file": "app.py",
+      "name": "check",
+      "qualified_name": "health.check",
+      "line_start": 26,
+      "line_end": 26,
+      "kind": "lambda",
+      "exported": false
+    },
+    {
+      "type": "function",
+      "id": "2b57fce28668",
+      "file": "services/runner.py",
+      "name": "run",
+      "qualified_name": "Runner.run",
+      "line_start": 10,
+      "line_end": 11,
+      "kind": "method",
+      "exported": true,
+      "class": "Runner"
+    },
+    {
+      "type": "function",
+      "id": "98bba1af0ea2",
+      "file": "app.py",
+      "name": "cb",
+      "qualified_name": "cb",
+      "line_start": 10,
+      "line_end": 11,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "98bfb2c3480f",
+      "file": "views/users.py",
+      "name": "get_user",
+      "qualified_name": "get_user",
+      "line_start": 11,
+      "line_end": 12,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "a6d61c66be50",
+      "file": "app.py",
+      "name": "health",
+      "qualified_name": "health",
+      "line_start": 25,
+      "line_end": 27,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "c09b7ade5c4b",
+      "file": "services/runner.py",
+      "name": "exec",
+      "qualified_name": "Child.exec",
+      "line_start": 15,
+      "line_end": 16,
+      "kind": "method",
+      "exported": true,
+      "class": "Child"
+    },
+    {
+      "type": "function",
+      "id": "d08bb6109ec8",
+      "file": "services/runner.py",
+      "name": "exec",
+      "qualified_name": "Base.exec",
+      "line_start": 5,
+      "line_end": 6,
+      "kind": "method",
+      "exported": true,
+      "class": "Base"
+    },
+    {
+      "type": "function",
+      "id": "d85b5af7d8bd",
+      "file": "app.py",
+      "name": "helper",
+      "qualified_name": "helper",
+      "line_start": 14,
+      "line_end": 15,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "e38e5a5673e9",
+      "file": "api/urls.py",
+      "name": "ping",
+      "qualified_name": "ping",
+      "line_start": 4,
+      "line_end": 5,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "fb04ec51d1e0",
+      "file": "app.py",
+      "name": "run_cmd",
+      "qualified_name": "run_cmd",
+      "line_start": 20,
+      "line_end": 21,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "fc4b2cacaaad",
+      "file": "views/users.py",
+      "name": "run",
+      "qualified_name": "run",
+      "line_start": 15,
+      "line_end": 17,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "route",
+      "id": "285713cbf220",
+      "file": "views/users.py",
+      "line": 10,
+      "http_method": "GET",
+      "path_pattern": "/users/{id}",
+      "handler": "98bfb2c3480f",
+      "middlewares": [
+        "Depends.get_current_user"
+      ],
+      "framework": "fastapi",
+      "auth": "unknown"
+    },
+    {
+      "type": "route",
+      "id": "4d34c10f3879",
+      "file": "api/urls.py",
+      "line": 9,
+      "http_method": "ANY",
+      "path_pattern": "/api/ping",
+      "handler": "e38e5a5673e9",
+      "middlewares": [],
+      "framework": "django",
+      "auth": "unauthenticated"
+    },
+    {
+      "type": "route",
+      "id": "6f5b3f0845b7",
+      "file": "app.py",
+      "line": 24,
+      "http_method": "GET",
+      "path_pattern": "/health",
+      "handler": "a6d61c66be50",
+      "middlewares": [],
+      "framework": "flask",
+      "auth": "unauthenticated"
+    },
+    {
+      "type": "route",
+      "id": "a21964613cf3",
+      "file": "app.py",
+      "line": 18,
+      "http_method": "POST",
+      "path_pattern": "/run",
+      "handler": "fb04ec51d1e0",
+      "middlewares": [
+        "login_required"
+      ],
+      "framework": "flask",
+      "auth": "authenticated"
+    },
+    {
+      "type": "route",
+      "id": "a8c5905b7bdb",
+      "file": "urls.py",
+      "line": 6,
+      "http_method": "ANY",
+      "path_pattern": "/run/",
+      "handler": null,
+      "middlewares": [],
+      "framework": "django",
+      "auth": "unauthenticated"
+    },
+    {
+      "type": "sink",
+      "id": "5298c63ab645",
+      "file": "services/runner.py",
+      "line": 6,
+      "enclosing_fn": "d08bb6109ec8",
+      "class": "cmd-exec",
+      "callee": "subprocess.run",
+      "pattern": "subprocess.run"
+    },
+    {
+      "type": "sink",
+      "id": "cd50fae1a1da",
+      "file": "services/runner.py",
+      "line": 11,
+      "enclosing_fn": "2b57fce28668",
+      "class": "eval",
+      "callee": "self.exec",
+      "pattern": "exec("
+    },
+    {
+      "type": "source",
+      "id": "5162410ea2d6",
+      "file": "views/users.py",
+      "line": 16,
+      "enclosing_fn": "fc4b2cacaaad",
+      "kind": "query",
+      "pattern": "request.GET"
+    },
+    {
+      "type": "source",
+      "id": "98c1a518e069",
+      "file": "app.py",
+      "line": 21,
+      "enclosing_fn": "fb04ec51d1e0",
+      "kind": "body",
+      "pattern": "request.form"
+    }
+  ],
+  "edges": [
+    {
+      "type": "calls",
+      "from": "24e58a11c878",
+      "to": "d85b5af7d8bd",
+      "line": 26,
+      "callee_text": "helper",
+      "confidence": "exact"
+    },
+    {
+      "type": "calls",
+      "from": "2b57fce28668",
+      "to": "d08bb6109ec8",
+      "line": 11,
+      "callee_text": "self.exec",
+      "confidence": "name-only"
+    },
+    {
+      "type": "calls",
+      "from": "a6d61c66be50",
+      "to": null,
+      "line": 27,
+      "callee_text": "check",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "d08bb6109ec8",
+      "to": null,
+      "line": 6,
+      "callee_text": "subprocess.run",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "d85b5af7d8bd",
+      "to": null,
+      "line": 15,
+      "callee_text": "cb",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "fb04ec51d1e0",
+      "to": "2b57fce28668",
+      "line": 21,
+      "callee_text": "runner.run",
+      "confidence": "exact"
+    },
+    {
+      "type": "handles",
+      "from": "285713cbf220",
+      "to": "98bfb2c3480f"
+    },
+    {
+      "type": "handles",
+      "from": "4d34c10f3879",
+      "to": "e38e5a5673e9"
+    },
+    {
+      "type": "handles",
+      "from": "6f5b3f0845b7",
+      "to": "a6d61c66be50"
+    },
+    {
+      "type": "handles",
+      "from": "a21964613cf3",
+      "to": "fb04ec51d1e0"
+    },
+    {
+      "type": "imports",
+      "from": "067d26106d00",
+      "to": "235b8f0a5697",
+      "confidence": "exact",
+      "specifier": "services.runner"
+    },
+    {
+      "type": "imports",
+      "from": "28f7cea3ba9c",
+      "to": "ec2e1a9f8c26",
+      "confidence": "exact",
+      "specifier": "api.urls"
+    }
+  ]
+}
