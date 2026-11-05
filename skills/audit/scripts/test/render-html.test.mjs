@@ -479,3 +479,41 @@ test("CLI cache: app_graph is part of the input digest (changing it is a miss, s
   assert.equal(noGraph.html.includes("App graph"), false);
   assert.equal(readdirSync(join(ckpt, "render-html")).length, 3);
 });
+
+import { buildReport } from "../write-report.mjs";
+
+test("CLI: a summary shaped as SKILL.md describes (report.json's app_graph + settled chain notes) renders card and Notes", () => {
+  // SKILL.md section 7: the summary's app_graph is the app_graph of the report.json just written
+  // (parts' { available, stats } + the multi_file_chain_count write-report computes); chain
+  // verification_notes are the settled chain's own notes.
+  const ev = (file) => [{ file, line: 1 }];
+  const settledChain = {
+    chain_id: "CHAIN-1", verification_status: "accepted", verification_notes: ["structural: member cap"],
+    transitions: [{ from: "entry", to: "OSWE-1", how: "x", evidence: ev("a.js") }, { from: "OSWE-1", to: "OSWE-2", how: "y", evidence: ev("b.js") }]
+  };
+  const report = buildReport({
+    run: {}, coverage: { analyzed: 2, skipped: 0 }, chains: [settledChain],
+    app_graph: { available: true, stats: goldenStats("python") }
+  });
+  assert.equal(report.app_graph.multi_file_chain_count, 1);          // computed by the helper, not by the caller
+  const summary = fullSummary();
+  summary.app_graph = report.app_graph;                               // copied verbatim from report.json
+  summary.chains[0].verification_notes = settledChain.verification_notes;
+  const r = runRender("# Report\n", summary);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stderr, "");
+  assert.equal(r.html.includes("<h2>App graph</h2>"), true);
+  assert.equal(r.html.includes("<td>Multi-file chains</td><td>1</td>"), true);
+  assert.equal(r.html.includes("<td>Functions</td><td>12</td>"), true);
+  assert.equal(r.html.includes("<tr><td>python</td>"), true);
+  assert.equal(r.html.includes('<p class="muted">Notes: structural: member cap</p>'), true);
+
+  // SKILL.md and the summary schema name the same keys.
+  const skill = readFileSync(join(REPO_ROOT_RH, "skills", "audit", "SKILL.md"), "utf8");
+  const section = skill.slice(skill.indexOf("### HTML export"), skill.indexOf("### Report security"));
+  const schema = JSON.parse(readFileSync(join(REPO_ROOT_RH, "skills", "audit", "schemas", "report-summary.schema.json"), "utf8"));
+  for (const k of Object.keys(schema.properties)) assert.equal(section.includes("`" + k + "`") || section.includes("`" + k + "[]`"), true, "SKILL.md HTML export names " + k);
+  for (const k of Object.keys(schema.properties.app_graph.properties)) assert.equal(section.includes(k), true, "SKILL.md names app_graph." + k);
+  assert.equal(section.includes("verification_notes"), true);
+  assert.deepEqual(Object.keys(schema.properties.chains.items.properties).filter((k) => !section.includes(k)), []);
+});

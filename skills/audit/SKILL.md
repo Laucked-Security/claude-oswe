@@ -558,16 +558,6 @@ to `provisional_severity` only for `not-requested` items). See Report format bel
   reason. `inconclusive`/`not-analyzed` leads are listed under **Coverage**, not here. **With no
   `--sarif` (leads empty), neither section is emitted and the Markdown is identical to today's output.**
 
-**Then emit the visual HTML report (alongside the `.md`, same basename).** Build a **non-sensitive
-`summary` object** (see "HTML export" below) from the final findings/chains/`gaps` plus the
-orchestrator's aggregated analyzer-coverage state, write it to a literal `.oswe/tmp/` path (file tool,
-no shell interpolation), and run the tested helper under the usual `trap`:
-`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/render-html.mjs" --md "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md" --summary "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.html" --checkpoint-dir "${checkpoint_dir}" )`.
-**The HTML can never fail the audit.** On a non-zero exit (1 = summary the orchestrator built wrong;
-2 = IO), note `HTML export failed: <reason>; Markdown report at <path>` in the chat summary and
-continue — the `.md` is the guaranteed artifact. The atomic write means a failure never leaves a
-partial `.html`.
-
 **Then emit the canonical `report.json` (alongside the `.md`, same basename).** This is the
 machine-readable artifact downstream tooling (benchmark ledger, baseline/diff, exports) keys on.
 Build a **`[REDACTED]`-safe parts object** `{ run, coverage, findings, chains, verdicts,
@@ -582,9 +572,23 @@ are ordered `version`, `generated_by`, `stats`, `nodes`, `edges`), copy the `sta
 never load `nodes`/`edges` into context. Write the parts object to a literal `.oswe/tmp/` path (file tool, no shell interpolation), and run the
 tested helper under the usual `trap`:
 `( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/write-report.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" )`.
-Like the HTML, **`report.json` can never fail the audit**: on a non-zero exit (1 = the parts failed
+Like every export here, **`report.json` can never fail the audit**: on a non-zero exit (1 = the parts failed
 `report.schema.json` validation — a bug to fix; 2 = IO), note `report.json export failed: <reason>`
 in the chat summary and continue — the `.md` remains the guaranteed artifact.
+
+**Then emit the visual HTML report (alongside the `.md`, same basename) — after `report.json`, because
+the summary's `app_graph` is read back from the `report.json` just written.** Build a **non-sensitive
+`summary` object** (see "HTML export" below) from the final findings/chains/`gaps`, the
+orchestrator's aggregated analyzer-coverage state, and that `report.json`'s `app_graph` (it is the last
+top-level key of the file, so reading the file's tail is enough); write it to a literal `.oswe/tmp/`
+path (file tool, no shell interpolation), and run the tested helper under the usual `trap`:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/render-html.mjs" --md "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md" --summary "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.html" --checkpoint-dir "${checkpoint_dir}" )`.
+If `report.json` could not be written, build the summary **without** `app_graph` (the Markdown body still
+carries the App graph section).
+**The HTML can never fail the audit.** On a non-zero exit (1 = summary the orchestrator built wrong;
+2 = IO), note `HTML export failed: <reason>; Markdown report at <path>` in the chat summary and
+continue — the `.md` is the guaranteed artifact. The atomic write means a failure never leaves a
+partial `.html`.
 
 **Then emit the SARIF 2.1.0 export** (reading the `report.json` just written):
 `( trap 'true' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/export-sarif.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.sarif" )`.
@@ -759,9 +763,19 @@ only, **never** secrets, code excerpts, or `file:line`. The `summary` shape (val
   `verification_status` (sum = all findings, rejected included).
 - `coverage`: `{ analyzed, skipped }` — analyzed partitions vs coverage gaps.
 - `chains[]`: `{ id (^CHAIN-[0-9]+$), severity, entry_auth, final_impact ("unauth-rce"|"other" — map
-  any non-`unauth-rce` chain impact to `other`), nodes[], edges[{from,to,verdict}] }`, where every
-  node / edge endpoint is exactly `entry`, `RCE`, or `^OSWE-[0-9]+$` (no free text). A safe audit has
-  `chains: []` and all-zero `severity_counts`.
+  any non-`unauth-rce` chain impact to `other`), nodes[], edges[{from,to,verdict}], verification_notes? }`,
+  where every node / edge endpoint is exactly `entry`, `RCE`, or `^OSWE-[0-9]+$` (no free text).
+  `verification_notes` (SP10, optional `string[]`) = the settled chain's own `verification_notes` (e.g.
+  `structural: member cap`), copied only when the chain carries them — omit the key otherwise; the
+  HTML shows them as a `Notes:` line under the chain id. A safe audit has `chains: []` and all-zero
+  `severity_counts`.
+- `app_graph` (SP10, optional): `{ available, reason?, stats?, multi_file_chain_count }` — the
+  `app_graph` object of the `report.json` just written (§7), copied verbatim: `available:false` carries
+  the `reason`; `available:true` carries `stats` (`graph.stats`, counts and closed-set labels);
+  `multi_file_chain_count` is required in both cases and is **copied from that `report.json`'s
+  `app_graph`** — never computed or set by you — so the HTML and `report.json` agree. Omit the key only
+  when `report.json` could not be written. The HTML renders it as an "App graph" section after the
+  Exploit chains.
 
 ### Report security
 - **Never write a secret fragment.** Replace any discovered secret value with `[REDACTED]`; cite only
