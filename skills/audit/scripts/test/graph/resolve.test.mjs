@@ -27,8 +27,9 @@ const named = (specifier, ...names) => ({ line: 1, specifier, bindings: names.ma
 const whole = (specifier, form, local) => ({ line: 1, specifier, bindings: form, local });
 const cls = (name, start, methods, ext = null) => ({ name, extends: ext, methods, start_byte: start });
 
-function stubModule(table, seen = []) {
+function stubModule(table, seen = [], lang = { id: "stub", implicitThisCalls: false }) {
   return {
+    lang,
     resolveImportSpecifier(args) {
       seen.push(args);
       const hit = table[args.specifier];
@@ -37,12 +38,12 @@ function stubModule(table, seen = []) {
   };
 }
 
-function resolveAll(files, table = {}) {
-  const langModules = new Map([["stub", stubModule(table)]]);
+function resolveAll(files, table = {}, lang = undefined) {
+  const langModules = new Map([["stub", stubModule(table, [], lang)]]);
   const filePaths = new Set(files.map((f) => f.path));
   const importMap = resolveImports(files, { langModules, filePaths, configs: {} });
   const classIndex = buildClassIndex(files, importMap);
-  return resolveCalls(files, importMap, { classIndex });
+  return resolveCalls(files, importMap, { classIndex, langModules });
 }
 
 const only = (results, path, start) => {
@@ -70,13 +71,42 @@ test("rule 1: the same name shadowed by a parameter is unresolved, callee_text k
   assert.equal(r.callee_text, "foo");
 });
 
-test("rule 1: a bare call to a method of the enclosing class is exact", () => {
-  const a = file("a.java", {
-    classes: [cls("K", 0, ["run", "help"])],
-    functions: [fn("run", 10, "K"), fn("help", 40, "K")],
-    calls: [call("help", 15, { enc: 10 })]
-  });
-  assert.deepEqual(only(resolveAll([a]), "a.java", 15).to, { path: "a.java", qualified_name: "K.help", start_byte: 40 });
+// A bare foo() inside a method of K, where K defines foo (and AdminK overrides it on request).
+function implicitThisFile(path, { override = false, importFoo = false } = {}) {
+  const classes = [cls("K", 0, ["run", "foo"])];
+  const functions = [fn("run", 10, "K"), fn("foo", 40, "K")];
+  if (override) {
+    classes.push(cls("AdminK", 100, ["foo"], "K"));
+    functions.push(fn("foo", 110, "AdminK"));
+  }
+  return file(path, { classes, functions, imports: importFoo ? [named("./b", "foo")] : [], calls: [call("foo", 15, { enc: 10 })] });
+}
+const IMPLICIT_THIS = { id: "stub", implicitThisCalls: true };
+const bFoo = () => file("b.x", { functions: [fn("foo", 5)], exports: [{ name: "foo", start_byte: 5 }] });
+
+test("implicit this: a bare foo() in a method of K is exact to K.foo when the language declares implicitThisCalls", () => {
+  const r = only(resolveAll([implicitThisFile("a.java")], {}, IMPLICIT_THIS), "a.java", 15);
+  assert.equal(r.confidence, "exact");
+  assert.deepEqual(r.to, { path: "a.java", qualified_name: "K.foo", start_byte: 40 });
+  const viaImport = only(resolveAll([implicitThisFile("a.java", { importFoo: true }), bFoo()], { "./b": "b.x" }, IMPLICIT_THIS), "a.java", 15);
+  assert.equal(viaImport.to.qualified_name, "K.foo", "the same-class step runs before rule 2");
+});
+
+test("implicit this: a subclass overriding foo downgrades the bare call to name-only", () => {
+  const r = only(resolveAll([implicitThisFile("a.java", { override: true })], {}, IMPLICIT_THIS), "a.java", 15);
+  assert.equal(r.confidence, "name-only");
+  assert.deepEqual(r.to, { path: "a.java", qualified_name: "K.foo", start_byte: 40 });
+});
+
+test("no implicit this (flag false, or no language module): a bare foo() never targets a method", () => {
+  const flagged = only(resolveAll([implicitThisFile("a.js")]), "a.js", 15);
+  assert.deepEqual([flagged.to, flagged.confidence], [null, "unresolved"]);
+  const orphan = { ...implicitThisFile("a.js"), langId: "no-such-module" };
+  const bare = only(resolveAll([orphan]), "a.js", 15);
+  assert.deepEqual([bare.to, bare.confidence], [null, "unresolved"]);
+  const viaImport = only(resolveAll([implicitThisFile("a.js", { importFoo: true }), bFoo()], { "./b": "b.x" }), "a.js", 15);
+  assert.equal(viaImport.confidence, "exact", "falls through to rule 2");
+  assert.deepEqual(viaImport.to, { path: "b.x", qualified_name: "foo", start_byte: 5 });
 });
 
 test("a call whose enclosing_start_byte matches no function is treated as module level", () => {

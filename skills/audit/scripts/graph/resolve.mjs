@@ -15,9 +15,12 @@
 //     -> Map<"<fromPath>\0<specifier>", { path, confidence }>   (unresolvable specifiers absent)
 //   buildClassIndex(files, importMap) -> { byName: Map<name, [{ path, name, extends, methods,
 //     start_byte }]>, parentOf: Map<"<path>\0<start_byte>", { entry, confidence } | null> }
-//   resolveCalls(files, importMap, { classIndex }) -> [{ from_fn_start_byte, from_path, line,
-//     start_byte, callee_text, to: { path, qualified_name, start_byte } | null, confidence }]
-//     ordered by (from_path, start_byte).
+//   resolveCalls(files, importMap, { classIndex, langModules }) -> [{ from_fn_start_byte,
+//     from_path, line, start_byte, callee_text, to: { path, qualified_name, start_byte } | null,
+//     confidence }] ordered by (from_path, start_byte).
+//     A bare call may target a method only in a file whose language module declares
+//     `lang.implicitThisCalls: true` (Java, C#: a bare `foo()` in a method can mean `this.foo()`);
+//     otherwise (JS, Python, PHP, or no module / flag) it only ever targets a top-level function.
 //
 // Config files are read through confinePath: a config symlink escaping the project is an error,
 // never read. JSON configs use plain JSON.parse, so a JSONC file (comments, trailing commas) lands
@@ -250,18 +253,19 @@ function importedFunction(fromPath, binding, ctx) {
   return fn ? target(resolved.path, fn, weaker("exact", resolved.confidence)) : null;
 }
 
-// Rules 1, 2, 4 for a bare identifier callee (already known not to be shadowed).
+// Rules 1, 2, 4 for a bare identifier callee (already known not to be shadowed). The same-class
+// method step and methods in rule 4's count apply only to implicit-this languages.
 function resolveBare(site, name, ctx) {
   const local = functionsIn(ctx, site.path).filter((f) => isTopLevel(f) && f.name === name);
   if (local.length) return local.length === 1 ? target(site.path, local[0], "exact") : null;
   const ownClass = site.enclosing?.class;
-  if (ownClass) {
+  if (site.implicitThis && ownClass) {
     const member = methodTarget(sameFileClass(ctx, site.path, ownClass), name, ctx, 0);
     if (member) return member;
   }
   const binding = importBinding(ctx.extracts.get(site.path), name);
   if (binding) return importedFunction(site.path, binding, ctx);
-  const definitions = ctx.definitionsByName.get(name) ?? [];
+  const definitions = (ctx.definitionsByName.get(name) ?? []).filter((d) => site.implicitThis || d.fn.class == null);
   return definitions.length === 1 ? target(definitions[0].path, definitions[0].fn, "name-only") : null;
 }
 
@@ -295,7 +299,8 @@ function resolveCall(site, ctx) {
   return segments.length === 1 ? resolveBare(site, last, ctx) : resolveImportMember(site, segments, ctx);
 }
 
-// Rule 4's universe: top-level functions and methods across all files, by bare name.
+// Rule 4's universe: top-level functions and methods across all files, by bare name (resolveBare
+// drops the methods for a call from a language without implicit `this`).
 function definitionsByName(files) {
   const index = new Map();
   for (const file of byPath(files)) {
@@ -308,15 +313,16 @@ function definitionsByName(files) {
   return index;
 }
 
-export function resolveCalls(files, importMap, { classIndex }) {
+export function resolveCalls(files, importMap, { classIndex, langModules }) {
   const ctx = { ...context(files, importMap, classIndex), definitionsByName: definitionsByName(files) };
   const results = [];
   for (const file of byPath(files)) {
+    const implicitThis = langModules?.get(file.langId)?.lang?.implicitThisCalls === true;
     const byStart = new Map();
     for (const fn of file.extract.functions) if (!byStart.has(fn.start_byte)) byStart.set(fn.start_byte, fn);
     for (const call of file.extract.calls) {
       const enclosing = call.enclosing_start_byte == null ? null : byStart.get(call.enclosing_start_byte) ?? null;
-      const hit = resolveCall({ path: file.path, call, enclosing }, ctx);
+      const hit = resolveCall({ path: file.path, call, enclosing, implicitThis }, ctx);
       results.push({
         from_fn_start_byte: enclosing ? enclosing.start_byte : null,
         from_path: file.path,

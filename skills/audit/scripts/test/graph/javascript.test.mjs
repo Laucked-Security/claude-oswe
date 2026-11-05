@@ -26,7 +26,7 @@ const extractFixture = (path) => extract(readFileSync(join(FIXTURE_DIR, path), "
 const names = (list) => list.map((x) => x.name);
 
 test("lang descriptor", () => {
-  assert.deepEqual(lang, { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"] });
+  assert.deepEqual(lang, { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false });
 });
 
 // ---- exports ------------------------------------------------------------------------------------

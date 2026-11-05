@@ -17,7 +17,7 @@ import { normalizeToken } from "../surface.mjs";
 import { sinkClassFor } from "../sink-classes.mjs";
 import { matchesPattern } from "../match.mjs";
 
-export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"] };
+export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 
