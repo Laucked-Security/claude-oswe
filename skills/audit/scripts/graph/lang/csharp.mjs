@@ -6,7 +6,8 @@
 // C# specifics:
 //   functions  `method_declaration` / constructors -> "method" (`<Class>.<name>`, a constructor is
 //              named after its class; overloads differ by start_byte; expression-bodied members too);
-//              a local function -> "function" (`<outer>.<name>`); a lambda or an anonymous method
+//              a local function -> "function" (`<outer>.<name>`) whose class is the enclosing type's
+//              (it captures `this`: resolve.mjs's same-class steps apply inside it); a lambda or an anonymous method
 //              (`delegate { }`) -> "lambda", named by the local it initialises (`Action a = () => ...`
 //              -> `<enclosing>.a`), by its bare `<anon>@<line>:<col>` label when it is a minimal-API
 //              route handler (the route's handler_text), else `<enclosing>.<anon>@<line>:<col>`; a
@@ -38,8 +39,11 @@
 //              code in its field initializers has no enclosing function (`enclosing_start_byte: null`).
 //   sinks      as in Java, a call whose receiver has a known class T is also matched as `T.<method>`
 //              (`Process p; p.Start()` -> `Process.Start`); the sink's callee keeps the source text.
-//   sources    member-access chains (`Request.Query["x"]` -> `Request.Query`), attributes on a
-//              parameter or a method (`[FromBody]`), calls, identifiers and string literals.
+//   sinks      also the member name assigned to (`psi.UseShellExecute = true`, read as the identifier
+//              `UseShellExecute` like the object-initializer form).
+//   sources    member-access chains and call callees, each matched through every suffix sub-chain
+//              (`HttpContext.Request.Form["x"]` -> `Request.Form`; at most one source per chain),
+//              attributes on a parameter or a method (`[FromBody]`), identifiers and string literals.
 //   routes     attribute routing: `[HttpGet]` / `[HttpPost]` / `[HttpPut]` / `[HttpDelete]` /
 //              `[HttpPatch]` / `[HttpHead]` / `[HttpOptions]` (optionally with a template; a template-less
 //              verb takes the method's `[Route]` template) or a lone method `[Route("x")]` (ANY), each
@@ -53,6 +57,11 @@
 //              `.RequireAuthorization(...)` / `.AllowAnonymous()` are the middleware texts.
 //              `MapGroup` / `MapControllers` are only noted ("route group"): routes inside a group
 //              keep their own path.
+//
+// Known grammar limits (vendored tree-sitter-c_sharp, tree-sitter-wasms 0.1.13): C# 12 class / struct
+// primary constructors (`class X(Runner r) { }`) do not parse — the tree has an ERROR node there,
+// noted "primary constructor", and the parameters bind nothing (record parameters do parse and bind);
+// raw string literals (`"""..."""`) do not parse either.
 //
 // Same TreeCursor walk as the JavaScript module (see its header for why not tree-sitter queries).
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
@@ -240,10 +249,22 @@ function onNew(node, st) {
   if (text) emitMatches(node, [{ category: "new", text: normalizeToken(text) }], st, { sinks: true, sinkAt: type });
 }
 
-// The longest member-access chain that is not a call's callee (`Request.Query` of `Request.Query["x"]`).
+// A chain's text and every suffix sub-chain (`a.b.c`, `b.c`, `c`) as source candidates: a source
+// pattern may name the tail of a longer chain (`HttpContext.Request.Form` -> `Request.Form`).
+const suffixCandidates = (category, text) => text.split(".").map((_, i, parts) => ({ category, text: parts.slice(i).join(".") }));
+
+// The longest member-access chain that is not a call's callee (`Request.Query` of `Request.Query["x"]`):
+// a source through any suffix, a sink as a whole. The member name assigned to (`psi.UseShellExecute =
+// true`) is also a sink candidate as an identifier, like the object-initializer form.
 function onMember(node, st, ctx) {
+  if (ctx.parentType === "assignment_expression" && ctx.field === "left") {
+    const name = field(node, "name");
+    if (name?.type === "identifier") emitMatches(name, [{ category: "identifier", text: name.text }], st, { sinks: true });
+  }
   if ((ctx.parentType === "member_access_expression" && ctx.field === "expression") || (ctx.parentType === "invocation_expression" && ctx.field === "function")) return;
-  emitMatches(node, [{ category: "member", text: textOf(node) }], st, { sources: true, sinks: true });
+  const text = textOf(node);
+  emitMatches(node, suffixCandidates("member", text), st, { sources: true });
+  emitMatches(node, [{ category: "member", text }], st, { sinks: true });
 }
 
 // Nothing inside an attribute list is a call.
@@ -400,7 +421,7 @@ function onFunction(node, st) {
     fn = { name: local ?? "<anon>", qualified_name: qualifiedName, kind: "lambda", exported: false, class: null, classStart: innermostClass(st)?.start ?? null };
   } else if (node.type === "local_function_statement") {
     const name = field(node, "name")?.text ?? "<anon>";
-    fn = { name, qualified_name: `${enclosingName(st)}.${name}`, kind: "function", exported: false, class: null };
+    fn = { name, qualified_name: `${enclosingName(st)}.${name}`, kind: "function", exported: false, class: innermostClass(st)?.name ?? null };
   } else {
     const name = field(node, "name")?.text ?? "<anon>";
     const isPublic = owner?.isInterface || hasModifier(node, "public");
@@ -580,7 +601,8 @@ function onCall(node, st) {
   }
   const candidates = [{ category: "call", text: calleeText }];
   if (cls) candidates.push({ category: "call", text: `${cls}.${methodName}` });
-  emitMatches(node, candidates, st, { sources: true, sinks: true, sinkAt: callee.name });
+  emitMatches(node, suffixCandidates("call", calleeText), st, { sources: true });
+  emitMatches(node, candidates, st, { sinks: true, sinkAt: callee.name });
 }
 
 // ---- imports --------------------------------------------------------------------------------------
@@ -596,6 +618,14 @@ function onUsing(node, st) {
 function onNamespace(node, st) {
   if (st.namespaceCount++ > 0) st.notExtracted.add("multiple namespaces"); // the first is the file's
   else st.namespace = nameText(field(node, "name"));
+}
+
+// A C# 12 primary constructor the vendored grammar cannot parse: an ERROR node standing for the
+// parameter list of a type declaration, or a `class X(...)` / `struct X(...)` left unparsed.
+function onError(node, st, ctx) {
+  const kinds = node.children.map((c) => c.type);
+  const unparsedType = (kinds.includes("class") || kinds.includes("struct")) && kinds.includes("parameter_list");
+  if ((TYPE_DECLARATIONS.includes(ctx.parentType) && node.text.startsWith("(")) || unparsedType) st.notExtracted.add("primary constructor");
 }
 
 // ---- walk -----------------------------------------------------------------------------------------
@@ -626,7 +656,8 @@ const HANDLERS = new Map([
   ["verbatim_string_literal", onString],
   ["using_directive", onUsing],
   ["namespace_declaration", onNamespace],
-  ["file_scoped_namespace_declaration", onNamespace]
+  ["file_scoped_namespace_declaration", onNamespace],
+  ["ERROR", onError]
 ]);
 const CURSOR_HANDLERS = new Map([["identifier", onIdentifier]]);
 

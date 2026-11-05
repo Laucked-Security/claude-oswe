@@ -167,7 +167,7 @@ test("functions: constructors, expression bodies, local functions, anonymous met
     ["lambda", "<anon>", "K.K.<anon>@3:57", null, false],
     ["method", "Pkg", "K.Pkg", "K", false],
     ["method", "M", "In.M", "In", true],
-    ["function", "Local", "In.M.Local", null, false],
+    ["function", "Local", "In.M.Local", "In", false],
     ["method", "P", "Priv.P", "Priv", false],
     ["method", "T", "IThing.T", "IThing", true],
     ["method", "U", "S.U", "S", true],
@@ -430,6 +430,64 @@ test("resolution: overloads by arity, this.M, a lambda's bare call acts for its 
     results.map((r) => [r.line, r.callee_text, r.to?.start_byte ?? null, r.confidence]),
     [[5, "Run", 37, "exact"], [6, "this.Run", 12, "exact"], [7, "Run", 12, "exact"]]
   );
+});
+
+test("local functions capture this: class = the enclosing type, so a bare call inside resolves like the method's own (override ⇒ name-only)", async () => {
+  const runner = "public class Runner {\n  public void Run(string c) {\n    Exec(c);\n    void Local() { Exec(c); this.Exec(c); }\n    Local();\n  }\n  public virtual void Exec(string c) { }\n}\n";
+  const { files, results } = await resolveSources({ "Runner.cs": runner, "AdminRunner.cs": "public class AdminRunner : Runner {\n  public override void Exec(string c) { }\n}\n" });
+  const local = files[0].extract.functions.find((f) => f.name === "Local");
+  assert.deepEqual([local.kind, local.qualified_name, local.class], ["function", "Runner.Run.Local", "Runner"]);
+  const exec = files[0].extract.functions.find((f) => f.qualified_name === "Runner.Exec");
+  const rows = results.filter((r) => r.from_path === "Runner.cs").map((r) => [r.line, r.callee_text, r.from_fn_start_byte === local.start_byte, r.to?.start_byte ?? null, r.confidence]);
+  assert.deepEqual(rows, [
+    [3, "Exec", false, exec.start_byte, "name-only"],
+    [4, "Exec", true, exec.start_byte, "name-only"],
+    [4, "this.Exec", true, exec.start_byte, "name-only"],
+    [5, "Local", false, local.start_byte, "exact"] // the local function itself (same class, same file)
+  ]);
+  const { results: plain } = await resolveSources({ "K.cs": "class K {\n  void Exec() { }\n  void Run() { void Local() { Exec(); } }\n}\n" });
+  assert.deepEqual(plain.map((r) => [r.line, r.callee_text, r.to?.qualified_name ?? null, r.confidence]), [[3, "Exec", "K.Exec", "exact"]]);
+});
+
+test("sources: a chain matches through any suffix sub-chain (HttpContext.Request.Form), one source per chain", async () => {
+  const x = await extract(
+    "class K : Controller {\n  void M() {\n    var f = HttpContext.Request.Form[\"x\"];\n    var g = Request.Form;\n" +
+      "    var h = this.HttpContext.Request.Headers[\"h\"];\n    HttpContext.Request.Body.ReadAsync(buf);\n    var n = Other.Form;\n  }\n}\n"
+  );
+  const text = "class K : Controller {\n  void M() {\n    var f = HttpContext.Request.Form[\"x\"];\n    var g = Request.Form;\n" +
+    "    var h = this.HttpContext.Request.Headers[\"h\"];\n    HttpContext.Request.Body.ReadAsync(buf);\n    var n = Other.Form;\n  }\n}\n";
+  assert.deepEqual(x.sources, [
+    { line: 3, start_byte: text.indexOf("HttpContext.Request.Form"), kind: "body", pattern: "Request.Form" },
+    { line: 4, start_byte: text.indexOf("Request.Form;"), kind: "body", pattern: "Request.Form" },
+    { line: 5, start_byte: text.indexOf("this.HttpContext"), kind: "header", pattern: "Request.Headers" },
+    { line: 6, start_byte: text.indexOf("HttpContext.Request.Body"), kind: "body", pattern: "Request.Body" }
+  ]);
+  // sinks still match the whole chain only
+  assert.deepEqual(x.sinks, []);
+});
+
+test("sinks: a member assignment's name is a sink candidate like the object-initializer form", async () => {
+  const x = await extract("class K {\n  void M(ProcessStartInfo psi) {\n    psi.UseShellExecute = true;\n    var p = new Opts { UseShellExecute = true };\n    psi.FileName = \"sh\";\n  }\n}\n");
+  const text = "class K {\n  void M(ProcessStartInfo psi) {\n    psi.UseShellExecute = true;\n    var p = new Opts { UseShellExecute = true };\n    psi.FileName = \"sh\";\n  }\n}\n";
+  assert.deepEqual(x.sinks.map((s) => [s.line, s.start_byte, s.class, s.callee, s.pattern]), [
+    [2, text.indexOf("ProcessStartInfo"), "cmd-exec", "ProcessStartInfo", "ProcessStartInfo"],
+    [3, text.indexOf("UseShellExecute"), "cmd-exec", "UseShellExecute", "UseShellExecute"],
+    [4, text.lastIndexOf("UseShellExecute"), "cmd-exec", "UseShellExecute", "UseShellExecute"]
+  ]);
+});
+
+test("a class / struct primary constructor (unparseable by the vendored grammar) is noted, extraction does not throw", async () => {
+  for (const src of ["public class X(Runner r) : Base(r) { void M() { } }\n", "class Y<T>(Runner r) { }\n", "class Z(Runner r) { void M() { } }\n", "struct S(int a) { }\n"]) {
+    const tree = await parseSource("c_sharp", src);
+    try {
+      assert.equal(tree.rootNode.hasError, true, src);
+      const x = extractFile({ tree, path: "P.cs", sourceText: src, frameworks: lang.frameworks, surface: SURFACE });
+      assert.ok(x.not_extracted.includes("primary constructor"), src);
+    } finally {
+      tree.delete();
+    }
+  }
+  assert.ok(!(await extract("record R(int A);\nclass K { void M(int a) { } }\n")).not_extracted.includes("primary constructor"));
 });
 
 test("the dotnet fixture through build-graph: route auth, field-typed receiver, override grading, sinks in their methods, namespace import edges", async () => {
