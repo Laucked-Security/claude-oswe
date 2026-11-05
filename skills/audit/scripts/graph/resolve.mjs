@@ -18,6 +18,8 @@
 // Input records are `{ path, langId, stack, extract }` with repo-relative forward-slash paths.
 //   loadResolutionConfigs(projectDir, scopeRealpath) -> { tsconfig, jsconfig, packageJson,
 //     composerJson, pyproject, setupCfg, read: [{ path, sha256 }], errors: [{ file, message }] }
+//     with message one of CONFIG_ERRORS: "invalid JSON" | "unreadable" | "escapes project" (never
+//     repo content, never an absolute path).
 //   resolveImports(files, { langModules, filePaths, configs })
 //     -> Map<"<fromPath>\0<specifier>", { path, confidence }>   (unresolvable specifiers absent)
 //     plus, for a language declaring `lang.submoduleImports: true` (Python: `from pkg import sub` may
@@ -60,27 +62,31 @@ const CONFIG_FILES = [
   ["setup.cfg", "setupCfg", "text"]
 ];
 
+// Config error messages are a fixed vocabulary: never the parser's or the OS's message, which can quote
+// a fragment of the file (JSON.parse) or an absolute path (readFileSync) into stats.config_errors.
+export const CONFIG_ERRORS = Object.freeze({ invalidJson: "invalid JSON", unreadable: "unreadable", escapes: "escapes project" });
+
 // null when the file does not exist; otherwise { sha256?, value? , error? }.
 function readConfig(root, rel, format) {
   let real;
   try {
     real = confinePath(root, rel);
   } catch (e) {
-    return e.code === "ENOENT" ? null : { error: e.message };
+    return e.code === "ENOENT" ? null : { error: CONFIG_ERRORS.escapes };
   }
   let bytes;
   try {
     bytes = readFileSync(real);
-  } catch (e) {
-    return { error: e.message };
+  } catch {
+    return { error: CONFIG_ERRORS.unreadable };
   }
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const text = bytes.toString("utf8");
   if (format === "text") return { sha256, value: text };
   try {
     return { sha256, value: JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) }; // drop a BOM
-  } catch (e) {
-    return { sha256, error: e.message };
+  } catch {
+    return { sha256, error: CONFIG_ERRORS.invalidJson };
   }
 }
 

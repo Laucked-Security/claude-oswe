@@ -62,3 +62,11 @@ test("grammars are committed gzipped and load from the .gz files", async () => {
   assert.ok(python.abiVersion > 0);
   assert.equal((await parseSource("python", "f(1)")).rootNode.hasError, false);
 });
+
+test("parserAvailable reasons are fixed strings: no vendorDir path, no path separator", async () => {
+  const empty = join(tmpdir(), "oswe-parser-nope-" + process.pid);
+  const r = await parserAvailable({ vendorDir: empty });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "vendored parser files missing");
+  assert.equal(/[\/]/.test(r.reason), false);
+});

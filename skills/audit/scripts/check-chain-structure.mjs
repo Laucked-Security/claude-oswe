@@ -28,8 +28,8 @@
 //
 // Mapping. A location { file, line } maps to enclosingFn: the function node of that file with
 // line_start <= line <= line_end, the innermost one when several match (greatest line_start, then smallest
-// line_end, then smaller id). The location's file is normalised first (backslashes -> "/", leading "./"
-// stripped) and then compared exactly with the graph's repo-relative paths.
+// line_end, then smaller id). The location's file and the graph's paths compare in graph/text.mjs's pathKey
+// form (backslashes -> "/", leading "./" stripped, case folded on win32 only).
 //
 // Connectivity. BFS over `calls` edges with a non-null `to`, at most max_depth edges. An "exact" search
 // follows only `exact` edges; an "any" search follows `exact` and `name-only` edges (never `unresolved`).
@@ -55,6 +55,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validate } from "./validate-output.mjs";
+import { pathKey } from "./graph/text.mjs";
 
 export class InputError extends Error {}
 
@@ -65,7 +66,6 @@ const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isPositiveInteger = (v) => Number.isInteger(v) && v > 0;
 const isLocation = (v) => isObject(v) && typeof v.file === "string" && Number.isInteger(v.line) && v.line >= 0;
-const normalisePath = (p) => p.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
 const idNumber = (id) => Number(id.slice(id.indexOf("-") + 1));
 const compareIds = (a, b) => idNumber(a) - idNumber(b) || compare(a, b);
 const verdict = (structural_path, reason) => ({ structural_path, reason });
@@ -148,16 +148,17 @@ function innermost(fns, line) {
 }
 
 export function enclosingFn(graph, file, line) {
-  const path = normalisePath(file);
-  return innermost(graph.nodes.filter((n) => n.type === "function" && n.file === path), line);
+  const key = pathKey(file);
+  return innermost(graph.nodes.filter((n) => n.type === "function" && pathKey(n.file) === key), line);
 }
 
 function indexGraph(graph) {
-  const fnsByFile = new Map(); // file -> function nodes
+  const fnsByFile = new Map(); // pathKey(file) -> function nodes
   for (const n of graph.nodes) {
     if (n.type !== "function") continue;
-    if (fnsByFile.has(n.file)) fnsByFile.get(n.file).push(n);
-    else fnsByFile.set(n.file, [n]);
+    const key = pathKey(n.file);
+    if (fnsByFile.has(key)) fnsByFile.get(key).push(n);
+    else fnsByFile.set(key, [n]);
   }
   const exact = new Map(); // function id -> callee ids over exact edges
   const any = new Map(); // function id -> callee ids over exact and name-only edges
@@ -170,7 +171,7 @@ function indexGraph(graph) {
   return { fnsByFile, exact, any };
 }
 
-const mapLocation = ({ fnsByFile }, { file, line }) => innermost(fnsByFile.get(normalisePath(file)) ?? [], line);
+const mapLocation = ({ fnsByFile }, { file, line }) => innermost(fnsByFile.get(pathKey(file)) ?? [], line);
 
 // ---- connectivity -----------------------------------------------------------------------------------
 

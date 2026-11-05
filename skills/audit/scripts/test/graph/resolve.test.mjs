@@ -637,3 +637,25 @@ test("loadResolutionConfigs: a scope copy that fails to parse yields null, never
   assert.deepEqual(configs.errors.map((e) => e.file), ["app/tsconfig.json"]);
   assert.deepEqual(configs.read.map((r) => r.path), ["tsconfig.json", "app/tsconfig.json"]);
 });
+
+// ---- I6: config errors are a fixed vocabulary (no repo content, no absolute paths) ---------------
+
+test("loadResolutionConfigs: an invalid JSON config with a secret-looking token yields the fixed message, never the token", (t) => {
+  const dir = tempDir(t);
+  const secret = "AKIAIOSFODNN7EXAMPLE_sk_live_51Hx";
+  writeFileSync(join(dir, "package.json"), `{ "name": "x", "token": ${secret} }\n`);
+  writeFileSync(join(dir, "tsconfig.json"), `{ "compilerOptions": "${secret}", }`);
+  const configs = loadResolutionConfigs(dir, dir);
+  assert.deepEqual(configs.errors.map((e) => e.message), ["invalid JSON", "invalid JSON"]);
+  const text = JSON.stringify(configs.errors);
+  assert.equal(text.includes(secret), false);
+  assert.equal(text.includes(dir), false);
+});
+
+test("loadResolutionConfigs: an unreadable config (a directory named tsconfig.json) is 'unreadable'", (t) => {
+  const dir = tempDir(t);
+  mkdirSync(join(dir, "tsconfig.json"));
+  const configs = loadResolutionConfigs(dir, dir);
+  assert.deepEqual(configs.errors, [{ file: "tsconfig.json", message: "unreadable" }]);
+  assert.equal(configs.tsconfig, null);
+});

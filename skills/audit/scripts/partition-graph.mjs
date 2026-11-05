@@ -50,17 +50,17 @@
 //     group is not emitted — the orchestrator chose not to analyse it.
 //  5. Order. Group partitions sorted by partition_id, then orphan partitions in fallback order.
 //
-// Paths are compared as given, except on win32 where they compare as toLowerCase() (the file system is
-// case-insensitive there); an emitted path keeps the spelling of the first occurrence seen.
+// Paths are compared in graph/text.mjs's pathKey form (backslashes -> "/", leading "./" stripped, case folded
+// on win32 only); an emitted path keeps the spelling of the first occurrence seen.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validate } from "./validate-output.mjs";
+import { pathKey } from "./graph/text.mjs";
 
 export class InputError extends Error {}
 
 const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-const foldPath = process.platform === "win32" ? (p) => p.toLowerCase() : (p) => p;
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isStringArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 const FOLLOWED_CONFIDENCE = new Set(["exact", "name-only"]);
@@ -97,7 +97,7 @@ function indexGraph(graph) {
   const fileOfFunction = new Map(); // function id -> file path (graph spelling)
   const routes = [];
   for (const n of graph.nodes) {
-    if (n.type === "file") stackByFile.set(foldPath(n.path), n.stack);
+    if (n.type === "file") stackByFile.set(pathKey(n.path), n.stack);
     else if (n.type === "function") fileOfFunction.set(n.id, n.file);
     else if (n.type === "route") routes.push(n);
   }
@@ -141,7 +141,7 @@ const moduleOf = (path) => {
 function groupRoutes(index) {
   const groups = new Map();
   for (const r of index.routes) {
-    const stack = index.stackByFile.get(foldPath(r.file));
+    const stack = index.stackByFile.get(pathKey(r.file));
     if (stack === undefined) continue;
     const id = sanitize(`g-${stack}-${r.auth}-${moduleOf(r.file)}`);
     if (!groups.has(id)) groups.set(id, { stack, routeFiles: [], seeds: [] });
@@ -159,7 +159,7 @@ function claimGroupFiles(groups, index) {
   const claimed = new Set();
   const filesOf = new Map(ids.map((id) => [id, []]));
   const claim = (id, path) => {
-    const key = foldPath(path);
+    const key = pathKey(path);
     if (claimed.has(key)) return;
     claimed.add(key);
     filesOf.get(id).push(path);
@@ -181,7 +181,7 @@ function orphanPartitions(fallbackPartitions, claimed) {
   for (const p of fallbackPartitions) {
     const files = [];
     for (const path of p.files) {
-      const key = foldPath(path);
+      const key = pathKey(path);
       if (claimed.has(key)) continue;
       claimed.add(key); // a file listed in several fallback partitions is emitted once
       files.push(path);

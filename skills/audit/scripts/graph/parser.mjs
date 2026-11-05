@@ -82,16 +82,20 @@ export async function parseSource(langId, sourceText, { vendorDir = VENDOR_DIR }
   }
 }
 
+// parserAvailable reasons are fixed strings: the reason reaches graph.json's envelope and report.json,
+// so it must never carry the (absolute, machine-specific) vendorDir or a loader error message.
+export const PARSER_UNAVAILABLE = Object.freeze({ missing: "vendored parser files missing", initFailed: "parser init failed" });
+
 export async function parserAvailable({ vendorDir = VENDOR_DIR } = {}) {
   // Check the files first: a Parser.init pointed at a missing path must never run, because init is
   // process-global and a failed attempt could leave later loads from the real vendor dir broken.
   for (const file of [LOADER_FILE, RUNTIME_WASM]) {
-    if (!existsSync(join(vendorDir, file))) return { ok: false, reason: `${file} not found in ${vendorDir}` };
+    if (!existsSync(join(vendorDir, file))) return { ok: false, reason: PARSER_UNAVAILABLE.missing };
   }
   try {
     await loadLanguage("javascript", { vendorDir });
     return { ok: true };
-  } catch (err) {
-    return { ok: false, reason: `tree-sitter failed to initialise: ${err?.message || err}` };
+  } catch {
+    return { ok: false, reason: PARSER_UNAVAILABLE.initFailed };
   }
 }

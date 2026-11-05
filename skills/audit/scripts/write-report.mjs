@@ -8,20 +8,22 @@
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import { validate } from "./validate-output.mjs";
+import { pathKey } from "./graph/text.mjs";
 
-// SP10 multi-file chain metric — mirrors benchmark/score-nodegoat.mjs so the report and the scorer agree:
-// norm() = score-nodegoat.mjs:42-44, ACCEPTED_STATUSES = :77, multi_file_chains = :125-133 (accepted/downgraded
-// chains whose transitions[].evidence[].file set has >= 2 distinct normalised files).
+// SP10 multi-file chain metric — mirrors benchmark/score-nodegoat.mjs (ACCEPTED_STATUSES = :77,
+// multi_file_chains = :125-133: accepted/downgraded chains whose transitions[].evidence[].file set has >= 2
+// distinct files). Files compare in graph/text.mjs's pathKey form, the one path policy the graph helpers
+// share (case folded on win32 only; score-nodegoat's norm() always folds case, so the two can differ only
+// for evidence paths that differ by case alone, on a case-sensitive OS). null / missing chains count 0.
 const ACCEPTED_STATUSES = new Set(["accepted", "downgraded"]);
-const norm = (p) => (p || "").replace(/\\/g, "/").toLowerCase();
 
-export function countMultiFileChains(chains = []) {
-  return chains.filter((c) => {
+export function countMultiFileChains(chains) {
+  return (chains || []).filter((c) => {
     if (!ACCEPTED_STATUSES.has(c.verification_status)) return false;
     const files = new Set();
     for (const tr of (c.transitions || [])) {
       for (const ev of (tr.evidence || [])) {
-        if (ev.file) files.add(norm(ev.file));
+        if (ev.file) files.add(pathKey(ev.file));
       }
     }
     return files.size >= 2;

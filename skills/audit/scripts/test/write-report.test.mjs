@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildReport, validateReport } from "../write-report.mjs";
+import { buildReport, validateReport, countMultiFileChains } from "../write-report.mjs";
 import { validate } from "../validate-output.mjs";
 
 // --- fixtures (reuse the shapes the other schemas already accept) ---
@@ -149,7 +149,14 @@ test("multi_file_chain_count: an accepted chain whose evidence spans two files c
 
 test("multi_file_chain_count: 0 when the evidence stays in one file (path normalisation included)", () => {
   assert.equal(countFor([mfChain("CHAIN-1", "accepted", ["src/a.js", "src/a.js"])]), 0);
-  assert.equal(countFor([mfChain("CHAIN-1", "accepted", ["src\\A.js", "src/a.js"])]), 0);   // norm: backslash->slash, lowercase
+  assert.equal(countFor([mfChain("CHAIN-1", "accepted", ["src\\a.js", "./src/a.js"])]), 0); // pathKey: backslash->slash, "./" stripped
+  // the shared pathKey policy folds case on win32 only
+  assert.equal(countFor([mfChain("CHAIN-1", "accepted", ["src\\A.js", "src/a.js"])]), process.platform === "win32" ? 0 : 1);
+});
+
+test("countMultiFileChains(null) is 0 (a CLI parts file with chains: null)", () => {
+  assert.equal(countMultiFileChains(null), 0);
+  assert.equal(countMultiFileChains(undefined), 0);
 });
 
 test("multi_file_chain_count: 0 when the chain is not accepted (rejected / not-requested)", () => {

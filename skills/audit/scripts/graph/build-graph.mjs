@@ -13,7 +13,9 @@
 // CLI: node graph/build-graph.mjs --file <in.json> --out <out.json> [--checkpoint-dir <abs>]
 //   input:  { projectDir, scope_realpath?, stacks[], frameworks[]?, excludes[]?, referencesDir, vendorDir? }
 //   output: the graph JSON, or { "graph": null, "reason": "<msg>" } when the parser cannot load or
-//           the assembled graph fails schema validation (building the graph never aborts an audit).
+//           the assembled graph fails schema validation (building the graph never aborts an audit);
+//           <msg> is a fixed string ("vendored parser files missing", "parser init failed",
+//           "internal: graph failed schema validation", "internal error"), never a path or excerpt.
 //   exit 0 ok (graph or null envelope) / 1 malformed input (missing projectDir / stacks /
 //   referencesDir, scope_realpath escaping projectDir) / 2 IO | usage.
 //   --checkpoint-dir wraps the run with cache-wrap (helperName "build-graph"): the input digest
@@ -47,6 +49,10 @@ export const LANG_STACK = { javascript: "node", typescript: "node", tsx: "node",
 export const FRAMEWORK_STACK = { express: "node", nest: "node", flask: "python", django: "python", fastapi: "python", spring: "java", laravel: "php", symfony: "php", aspnet: "dotnet" };
 
 export class InputError extends Error {}
+
+// Envelope reasons are a fixed vocabulary (no repo content, no absolute path, no exception text):
+// parser.mjs's PARSER_UNAVAILABLE reasons plus these two.
+export const ENVELOPE_REASONS = Object.freeze({ invalidGraph: "internal: graph failed schema validation", internal: "internal error" });
 
 const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const sortedUnique = (list) => [...new Set(list)].sort(compare);
@@ -287,8 +293,13 @@ function importedFile(file, text, importMap, extractsByPath) {
   return null;
 }
 
+// A `mount:<label>` note names the mount by an identifier-only form of its text (characters outside
+// [A-Za-z0-9_.$] dropped, at most 64 kept): not_extracted reaches report.json, which never holds
+// code excerpts (a subscript handler text could carry a string literal).
+export const mountLabel = (text) => `mount:${text.replace(/[^A-Za-z0-9_.$]/g, "").slice(0, 64)}`;
+
 // Classify every `USE` entry: a function (global middleware for later routes / mounts of its file),
-// a mounted router file, or neither (recorded as not_extracted "mount:<text>").
+// a mounted router file, or neither (recorded as not_extracted "mount:<label>").
 function classifyUses(parsed, resolved, importMap, notExtracted) {
   const extractsByPath = new Map(parsed.map((f) => [f.path, f.extract]));
   const globals = new Map(); // path -> [{ path_pattern, start_byte, mws: [{ file, text }] }]
@@ -303,7 +314,7 @@ function classifyUses(parsed, resolved, importMap, notExtracted) {
       }
       const target = importedFile(file, route.handler_text, importMap, extractsByPath);
       if (target && !mountOf.has(target)) mountOf.set(target, { file: file.path, stack: file.stack, text: route.handler_text, path_pattern: route.path_pattern, start_byte: route.start_byte, mws });
-      else notExtracted(file.stack).add(target ? `mount:${route.handler_text}(mounted twice)` : `mount:${route.handler_text}`);
+      else notExtracted(file.stack).add(target ? `${mountLabel(route.handler_text)}(mounted twice)` : mountLabel(route.handler_text));
     }
   }
   breakMountCycles(mountOf, notExtracted);
@@ -325,7 +336,7 @@ function breakMountCycles(mountOf, notExtracted) {
     const root = chain.slice(chain.indexOf(current)).sort(compare)[0];
     const closing = mountOf.get(root);
     mountOf.delete(root);
-    notExtracted(closing.stack).add(`mount:${closing.text}(cycle)`);
+    notExtracted(closing.stack).add(`${mountLabel(closing.text)}(cycle)`);
   }
 }
 
@@ -352,11 +363,14 @@ function mountContext(path, { globals, mountOf }, memo) {
 const SHAPE_CATEGORY = { decorator: "decorator", call: "call", chain: "call", member: "call", word: "identifier" };
 
 // A marker with an argument prefix (php `->middleware('auth`, see surface.mjs) matches a middleware
-// name starting with it (`auth`, `auth:api`); every other marker matches by its shape.
+// name that is the prefix itself or the prefix followed by `:` or `.` (`auth`, `auth:api`,
+// `auth.basic`; never `author`, `authorized_ip`); every other marker matches by its shape.
+const startsWithArgPrefix = (text, prefix) => text.startsWith(prefix) && (text.length === prefix.length || text[prefix.length] === ":" || text[prefix.length] === ".");
+
 function isAuthMarker(text, surface) {
   const candidate = { text: normalizeToken(text) };
   return (surface?.auth_markers ?? []).some((p) =>
-    p.arg_prefix !== undefined ? text.startsWith(p.arg_prefix) : SHAPE_CATEGORY[p.shape] && matchesPattern(p, { ...candidate, category: SHAPE_CATEGORY[p.shape] }));
+    p.arg_prefix !== undefined ? startsWithArgPrefix(text, p.arg_prefix) : SHAPE_CATEGORY[p.shape] && matchesPattern(p, { ...candidate, category: SHAPE_CATEGORY[p.shape] }));
 }
 
 function routeAuth(mws, surfaceOfPath) {
@@ -557,11 +571,7 @@ async function assemble(prep) {
   const edges = sortEdges([...importEdges(parsed, importMap), ...callEdges(calls, parsed), ...routeEdges(routes)]);
   const graph = { version: 1, generated_by: GENERATED_BY, stats: buildStats(prep, nodes, edges, notExtracted), nodes, edges };
 
-  const v = validate("graph", graph);
-  if (!v.valid) {
-    const e = v.errors[0] ?? {};
-    return { graph: null, reason: `internal: graph failed schema validation: ${e.instancePath ?? ""} ${e.message ?? "invalid"}`.replace(/\s+/g, " ").trim() };
-  }
+  if (!validate("graph", graph).valid) return { graph: null, reason: ENVELOPE_REASONS.invalidGraph };
   return { graph };
 }
 
@@ -627,8 +637,8 @@ async function main(args) {
   let result;
   try {
     result = await assemble(prep);
-  } catch (e) {
-    result = { graph: null, reason: "internal: " + (e?.message || String(e)) };
+  } catch {
+    result = { graph: null, reason: ENVELOPE_REASONS.internal };
   }
   const output = result.graph ?? { graph: null, reason: result.reason };
   writeOut(outFile, output);

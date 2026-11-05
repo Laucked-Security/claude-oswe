@@ -45,19 +45,19 @@
 // else 3. Plain string comparison throughout (never locale-aware). The first max_paths are kept and
 // numbered CP-<partition_id>-<n>, 1-based, in that order.
 //
-// Paths are compared as given, except on win32 where they compare as toLowerCase() (as partition-graph.mjs
-// does: a partition's file spelling is the first one seen, which can differ in case from the graph's).
+// Paths are compared in graph/text.mjs's pathKey form (backslashes -> "/", leading "./" stripped, case folded
+// on win32 only), as partition-graph.mjs does: a partition's file spelling can differ from the graph's.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validate } from "./validate-output.mjs";
+import { pathKey } from "./graph/text.mjs";
 
 export class InputError extends Error {}
 
 const DEFAULT_MAX_DEPTH = 6;
 const DEFAULT_MAX_PATHS = 50;
 const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-const foldPath = process.platform === "win32" ? (p) => p.toLowerCase() : (p) => p;
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isStringArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 const isPositiveInteger = (v) => Number.isInteger(v) && v > 0;
@@ -93,8 +93,8 @@ function checkInput(input) {
 
 // Everything the search needs, restricted to the partition's files, built in one pass over nodes and edges.
 function indexGraph(graph, files) {
-  const inPartition = new Set(files.map(foldPath));
-  const has = (file) => inPartition.has(foldPath(file));
+  const inPartition = new Set(files.map(pathKey));
+  const has = (file) => inPartition.has(pathKey(file));
   const fnById = new Map(); // id -> function node, partition functions only
   const routes = []; // route nodes in the partition with a handler
   const sinksByFn = new Map(); // function id -> sink nodes enclosed by it

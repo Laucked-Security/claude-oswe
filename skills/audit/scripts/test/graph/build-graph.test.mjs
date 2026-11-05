@@ -214,12 +214,13 @@ test("(5) an empty vendorDir yields { graph: null, reason } and the CLI exits 0 
   const empty = tempDir(t);
   const r = await build(NODE_FIXTURE, { vendorDir: empty });
   assert.equal(r.graph, null);
-  assert.match(r.reason, /not found/);
+  assert.equal(r.reason, "vendored parser files missing");
+  assert.equal(/[\/]/.test(r.reason), false); // never the vendorDir path
   const cli = runCli(t, { projectDir: NODE_FIXTURE, scope_realpath: NODE_FIXTURE, stacks: ["node"], frameworks: ["express"], referencesDir: REFERENCES_DIR, vendorDir: empty });
   assert.equal(cli.status, 0, cli.stderr);
   const out = JSON.parse(cli.out);
   assert.equal(out.graph, null);
-  assert.match(out.reason, /not found/);
+  assert.equal(out.reason, "vendored parser files missing");
 });
 
 // ---- (6) mounts and auth --------------------------------------------------------------------------
@@ -320,6 +321,10 @@ test("(6) auth: a marker with an argument prefix (php ->middleware('auth) matche
     "Route::get('/b', fn () => 1)->middleware('auth.basic');",
     "Route::get('/c', fn () => 1)->middleware('throttle');",
     "Route::get('/d', fn () => 1);",
+    "Route::get('/e', fn () => 1)->middleware('auth');",
+    "Route::get('/f', fn () => 1)->middleware('author-logging');",
+    "Route::get('/g', fn () => 1)->middleware('author');",
+    "Route::get('/h', fn () => 1)->middleware('authorized_ip');",
     ""
   ].join("\n"));
   const { graph } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["php"], frameworks: ["laravel"], referencesDir: REFERENCES_DIR });
@@ -328,7 +333,12 @@ test("(6) auth: a marker with an argument prefix (php ->middleware('auth) matche
     "/a": ["authenticated", ["auth:api"]],
     "/b": ["authenticated", ["auth.basic"]],
     "/c": ["unknown", ["throttle"]],
-    "/d": ["unauthenticated", []]
+    "/d": ["unauthenticated", []],
+    // I7: the prefix must be followed by end of string, `:` or `.` — `author…` is not `auth`
+    "/e": ["authenticated", ["auth"]],
+    "/f": ["unknown", ["author-logging"]],
+    "/g": ["unknown", ["author"]],
+    "/h": ["unknown", ["authorized_ip"]]
   });
 });
 
@@ -551,4 +561,25 @@ test("(10) every test-fixtures/graph/<stack>/graph.expected.json equals the rebu
     if (update) writeFileSync(golden, text);
     else assert.equal(text, readFileSync(golden, "utf8"), `${stack} golden drifted (rebuild with OSWE_UPDATE_GOLDEN=1 and review)`);
   }
+});
+
+// ---- I6: no repo content in stats / reasons ---------------------------------------------------------
+
+test("I6: a mount text is reduced to an identifier-only label (no quotes, spaces or literals); a secret in a config never reaches stats", async (t) => {
+  const dir = tempDir(t);
+  const secret = "sk_live_51HxSECRETtoken";
+  put(dir, "package.json", `{ "name": "x", "k": ${secret} }`);
+  put(dir, "app.js", [
+    "app.use('/x', handlers['weird key; rm -rf /']);",
+    "app.use('/y', " + "a".repeat(80) + ");",
+    "app.get('/z', (req, res) => {});",
+    ""
+  ].join("\n"));
+  const { graph } = await build(dir);
+  const notes = graph.stats.coverage_matrix.node.not_extracted;
+  assert.deepEqual(notes, ["mount:" + "a".repeat(64), "mount:handlers.weirdkeyrmrf"]);
+  for (const n of notes) assert.match(n, /^mount:[A-Za-z0-9_.$]{0,64}(\((cycle|mounted twice)\))?$/);
+  assert.deepEqual(graph.stats.config_errors, [{ file: "package.json", message: "invalid JSON" }]);
+  assert.equal(JSON.stringify(graph).includes(secret), false);
+  assert.equal(JSON.stringify(graph).includes(dir), false);
 });
