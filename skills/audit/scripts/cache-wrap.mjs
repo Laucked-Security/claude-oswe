@@ -2,8 +2,8 @@
 // aggregate-findings, apply-verdicts, render-html) and reused (canonicalize + sha256Hex only)
 // by agent-response-cache. Zero runtime dependencies.
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, readdirSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 
 // Recursive-key-sort JSON stringify. Two semantically-equal objects produce byte-identical
 // strings; arrays preserve order (they are sequences, not sets). Used as preimage for sha256
@@ -24,6 +24,24 @@ export function sha256Hex(input) {
 // lookup contract and get recomputed.
 export function helperVersionDigest(helperFilePath) {
   return sha256Hex(readFileSync(helperFilePath));
+}
+
+// sha256 over a whole helper TREE (SP10 build-graph: graph/**/*.mjs, language modules included):
+// every file under dirAbs (recursive) whose name ends with `ext`, in sorted forward-slash
+// relative-path order, each contributing its relative path and the sha256 of its bytes. A byte
+// change or an added / removed / renamed module changes the digest; other extensions are ignored.
+export function dirVersionDigest(dirAbs, { ext = ".mjs" } = {}) {
+  const files = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) visit(abs);
+      else if (entry.isFile() && entry.name.endsWith(ext)) files.push({ rel: relative(dirAbs, abs).split(sep).join("/"), abs });
+    }
+  };
+  visit(dirAbs);
+  files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+  return sha256Hex(files.map(({ rel, abs }) => `${rel}:${sha256Hex(readFileSync(abs))}\n`).join(""));
 }
 
 export function cachePath(checkpointDir, helperName, inputDigest, versionDigest) {
