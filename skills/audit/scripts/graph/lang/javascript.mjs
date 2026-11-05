@@ -1,0 +1,724 @@
+// JavaScript / TypeScript / TSX language module for the SP10 application graph (spec §2.3).
+// extractFile walks one parsed tree (web-tree-sitter, see ../parser.mjs) and emits the per-file
+// Extract: functions, calls (+ the scope / receiver hints resolve.mjs needs, spec §1.4), imports,
+// exports, classes, Express + Nest routes, and surface-pattern sources / sinks. The three grammars
+// share one code path: the TypeScript node types are a superset of JavaScript's.
+//
+// The tree is walked once with a TreeCursor, dispatching on node type, instead of running
+// tree-sitter Query objects: in web-tree-sitter 0.25 `Language.query` is deprecated (it logs a
+// warning on every call); `new Query` would need the vendored loader imported here, so this module
+// would fail to load when the parser is unavailable (parser.mjs's parserAvailable contract); and the
+// handlers need each node's parent type and field, which a cursor walk carries for free (a capture
+// query plus a parent lookup per capture measured ~2x slower).
+//
+// PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
+import { posix } from "node:path";
+import { normalizeToken } from "../surface.mjs";
+import { sinkClassFor } from "../sink-classes.mjs";
+import { matchesPattern } from "../match.mjs";
+
+export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"] };
+
+// ---- node-type tables -----------------------------------------------------------------------------
+
+const FUNCTION_TYPES = ["function_declaration", "generator_function_declaration", "function_expression", "function", "generator_function", "arrow_function", "method_definition"];
+const DECLARATION_FUNCTIONS = new Set(["function_declaration", "generator_function_declaration"]);
+const CLASS_TYPES = ["class_declaration", "class", "abstract_class_declaration"];
+const DEFINITION_VALUES = new Set(["arrow_function", "function_expression", "function", "generator_function", "class"]);
+const EXPORTABLE_DECLARATIONS = new Set(["function_declaration", "generator_function_declaration", "class_declaration", "abstract_class_declaration"]);
+
+// A node in one of these (parent type, field) slots is part of a callee / member chain: the
+// enclosing chain node is the candidate, so the part never yields a source or sink on its own.
+const CHAIN_SLOTS = new Map([["member_expression", "object"], ["subscript_expression", "object"], ["call_expression", "function"], ["new_expression", "constructor"]]);
+// An identifier in one of these slots declares a name; it is not a reference.
+const BINDING_SLOTS = new Map([
+  ["variable_declarator", "name"], ["function_declaration", "name"], ["generator_function_declaration", "name"],
+  ["function_expression", "name"], ["function", "name"], ["generator_function", "name"], ["class_declaration", "name"],
+  ["class", "name"], ["arrow_function", "parameter"], ["assignment_pattern", "left"], ["pair_pattern", "value"],
+  ["catch_clause", "parameter"], ["required_parameter", "pattern"], ["optional_parameter", "pattern"], ["for_in_statement", "left"]
+]);
+const BINDING_PARENTS = new Set(["formal_parameters", "array_pattern", "rest_pattern", "import_specifier", "import_clause", "namespace_import", "export_specifier", "import_require_clause"]);
+
+const EXPRESS_VERBS = { get: "GET", post: "POST", put: "PUT", patch: "PATCH", delete: "DELETE", head: "HEAD", options: "OPTIONS", all: "ANY", use: "USE" };
+const NEST_VERBS = { Get: "GET", Post: "POST", Put: "PUT", Patch: "PATCH", Delete: "DELETE", Head: "HEAD", Options: "OPTIONS", All: "ANY" };
+const SOURCE_KINDS = { query: "query", body: "body", params: "params", param: "params", headers: "header", cookies: "cookie", files: "file", env: "env" };
+
+const lookup = (table, key) => (key != null && Object.hasOwn(table, key) ? table[key] : null);
+
+// ---- small AST helpers ----------------------------------------------------------------------------
+
+const field = (node, name) => node?.childForFieldName(name) ?? null;
+const namedOf = (node) => (node ? node.namedChildren.filter((c) => c.type !== "comment") : []);
+const childrenOfType = (node, type) => (node ? node.namedChildren.filter((c) => c.type === type) : []);
+const lineOf = (node) => node.startPosition.row + 1;
+const stringContent = (node) => node.text.slice(1, -1);
+const anonLabel = (node) => `<anon>@${node.startPosition.row + 1}:${node.startPosition.column + 1}`;
+
+// Callee / member text with call arguments dropped (`a.b(x).c` -> `a.b.c`) and a string subscript
+// read as a member (`h['x']` -> `h.x`); other subscripts collapse to their object.
+function render(node) {
+  switch (node.type) {
+    case "member_expression": {
+      const object = field(node, "object");
+      const property = field(node, "property");
+      return object && property ? `${render(object)}.${property.text}` : node.text;
+    }
+    case "call_expression": {
+      const fn = field(node, "function");
+      return fn ? render(fn) : node.text;
+    }
+    case "subscript_expression": {
+      const object = field(node, "object");
+      const index = field(node, "index");
+      if (!object) return node.text;
+      return index?.type === "string" ? `${render(object)}.${stringContent(index)}` : render(object);
+    }
+    case "parenthesized_expression":
+    case "non_null_expression": {
+      const inner = namedOf(node)[0];
+      return inner ? render(inner) : node.text;
+    }
+    default:
+      return node.text;
+  }
+}
+const textOf = (node) => normalizeToken(render(node));
+
+// Every name a binding pattern declares (`{ a, b: c, ...d }`, `[e = 1]`, TS `x: T`).
+function patternNames(node, out = []) {
+  if (!node) return out;
+  switch (node.type) {
+    case "identifier":
+    case "shorthand_property_identifier_pattern":
+      out.push(node.text);
+      break;
+    case "object_pattern":
+    case "array_pattern":
+      for (const child of node.namedChildren) patternNames(child, out);
+      break;
+    case "pair_pattern":
+      patternNames(field(node, "value"), out);
+      break;
+    case "assignment_pattern":
+    case "object_assignment_pattern":
+      patternNames(field(node, "left"), out);
+      break;
+    case "rest_pattern":
+      patternNames(node.namedChildren[0], out);
+      break;
+    case "required_parameter":
+    case "optional_parameter":
+      patternNames(field(node, "pattern"), out);
+      break;
+  }
+  return out;
+}
+
+const isRequireCall = (node) =>
+  node?.type === "call_expression" && field(node, "function")?.type === "identifier" && field(node, "function").text === "require" && namedOf(field(node, "arguments"))[0]?.type === "string";
+
+// ---- state ----------------------------------------------------------------------------------------
+
+const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map() });
+
+function newState(path, surface) {
+  return {
+    moduleName: path.split("/").at(-1).replace(/\.[^.]*$/, ""),
+    surface: { sources: surface?.sources ?? [], sinks: surface?.sinks ?? [] },
+    functions: [], calls: [], imports: [], exports: [], aliasExports: [], classes: [], routes: [], sources: [], sinks: [],
+    notExtracted: new Set(),
+    anonNames: new Map(), // function start index -> qualified name given by a route argument
+    requireImports: new Set(), // start index of require() calls already recorded by their declarator
+    topLevel: new Set(), // module-level function / class names
+    module: newFrame(null, null),
+    fnStack: [],
+    classStack: []
+  };
+}
+const currentFrame = (st) => st.fnStack.at(-1) ?? st.module;
+
+// ---- sources and sinks ----------------------------------------------------------------------------
+
+const firstMatch = (patterns, candidates) => patterns.find((p) => candidates.some((c) => matchesPattern(p, c))) ?? null;
+const sourceKind = (pattern) => lookup(SOURCE_KINDS, pattern.normalized.split(".").at(-1).toLowerCase()) ?? "body";
+
+// At most one source and one sink per AST node: the first matching pattern in surface order.
+function emitMatches(node, candidates, st, { sources = false, sinks = false }) {
+  const source = sources ? firstMatch(st.surface.sources, candidates) : null;
+  const sink = sinks ? firstMatch(st.surface.sinks, candidates) : null;
+  if (!source && !sink) return;
+  const at = { line: lineOf(node), start_byte: node.startIndex };
+  if (source) st.sources.push({ ...at, kind: sourceKind(source), pattern: source.raw });
+  if (sink) st.sinks.push({ ...at, class: sinkClassFor(sink.normalized, "node"), callee: candidates[0].text, pattern: sink.raw });
+}
+
+const inChain = (ctx) => CHAIN_SLOTS.get(ctx.parentType) === ctx.field || ctx.parentType === "decorator";
+const isBinding = (ctx) => BINDING_PARENTS.has(ctx.parentType) || BINDING_SLOTS.get(ctx.parentType) === ctx.field;
+
+// onMember / onIdentifier receive the TreeCursor rather than a Node: they are the most frequent node
+// types, and most occurrences are chain parts or bindings that are skipped without materialising one.
+function onMember(cursor, st, ctx) {
+  if (inChain(ctx)) return;
+  const node = cursor.currentNode;
+  emitMatches(node, [{ category: "member", text: textOf(node) }], st, { sources: true, sinks: true });
+}
+
+function onIdentifier(cursor, st, ctx) {
+  if (inChain(ctx) || isBinding(ctx)) return;
+  emitMatches(cursor, [{ category: "identifier", text: cursor.nodeText }], st, { sources: true, sinks: true });
+}
+
+function onNew(node, st) {
+  const ctor = field(node, "constructor");
+  if (!ctor) return;
+  const text = textOf(ctor);
+  // The surface spells constructor sinks `new Function`, which normalizes to `newFunction`.
+  emitMatches(node, [{ category: "new", text }, { category: "new", text: `new${text}` }], st, { sinks: true });
+}
+
+function onString(node, st, ctx) {
+  if (ctx.parentType === "pair" && ctx.field === "key") return; // a key, handled by onPair
+  emitMatches(node, [{ category: "literal", text: normalizeToken(stringContent(node)) }], st, { sinks: true });
+}
+
+function onPair(node, st) {
+  const key = field(node, "key");
+  const text = key?.type === "property_identifier" ? key.text : key?.type === "string" ? stringContent(key) : null;
+  if (text) emitMatches(key, [{ category: "key", text: normalizeToken(text) }], st, { sinks: true });
+}
+
+function decoratorInfo(decorator) {
+  const expr = namedOf(decorator)[0];
+  if (!expr) return { name: "", args: [] };
+  if (expr.type === "call_expression") return { name: textOf(field(expr, "function") ?? expr), args: namedOf(field(expr, "arguments")) };
+  return { name: textOf(expr), args: [] };
+}
+
+function onDecorator(node, st) {
+  const { name } = decoratorInfo(node);
+  if (name) emitMatches(node, [{ category: "decorator", text: name }], st, { sources: true });
+}
+
+// ---- scopes and functions -------------------------------------------------------------------------
+
+function addParameters(node, frame) {
+  const single = field(node, "parameter");
+  const params = single ? [single] : namedOf(field(node, "parameters"));
+  for (const param of params) {
+    for (const name of patternNames(param)) frame.bindings.add(name);
+    const pattern = field(param, "pattern");
+    const type = namedOf(field(param, "type"))[0];
+    if (pattern?.type === "identifier" && type?.type === "type_identifier") frame.classOf.set(pattern.text, type.text);
+  }
+}
+
+function functionName(node, ctx) {
+  const own = field(node, "name");
+  if (own) return own.text;
+  if (ctx.parentType === "variable_declarator" && ctx.field === "value") {
+    const declared = field(node.parent, "name");
+    if (declared?.type === "identifier") return declared.text;
+  }
+  return null;
+}
+
+function onFunction(node, st, ctx) {
+  const enclosing = st.fnStack.at(-1) ?? null;
+  const isMethod = node.type === "method_definition";
+  const cls = isMethod && ctx.parentType === "class_body" ? st.classStack.at(-1)?.name ?? null : null;
+  let name = functionName(node, ctx);
+  let qualifiedName;
+  if (st.anonNames.has(node.startIndex)) {
+    name = "<anon>";
+    qualifiedName = st.anonNames.get(node.startIndex);
+  } else if (!name) {
+    name = "<anon>";
+    qualifiedName = `${enclosing?.qualifiedName ?? st.moduleName}.${anonLabel(node)}`;
+  } else if (cls) {
+    qualifiedName = `${cls}.${name}`;
+  } else {
+    qualifiedName = enclosing ? `${enclosing.qualifiedName}.${name}` : name;
+  }
+  if (DECLARATION_FUNCTIONS.has(node.type) && name !== "<anon>") {
+    if (enclosing) enclosing.bindings.add(name);
+    else st.topLevel.add(name);
+  }
+  st.functions.push({
+    name,
+    qualified_name: qualifiedName,
+    line_start: lineOf(node),
+    line_end: node.endPosition.row + 1,
+    start_byte: node.startIndex,
+    end_byte: node.endIndex,
+    kind: isMethod ? "method" : node.type === "arrow_function" ? "arrow" : "function",
+    exported: false,
+    class: cls
+  });
+  const frame = newFrame(node.startIndex, qualifiedName);
+  addParameters(node, frame);
+  st.fnStack.push(frame);
+  return () => st.fnStack.pop();
+}
+
+function onDeclarator(node, st) {
+  const nameNode = field(node, "name");
+  const value = field(node, "value");
+  if (isRequireCall(value)) {
+    st.requireImports.add(value.startIndex);
+    st.imports.push(requireImport(nameNode, value));
+    return;
+  }
+  if (!st.fnStack.length && value && DEFINITION_VALUES.has(value.type)) {
+    if (nameNode?.type === "identifier") st.topLevel.add(nameNode.text); // a top-level definition, not a local
+    return;
+  }
+  const frame = currentFrame(st);
+  for (const name of patternNames(nameNode)) frame.bindings.add(name);
+  const ctor = value?.type === "new_expression" ? field(value, "constructor") : null;
+  if (nameNode?.type === "identifier" && ctor?.type === "identifier") frame.classOf.set(nameNode.text, ctor.text);
+}
+
+function onCatchOrForIn(node, st) {
+  const target = field(node, node.type === "catch_clause" ? "parameter" : "left");
+  const frame = currentFrame(st);
+  for (const name of patternNames(target)) frame.bindings.add(name);
+}
+
+// ---- classes and Nest routes ----------------------------------------------------------------------
+
+function classHeritage(node) {
+  const heritage = childrenOfType(node, "class_heritage")[0];
+  if (!heritage) return null;
+  const clause = childrenOfType(heritage, "extends_clause")[0]; // TypeScript wraps the target
+  const target = clause ? field(clause, "value") : namedOf(heritage)[0];
+  return target ? textOf(target) : null;
+}
+
+function onClass(node, st, ctx) {
+  let name = field(node, "name")?.text ?? null;
+  if (!name && ctx.parentType === "variable_declarator" && ctx.field === "value") {
+    const declared = field(node.parent, "name");
+    name = declared?.type === "identifier" ? declared.text : null;
+  }
+  const body = field(node, "body");
+  if (name) {
+    const methods = childrenOfType(body, "method_definition").map((m) => field(m, "name")?.text).filter(Boolean);
+    st.classes.push({ name, extends: classHeritage(node), methods, start_byte: node.startIndex });
+    if (!st.fnStack.length) st.topLevel.add(name);
+    nestRoutes(node, name, body, st);
+  }
+  st.classStack.push({ name });
+  return () => st.classStack.pop();
+}
+
+// Class decorators sit on the class, or on the wrapping `export` statement.
+function classDecorators(node) {
+  const outer = node.parent?.type === "export_statement" ? childrenOfType(node.parent, "decorator") : [];
+  return [...outer, ...childrenOfType(node, "decorator")];
+}
+
+function joinRoutePath(prefix, path) {
+  const joined = `/${prefix}/${path}`.replace(/\/{2,}/g, "/");
+  return joined.length > 1 ? joined.replace(/\/$/, "") : joined;
+}
+
+function nestPath(arg, st) {
+  if (!arg) return "";
+  if (arg.type === "string") return stringContent(arg);
+  const pathPair = childrenOfType(arg, "pair").find((p) => field(p, "key")?.text === "path" && field(p, "value")?.type === "string");
+  if (arg.type === "object" && pathPair) return stringContent(field(pathPair, "value"));
+  st.notExtracted.add("nest route(non-literal path)");
+  return "";
+}
+
+const guardTexts = (infos, st) => infos.filter((i) => i.name === "UseGuards").flatMap((i) => i.args.flatMap((a) => argTexts(a, st)));
+
+function nestRoutes(classNode, className, body, st) {
+  const classInfos = classDecorators(classNode).map(decoratorInfo);
+  const controller = classInfos.find((i) => i.name === "Controller");
+  if (!controller || !body) return;
+  const prefix = nestPath(controller.args[0], st);
+  const classGuards = guardTexts(classInfos, st);
+  let pending = []; // TypeScript puts method decorators before the method, as class_body children
+  for (const child of body.namedChildren) {
+    if (child.type === "decorator") pending.push(child);
+    else if (child.type === "method_definition") {
+      const decorators = [...pending, ...childrenOfType(child, "decorator")];
+      const infos = decorators.map(decoratorInfo);
+      const middleware = [...classGuards, ...guardTexts(infos, st)];
+      infos.forEach((info, i) => {
+        const verb = lookup(NEST_VERBS, info.name);
+        if (!verb) return;
+        st.routes.push({
+          line: lineOf(decorators[i]),
+          start_byte: decorators[i].startIndex,
+          http_method: verb,
+          path_pattern: joinRoutePath(prefix, nestPath(info.args[0], st)),
+          handler_text: `${className}.${field(child, "name")?.text}`,
+          middleware_texts: middleware,
+          framework: "nest"
+        });
+      });
+      pending = [];
+    } else if (child.type !== "comment") pending = [];
+  }
+}
+
+// ---- calls and Express routes ---------------------------------------------------------------------
+
+// Route / guard argument -> the names it contributes. An inline anonymous function is named
+// `<anon>@<line>:<col>`, which also becomes that function's qualified_name.
+function argTexts(node, st) {
+  switch (node.type) {
+    case "identifier":
+    case "member_expression":
+    case "subscript_expression":
+      return [textOf(node)];
+    case "call_expression":
+      return [textOf(field(node, "function") ?? node)];
+    case "new_expression":
+      return [textOf(field(node, "constructor") ?? node)];
+    case "arrow_function":
+    case "function_expression":
+    case "function": {
+      const own = field(node, "name");
+      if (own) return [own.text];
+      const label = anonLabel(node);
+      st.anonNames.set(node.startIndex, label);
+      return [label];
+    }
+    case "array":
+      return namedOf(node).flatMap((el) => argTexts(el, st));
+    default:
+      return [];
+  }
+}
+
+function expressRoute(call, fn, args, st) {
+  const verb = lookup(EXPRESS_VERBS, field(fn, "property")?.text);
+  if (!verb) return;
+  const object = field(fn, "object");
+  if (object?.type === "call_expression" && field(field(object, "function"), "property")?.text === "route") {
+    st.notExtracted.add("router.route().chain");
+    return;
+  }
+  let path = null;
+  let rest = args;
+  if (args[0]?.type === "string") [path, rest] = [stringContent(args[0]), args.slice(1)];
+  else if (args[0]?.type === "regex") {
+    st.notExtracted.add(verb === "USE" ? "app.use(regex)" : "route(regex)");
+    return;
+  }
+  if (verb === "USE") path ??= "/";
+  else if (path === null || !path.startsWith("/")) return;
+  if (rest.length === 0) return;
+  const last = argTexts(rest.at(-1), st); // a handler must be function-ish (not an options object)
+  if (last.length === 0) return;
+  st.routes.push({
+    line: lineOf(call),
+    start_byte: call.startIndex,
+    http_method: verb,
+    path_pattern: path,
+    handler_text: last.at(-1),
+    middleware_texts: [...rest.slice(0, -1).flatMap((a) => argTexts(a, st)), ...last.slice(0, -1)],
+    framework: "express"
+  });
+}
+
+function receiverOf(fn) {
+  if (fn.type !== "member_expression") return { receiver: null, name: null };
+  let root = field(fn, "object");
+  const name = root?.type === "identifier" ? root.text : null;
+  while (root?.type === "member_expression") root = field(root, "object");
+  return { receiver: root?.type === "this" ? "this" : null, name };
+}
+
+function onCall(node, st, ctx) {
+  if (ctx.parentType === "decorator") return; // decorator metadata, modelled by routes / sources
+  const fn = field(node, "function");
+  if (!fn) return;
+  const argsNode = field(node, "arguments");
+  const args = argsNode?.type === "arguments" ? namedOf(argsNode) : [];
+  if (fn.type === "import") {
+    if (args[0]?.type === "string") st.imports.push({ line: lineOf(node), specifier: stringContent(args[0]), bindings: [], local: null });
+    else st.notExtracted.add("dynamic import");
+    return;
+  }
+  const calleeText = textOf(fn);
+  if (calleeText === "require" && !st.requireImports.has(node.startIndex)) {
+    if (args[0]?.type === "string") st.imports.push({ line: lineOf(node), specifier: stringContent(args[0]), bindings: [], local: null });
+    else st.notExtracted.add("dynamic require");
+  }
+  const { receiver, name } = receiverOf(fn);
+  st.calls.push({ node, calleeText, receiver, receiverName: name, frames: [...st.fnStack] });
+  emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: true });
+  if (fn.type === "member_expression") expressRoute(node, fn, args, st);
+}
+
+// ---- imports and exports --------------------------------------------------------------------------
+
+function requireImport(nameNode, call) {
+  const entry = { line: lineOf(call), specifier: stringContent(namedOf(field(call, "arguments"))[0]), bindings: [], local: null };
+  if (nameNode?.type === "identifier") return { ...entry, bindings: "namespace", local: nameNode.text };
+  if (nameNode?.type !== "object_pattern") return entry;
+  for (const part of namedOf(nameNode)) {
+    if (part.type === "shorthand_property_identifier_pattern") entry.bindings.push({ imported: part.text, local: part.text });
+    else if (part.type === "object_assignment_pattern" && field(part, "left")) entry.bindings.push({ imported: field(part, "left").text, local: field(part, "left").text });
+    else if (part.type === "pair_pattern" && field(part, "value")?.type === "identifier") {
+      const key = field(part, "key");
+      entry.bindings.push({ imported: key.type === "string" ? stringContent(key) : key.text, local: field(part, "value").text });
+    }
+  }
+  return entry;
+}
+
+function onImport(node, st) {
+  const line = lineOf(node);
+  const source = field(node, "source");
+  if (!source) {
+    const clause = childrenOfType(node, "import_require_clause")[0]; // TS `import x = require('y')`
+    const id = childrenOfType(clause, "identifier")[0];
+    const spec = field(clause, "source");
+    if (id && spec) st.imports.push({ line, specifier: stringContent(spec), bindings: "namespace", local: id.text });
+    return;
+  }
+  const specifier = stringContent(source);
+  const clause = childrenOfType(node, "import_clause")[0];
+  if (!clause) {
+    st.imports.push({ line, specifier, bindings: [], local: null });
+    return;
+  }
+  for (const part of namedOf(clause)) {
+    if (part.type === "identifier") st.imports.push({ line, specifier, bindings: "default", local: part.text });
+    else if (part.type === "namespace_import") {
+      const id = childrenOfType(part, "identifier")[0];
+      if (id) st.imports.push({ line, specifier, bindings: "namespace", local: id.text });
+    } else if (part.type === "named_imports") {
+      const bindings = childrenOfType(part, "import_specifier").map((s) => {
+        const imported = field(s, "name")?.text;
+        return { imported, local: field(s, "alias")?.text ?? imported };
+      });
+      st.imports.push({ line, specifier, bindings, local: null });
+    }
+  }
+}
+
+const exportName = (node) => (node.type === "string" ? stringContent(node) : node.text);
+
+function onExport(node, st) {
+  const declaration = field(node, "declaration");
+  const source = field(node, "source");
+  const clause = childrenOfType(node, "export_clause")[0];
+  if (source) st.imports.push({ line: lineOf(node), specifier: stringContent(source), bindings: [], local: null });
+  if (node.children.some((c) => c.type === "default")) {
+    st.exports.push({ name: "default", start_byte: node.startIndex });
+    const target = declaration ?? field(node, "value");
+    const alias = target?.type === "identifier" ? target.text : EXPORTABLE_DECLARATIONS.has(target?.type) ? field(target, "name")?.text : null;
+    if (alias) st.aliasExports.push({ name: alias, start_byte: node.startIndex });
+    return;
+  }
+  if (declaration?.type === "lexical_declaration" || declaration?.type === "variable_declaration") {
+    for (const declarator of childrenOfType(declaration, "variable_declarator")) {
+      for (const name of patternNames(field(declarator, "name"))) st.exports.push({ name, start_byte: declarator.startIndex });
+    }
+  } else if (EXPORTABLE_DECLARATIONS.has(declaration?.type) && field(declaration, "name")) {
+    st.exports.push({ name: field(declaration, "name").text, start_byte: declaration.startIndex });
+  }
+  for (const spec of childrenOfType(clause, "export_specifier")) {
+    const named = field(spec, "alias") ?? field(spec, "name");
+    if (named) st.exports.push({ name: exportName(named), start_byte: spec.startIndex });
+  }
+  if (source && !clause) st.notExtracted.add("export * from");
+}
+
+function moduleExportsObject(object, st) {
+  for (const member of namedOf(object)) {
+    let key = null;
+    if (member.type === "shorthand_property_identifier") key = member;
+    else if (member.type === "pair") key = field(member, "key");
+    else if (member.type === "method_definition") key = field(member, "name");
+    if (key && key.type !== "computed_property_name") st.exports.push({ name: exportName(key), start_byte: member.startIndex });
+  }
+}
+
+function onAssignment(node, st) {
+  const left = field(node, "left");
+  const right = field(node, "right");
+  if (left?.type !== "member_expression" || !right) return;
+  const target = textOf(left);
+  if (target === "module.exports") {
+    if (right.type === "object") return moduleExportsObject(right, st);
+    st.exports.push({ name: "default", start_byte: node.startIndex });
+    if (right.type === "identifier") st.aliasExports.push({ name: right.text, start_byte: node.startIndex });
+    return;
+  }
+  const named = /^(?:module\.)?exports\.([^.]+)$/.exec(target);
+  if (named) st.exports.push({ name: named[1], start_byte: node.startIndex });
+}
+
+// ---- walk -----------------------------------------------------------------------------------------
+
+const HANDLERS = new Map([
+  ...FUNCTION_TYPES.map((t) => [t, onFunction]),
+  ...CLASS_TYPES.map((t) => [t, onClass]),
+  ["variable_declarator", onDeclarator],
+  ["catch_clause", onCatchOrForIn],
+  ["for_in_statement", onCatchOrForIn],
+  ["call_expression", onCall],
+  ["new_expression", onNew],
+  ["string", onString],
+  ["pair", onPair],
+  ["decorator", onDecorator],
+  ["import_statement", onImport],
+  ["export_statement", onExport],
+  ["assignment_expression", onAssignment]
+]);
+const CURSOR_HANDLERS = new Map([
+  ["member_expression", onMember],
+  ["subscript_expression", onMember],
+  ["identifier", onIdentifier],
+  ["shorthand_property_identifier", onIdentifier]
+]);
+
+// Pre-order walk. A handler may return an exit callback, run when the walk leaves that node.
+function walk(tree, st) {
+  const cursor = tree.walk();
+  const types = [];
+  const exits = [];
+  let depth = 0;
+  try {
+    for (;;) {
+      const type = (types[depth] = cursor.nodeType);
+      const handler = HANDLERS.get(type);
+      const cursorHandler = handler ? undefined : CURSOR_HANDLERS.get(type);
+      if ((handler || cursorHandler) && cursor.nodeIsNamed) {
+        const ctx = { parentType: depth > 0 ? types[depth - 1] : null, field: cursor.currentFieldName };
+        const exit = handler ? handler(cursor.currentNode, st, ctx) : cursorHandler(cursor, st, ctx);
+        if (exit) exits.push({ depth, exit });
+      }
+      if (cursor.gotoFirstChild()) {
+        depth++;
+        continue;
+      }
+      for (;;) {
+        while (exits.length && exits.at(-1).depth >= depth) exits.pop().exit();
+        if (cursor.gotoNextSibling()) break;
+        if (!cursor.gotoParent()) return;
+        depth--;
+      }
+    }
+  } finally {
+    cursor.delete();
+  }
+}
+
+// ---- finish ---------------------------------------------------------------------------------------
+
+// The class a receiver name is demonstrably bound to: the innermost scope declaring the name wins
+// (a plain parameter or local shadows an outer `new C()` binding).
+function receiverClass(name, frames, moduleFrame) {
+  for (const frame of [...frames].reverse()) {
+    if (frame.classOf.has(name)) return frame.classOf.get(name);
+    if (frame.bindings.has(name)) return null;
+  }
+  return moduleFrame.classOf.get(name) ?? null;
+}
+
+function finishCall({ node, calleeText, receiver, receiverName, frames }, st) {
+  const names = new Set(st.module.bindings);
+  for (const frame of frames) for (const name of frame.bindings) names.add(name);
+  return {
+    line: lineOf(node),
+    start_byte: node.startIndex,
+    callee_text: calleeText,
+    enclosing_start_byte: frames.at(-1)?.startIndex ?? null,
+    receiver,
+    receiver_class: receiverName ? receiverClass(receiverName, frames, st.module) : null,
+    scope_names: [...names].sort()
+  };
+}
+
+const byStart = (a, b) => a.start_byte - b.start_byte;
+
+function finish(st) {
+  for (const alias of st.aliasExports) if (st.topLevel.has(alias.name)) st.exports.push(alias);
+  const exported = new Set(st.exports.map((e) => e.name));
+  for (const fn of st.functions) {
+    // a method is exported with its class; a function only when top-level (qualified_name === name)
+    fn.exported = fn.class ? exported.has(fn.class) : fn.qualified_name === fn.name && exported.has(fn.name);
+  }
+  return {
+    functions: st.functions.sort(byStart),
+    calls: st.calls.map((c) => finishCall(c, st)).sort(byStart),
+    imports: st.imports,
+    exports: st.exports.sort(byStart),
+    classes: st.classes.sort(byStart),
+    namespace: null,
+    routes: st.routes.sort(byStart),
+    sources: st.sources.sort(byStart),
+    sinks: st.sinks.sort(byStart),
+    not_extracted: [...st.notExtracted].sort()
+  };
+}
+
+export function extractFile({ tree, path, surface }) {
+  const st = newState(path, surface);
+  walk(tree, st);
+  return finish(st);
+}
+
+// ---- import resolution ----------------------------------------------------------------------------
+
+const PROBE_EXTENSIONS = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts"];
+
+// Repo-relative normal form; null when the path escapes the repository root.
+function repoPath(path) {
+  const normal = posix.normalize(path);
+  if (normal === ".." || normal.startsWith("../") || posix.isAbsolute(normal)) return null;
+  return normal === "." ? "" : normal;
+}
+
+function probe(base, filePaths) {
+  if (base === null) return null;
+  const candidates = [
+    ...(base ? [base, ...PROBE_EXTENSIONS.map((ext) => base + ext)] : []),
+    ...PROBE_EXTENSIONS.map((ext) => posix.join(base, `index${ext}`))
+  ];
+  return candidates.find((c) => filePaths.has(c)) ?? null;
+}
+
+// tsconfig `paths` targets for a specifier: an exact key, else keys with one trailing `*`, longest
+// prefix first.
+function pathTargets(specifier, paths) {
+  if (!paths || typeof paths !== "object") return [];
+  const entries = Object.entries(paths).filter(([, targets]) => Array.isArray(targets));
+  const exact = entries.find(([key]) => key === specifier);
+  if (exact) return exact[1].filter((t) => typeof t === "string");
+  const wildcard = entries
+    .filter(([key]) => key.indexOf("*") === key.length - 1 && specifier.startsWith(key.slice(0, -1)))
+    .sort(([a], [b]) => b.length - a.length)[0];
+  if (!wildcard) return [];
+  const rest = specifier.slice(wildcard[0].length - 1);
+  return wildcard[1].filter((t) => typeof t === "string").map((t) => t.replace("*", rest));
+}
+
+// `namespaces` is part of the shared contract (Java / PHP / C#); JavaScript ignores it.
+export function resolveImportSpecifier({ specifier, fromPath, filePaths, configs }) {
+  if (typeof specifier !== "string" || specifier === "") return null;
+  if (specifier === "." || specifier === ".." || specifier.startsWith("./") || specifier.startsWith("../")) {
+    const hit = probe(repoPath(posix.join(posix.dirname(fromPath), specifier)), filePaths);
+    return hit ? { path: hit, confidence: "exact" } : null;
+  }
+  const options = configs?.tsconfig?.compilerOptions;
+  if (!options) return null;
+  const baseUrl = typeof options.baseUrl === "string" ? options.baseUrl : ".";
+  for (const target of pathTargets(specifier, options.paths)) {
+    const hit = probe(repoPath(posix.join(baseUrl, target)), filePaths);
+    if (hit) return { path: hit, confidence: "exact" };
+  }
+  if (typeof options.baseUrl === "string") {
+    const hit = probe(repoPath(posix.join(baseUrl, specifier)), filePaths);
+    if (hit) return { path: hit, confidence: "heuristic" };
+  }
+  return null;
+}
