@@ -282,6 +282,21 @@ test("(6) a global app.use(fn) guards only later routes under its path; an unres
   assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["mount:express.static"]);
 });
 
+test("(6) auth: a Nest @UseGuards guard is authenticated; an unguarded controller is unauthenticated", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "c.controller.ts", "@Controller('/a')\n@UseGuards(AuthGuard)\nclass C {\n  @Get('/b')\n  m() {}\n}\n");
+  put(dir, "d.controller.ts", "@Controller('/d')\nclass D {\n  @Get('/e')\n  m() {}\n}\n");
+  const { graph } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["node"], frameworks: ["nest"], referencesDir: REFERENCES_DIR });
+  const routes = Object.fromEntries(nodesOf(graph, "route").map((r) => [`${r.http_method} ${r.path_pattern}`, r]));
+  assert.deepEqual(Object.keys(routes).sort(), ["GET /a/b", "GET /d/e"]);
+  assert.equal(routes["GET /a/b"].auth, "authenticated");
+  assert.deepEqual(routes["GET /a/b"].middlewares, ["UseGuards.AuthGuard"]);
+  assert.equal(routes["GET /a/b"].handler, fnNamed(graph, "c.controller.ts", "C.m").id);
+  assert.equal(routes["GET /a/b"].framework, "nest");
+  assert.equal(routes["GET /d/e"].auth, "unauthenticated");
+  assert.deepEqual(routes["GET /d/e"].middlewares, []);
+});
+
 // ---- (7) cache ------------------------------------------------------------------------------------
 
 test("(7) cache: a second CLI run hits; editing the reference page or tsconfig.json misses", async (t) => {

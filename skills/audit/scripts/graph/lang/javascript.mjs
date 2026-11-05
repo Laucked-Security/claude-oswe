@@ -377,7 +377,10 @@ function nestPath(arg, st) {
   return "";
 }
 
-const guardTexts = (infos, st) => infos.filter((i) => i.name === "UseGuards").flatMap((i) => i.args.flatMap((a) => argTexts(a, st)));
+// Each guard is emitted as `UseGuards.<Guard>`: the surface auth marker `@UseGuards` (a decorator
+// pattern, matched on the first segment) then decides auth, and the guard name stays readable.
+const guardTexts = (infos, st) =>
+  infos.filter((i) => i.name === "UseGuards").flatMap((i) => i.args.flatMap((a) => argTexts(a, st)).map((g) => `UseGuards.${g}`));
 
 function nestRoutes(classNode, className, body, st) {
   const classInfos = classDecorators(classNode).map(decoratorInfo);

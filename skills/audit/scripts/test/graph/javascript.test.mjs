@@ -98,8 +98,8 @@ test("@Controller('/a') + @Get('/b') yields route GET /a/b with class and method
   assert.deepEqual(
     x.routes.map(({ http_method, path_pattern, handler_text, middleware_texts, framework }) => ({ http_method, path_pattern, handler_text, middleware_texts, framework })),
     [
-      { http_method: "GET", path_pattern: "/a/b", handler_text: "A.m", middleware_texts: ["AuthGuard"], framework: "nest" },
-      { http_method: "POST", path_pattern: "/a/:id", handler_text: "A.n", middleware_texts: ["AuthGuard", "RolesGuard", "OwnerGuard"], framework: "nest" }
+      { http_method: "GET", path_pattern: "/a/b", handler_text: "A.m", middleware_texts: ["UseGuards.AuthGuard"], framework: "nest" },
+      { http_method: "POST", path_pattern: "/a/:id", handler_text: "A.n", middleware_texts: ["UseGuards.AuthGuard", "UseGuards.RolesGuard", "UseGuards.OwnerGuard"], framework: "nest" }
     ]
   );
   assert.deepEqual(x.sources.map((s) => [s.kind, s.pattern]), [["params", "@Param("], ["body", "@Body("]]);
