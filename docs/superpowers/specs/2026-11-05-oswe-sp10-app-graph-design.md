@@ -352,8 +352,9 @@ other uncertainty is `"n/a"`.
 `kind: "call-path" | "shared-state" | "auth-gain"` plus optional anchors `from_anchor` / `to_anchor`
 (`fileline`). The orchestrator sets `kind` when it builds the chain (§4); legacy chains without `kind`
 are treated as `"n/a"` (backward compatible, no re-validation of old reports). Only `call-path`
-transitions are checked, with the same table applied between `to_anchor` of the source finding and
-`from_anchor` of the target. `shared-state` and `auth-gain` (mass-assignment → admin route) are
+transitions are checked, with the same table applied between the transition's `from_anchor` and
+`to_anchor` when both are present, otherwise between the `from` finding's sink and the `to` finding's
+source. `shared-state` and `auth-gain` (mass-assignment → admin route) are
 `"n/a"` and remain the verifier's call. The helper does not pretend to prove what it cannot.
 
 **Authoritative channel.** The result is **not** injected as a verifier counterexample — the verifier
