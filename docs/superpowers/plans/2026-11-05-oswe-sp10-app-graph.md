@@ -391,7 +391,7 @@ test("parserAvailable reports ok:false with a reason on a missing vendor dir, ne
 - Test: extend `test/aggregate-findings.test.mjs`, `test/write-report.test.mjs`, `test/validate-output.test.mjs`
 
 **Interfaces:**
-- Produces: merged findings carry `candidate_path_ids` (sorted unique union of members' `candidate_path_id`) **only when at least one member had one** (absent otherwise, so existing golden outputs are unchanged); `buildReport({ …, app_graph })` includes `app_graph` when passed.
+- Produces: merged findings carry `candidate_path_ids` (sorted unique union of members' `candidate_path_id`) **only when at least one member had one** (absent otherwise, so existing golden outputs are unchanged); `buildReport({ …, app_graph })` includes `app_graph` when passed and computes `app_graph.multi_file_chain_count` itself (accepted chains whose member findings span ≥ 2 files — the same definition as `benchmark/score-nodegoat.mjs`), never trusting a supplied value; `graph.schema.json`'s `coverage_matrix` keys are restricted to the five stack ids (ruled in the Task 2 review).
 
 - [ ] **Step 1: Write failing tests** — two raw findings with the same dedupe key, one carrying `candidate_path_id: "CP-p-1"`, the other `"CP-p-2"` ⇒ merged `candidate_path_ids: ["CP-p-1","CP-p-2"]`; no member with one ⇒ key absent; existing aggregate test fixtures still byte-identical; `validate("final-finding", {...structural_path: "proven"})` ok; `validate("report", { …, app_graph: { available: false, reason: "x", multi_file_chain_count: 0 } })` ok; `buildReport` round-trips `app_graph`.
 - [ ] **Step 2: Run** — expected: schema rejects unknown properties.
