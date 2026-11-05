@@ -80,8 +80,20 @@
                 "verdict": { "enum": ["accepted", "downgraded", "rejected"] }
               }
             }
-          }
+          },
+          "verification_notes": { "type": "array", "items": { "type": "string", "minLength": 1 } }
         }
+      }
+    },
+    "app_graph": {
+      "$comment": "SP10, optional. Same shape as report.schema.json's app_graph (copy report.app_graph verbatim): available:false carries the reason the graph could not be built; stats is graph.schema.json's stats object (counts and closed-set labels); multi_file_chain_count as computed by write-report.mjs.",
+      "type": "object", "additionalProperties": false,
+      "required": ["available", "multi_file_chain_count"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "stats": { "$ref": "graph.schema.json#/properties/stats" },
+        "multi_file_chain_count": { "type": "integer", "minimum": 0 }
       }
     }
   }

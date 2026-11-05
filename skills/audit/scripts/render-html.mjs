@@ -2,6 +2,11 @@
 // redaction-safe Markdown report (--md) plus a non-sensitive summary JSON (--summary), to --out.
 // Body = MD->HTML over a FIXED construct set; charts (added later) = inline SVG from the summary.
 // All MD- and summary-derived text is HTML-escaped; the document carries a strict CSP and no script.
+// SP10 (all optional, absent => byte-identical output to before): summary.app_graph (report.schema.json's
+// app_graph shape) renders an "App graph" section after the Exploit chains; summary.chains[].verification_notes
+// renders a "Notes:" line under the chain id. Per-finding "Structural:" / "Notes:" lines live in the Markdown
+// body (SKILL.md Report format) and pass through mdToHtml. app_graph is part of the summary, so it is covered by
+// the cache input digest sha256(md || NUL || canonical(summary)).
 
 // ---------- escaping ----------
 export function escapeHtml(s) {
@@ -162,6 +167,12 @@ export function statusBar(counts) {
   return `<svg viewBox="0 0 ${W} 52" role="img" aria-label="Finding statuses" class="chart bar">${rects}${legend}</svg>`;
 }
 
+// SP10: a chain's verification_notes as one "Notes: a; b" line; "" when there are none (chain unchanged).
+function notesLine(notes) {
+  if (!Array.isArray(notes) || notes.length === 0) return "";
+  return `<p class="muted">Notes: ${notes.map(escapeHtml).join("; ")}</p>`;
+}
+
 export function chainDiagram(chains) {
   if (!chains || chains.length === 0) return `<p class="muted">No exploit chains.</p>`;
   const svgs = [];
@@ -188,9 +199,71 @@ export function chainDiagram(chains) {
          + `<text x="${xOf(idx) + boxW / 2}" y="${y + boxH / 2 + 5}" text-anchor="middle" class="node-label">${escapeHtml(label)}</text>`;
     });
     svgs.push(`<div class="chain"><div class="chain-id">${escapeHtml(ch.id)} — ${escapeHtml(ch.severity)}</div>`
+      + notesLine(ch.verification_notes)
       + `<svg viewBox="0 0 ${width} 76" role="img" aria-label="Exploit chain ${escapeHtml(ch.id)}" class="chart">${g}</svg></div>`);
   }
   return svgs.join("\n");
+}
+
+// ---------- SP10: App graph section (inline HTML, computed from summary.app_graph) ----------
+const DASH = "—";
+
+// Every interpolated value goes through escapeHtml (reason, stack keys, list entries, counts alike).
+const listCell = (xs) => (Array.isArray(xs) && xs.length > 0 ? xs.map(escapeHtml).join(", ") : DASH);
+
+// calls_exact / calls_total as a 2-decimal ratio plus the raw counts; an em dash when there are no calls.
+function callResolution(st) {
+  if (!st.calls_total) return DASH;
+  return `${escapeHtml((st.calls_exact / st.calls_total).toFixed(2))} (${escapeHtml(st.calls_exact)} exact / ${escapeHtml(st.calls_total)} total; `
+    + `${escapeHtml(st.calls_name_only)} name-only; ${escapeHtml(st.calls_unresolved)} unresolved)`;
+}
+
+function appGraphStatsRows(st, multiFileChains) {
+  const rows = [];
+  if (st) {
+    const r = st.routes_by_auth;
+    rows.push(
+      ["Files parsed / errors / skipped", `${escapeHtml(st.files_parsed)} / ${escapeHtml(st.files_error)} / ${escapeHtml(st.files_skipped)} of ${escapeHtml(st.files_total)}`],
+      ["Functions", escapeHtml(st.functions)],
+      ["Routes by auth", `${escapeHtml(r.unauthenticated)} unauthenticated / ${escapeHtml(r.authenticated)} authenticated / ${escapeHtml(r.unknown)} unknown`],
+      ["Call resolution", callResolution(st)]
+    );
+  }
+  rows.push(["Multi-file chains", escapeHtml(multiFileChains)]);
+  return rows;
+}
+
+function appGraphCoverageTable(matrix) {
+  const stacks = Object.keys(matrix || {}).sort();
+  if (stacks.length === 0) return "";
+  let t = "<h3>Per-stack coverage</h3><table><thead><tr><th>Stack</th><th>Frameworks detected</th><th>Extractors applied</th><th>Not extracted</th></tr></thead><tbody>";
+  for (const k of stacks) {
+    const c = matrix[k] || {};
+    t += `<tr><td>${escapeHtml(k)}</td><td>${listCell(c.frameworks_detected)}</td><td>${listCell(c.extractors_applied)}</td><td>${listCell(c.not_extracted)}</td></tr>`;
+  }
+  return t + "</tbody></table>";
+}
+
+function configErrorsList(errors) {
+  if (!Array.isArray(errors) || errors.length === 0) return "";
+  return "<h3>Config errors</h3><ul>"
+    + errors.map((x) => `<li>${escapeHtml(x.file)}: ${escapeHtml(x.message)}</li>`).join("")
+    + "</ul>";
+}
+
+// "" when the summary carries no app_graph, so a report without one renders byte-identically to before SP10.
+export function appGraphSection(ag) {
+  if (ag === undefined || ag === null) return "";
+  const open = `<section class="app-graph-section"><h2>App graph</h2><div class="card">`;
+  const close = `</div></section>`;
+  if (ag.available === false) {
+    return `${open}<p>App graph unavailable: ${escapeHtml(ag.reason ?? "unknown")}</p>${close}`;
+  }
+  const st = ag.stats;
+  const table = "<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>"
+    + appGraphStatsRows(st, ag.multi_file_chain_count).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")
+    + "</tbody></table>";
+  return open + table + (st ? appGraphCoverageTable(st.coverage_matrix) + configErrorsList(st.config_errors) : "") + close;
 }
 
 // ---------- document assembly ----------
@@ -353,7 +426,7 @@ export function renderReport({ md, summary }) {
 <body>
 ${head}
 <main>
-${charts}
+${charts}${appGraphSection(summary.app_graph)}
 ${body}
 </main>
 ${foot}
