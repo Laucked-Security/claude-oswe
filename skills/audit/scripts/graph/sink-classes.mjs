@@ -17,14 +17,14 @@ export const SINK_CLASS_RULES = Object.freeze([
   {
     class: "eval",
     test: (lower, stack) =>
-      /(^eval$|newfunction|runinnewcontext|mvel|parseexpression|getvalue)/.test(lower) ||
+      /(^eval$|newfunction|runinnewcontext|mvel|parseexpression|getvalue|preg_replace)/.test(lower) ||
       (stack === "python" && /^exec$/.test(lower))
   },
   { class: "deser", test: matches(/(unserialize|objectinputstream|readobject|xmldecoder|xstream|jsontypeinfo|yaml\.load|pickle|marshal|binaryformatter|netdatacontract|losformatter|objectstateformatter|typenamehandling|javascriptserializer)/) },
   { class: "nosql", test: matches(/^\$/) },
   { class: "template", test: matches(/(render_template_string|^template$|lodash\.template)/) },
   { class: "sql", test: matches(/(query|mysqli|db\.raw|db\.select|whereraw|statement\.execute|cursor\.execute|^raw$|^extra$|rawsql|sqlcommand|executereader|executenonquery|fromsqlraw|executesqlraw|sequelize)/) },
-  { class: "include", test: matches(/(include|^require$)/) },
+  { class: "include", test: matches(/(include|^require(_once)?$)/) },
   { class: "file-write", test: matches(/(move_uploaded_file|file_put_contents|writefile)/) },
   { class: "file-read", test: matches(/(send_file|send_from_directory|sendfile|readfile|path\.combine)/) },
   { class: "ssrf", test: matches(/(axios|fetch|http\.request|^got$|requests\.)/) },
