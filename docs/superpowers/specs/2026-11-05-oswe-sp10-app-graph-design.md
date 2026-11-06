@@ -91,6 +91,7 @@ text**: identifiers and line numbers only, so it carries no secrets and needs no
 | `calls` | function → function or `null` | `line`, `callee_text`, `confidence: "exact" \| "name-only" \| "unresolved"` |
 | `handles` | route → function | — |
 | `uses_middleware` | route → function | `order` |
+| `nests` | function → function (its innermost lexical container, by byte range, to a function nested in it: a callback, a closure, a local helper) | — (a closure runs only within its enclosing function, so every consumer follows `nests` like an `exact` call; callback-style code keeps most of its calls inside closures) |
 
 ### 1.3 Determinism and identity
 
@@ -133,7 +134,17 @@ enclosing lexical scopes (parameters, locals, closure variables) so the resolver
 
 1. callee is a **top-level or class-member definition in the same file** and the name is **not
    shadowed** by a parameter/local/closure binding in any enclosing scope of the call site → `exact`.
-   Shadowed → `unresolved` (the callee is a runtime value the graph cannot see).
+   Shadowed → `unresolved` (the callee is a runtime value the graph cannot see). A **definition nested
+   in a function** whose name is bound in the scope enclosing it — the extractor marks it `binds_name`:
+   a nested declaration (`function f() {}`, `def f():`), or an anonymous function / arrow / lambda named
+   by the local or assignment initialising it (`const f = () => {}`, `x = lambda: …`, C# / Java
+   `Action a = () => …`) — is a definition, not a shadowing binding: a call from its enclosing function,
+   or from any closure nested in it, resolves to the innermost such definition on the lexical chain →
+   `exact` (two at one level are a redefinition → `unresolved`; a nested definition is invisible outside
+   its function and never counts for rule 4). An object-literal method, a named function expression
+   (`app.get('/', function index() {})`), `const f = function g() {}` and `const C = class {}` bind no
+   callable name in the enclosing scope: they are never such definitions (the last two shadow like any
+   local).
    1b. callee is `x.m()` where the receiver `x` has a **demonstrable class**: `x` is a local bound by
    `new C(...)` in the same function or file, or (Java / C# / PHP) a field, parameter or property with
    a declared type `C` → the method `m` of `C` (resolved in the same file, through the import bindings,
@@ -153,7 +164,10 @@ Two refinements shared by all rules: **overloads** (several same-named methods i
 are disambiguated by arity — a unique definition whose parameter count equals the call's argument
 count is `exact`, otherwise the first overload is `name-only`; and a **lambda / arrow** function
 inherits the class of the innermost enclosing method for rule 3 and for implicit-`this` bare calls
-(a JavaScript `function` expression, whose `this` is dynamic, does not).
+(a JavaScript `function` expression, whose `this` is dynamic, does not). The lexical class body an
+arrow must stay within is a `class` body or, for a constructor-style class (`function F(db) {
+this.m = (req, res) => { dao.find(id, (err, rows) => { this.n(); }); }; }`), the constructor
+function itself, so `this.n()` inside a callback nested in a constructor-style method resolves.
 
 **Interface and abstract dispatch.** Extractors mark interface methods and abstract methods
 `bodiless` (Java / C# / PHP / TypeScript) and list each class's implemented interfaces (`implements`).
@@ -311,8 +325,9 @@ hygiene (purged at end/abort) and is checkpointed under `.oswe/checkpoints/<run-
 
 ### 3.2 §2 Partition by reachability — `partition-graph.mjs`
 
-- Entry points = `route` nodes. From each route, transitive closure over `handles`, `uses_middleware`
-  and `calls` edges of confidence **`exact` or `name-only`** (inclusive is right for partitioning).
+- Entry points = `route` nodes. From each route, transitive closure over `handles`, `uses_middleware`,
+  `nests` and `calls` edges of confidence **`exact` or `name-only`** (inclusive is right for
+  partitioning; a handler's callbacks are reached through `nests`, so their calls count).
 - Group into partitions by `(stack, auth class, top-level module of the route file)`. Output is
   **exactly today's shape** `{ partition_id, stack, files[] }`, so `surface-scan.mjs` and
   `allocate-budget.mjs` are untouched. A file reachable from several groups goes to one of them, the
@@ -323,11 +338,13 @@ hygiene (purged at end/abort) and is checkpointed under `.oswe/checkpoints/<run-
 
 ### 3.3 §3 Analyze — candidate paths — `enumerate-paths.mjs`
 
-- For each partition in `analyze[]`: enumerate `route → … → sink` paths over `calls` edges (the route
-  and its handler in the partition's files, the hops in any file), depth ≤ 6,
-  at most 50 paths per partition, ordered by `(sink class severity rank, auth == unauthenticated first,
-  path length, id)`. Each hop = `{ file, line, function, edge_confidence }`; a path carries
-  `min_confidence` (the weakest edge).
+- For each partition in `analyze[]`: enumerate `route → … → sink` paths over `calls` and `nests` edges
+  (a route is a root of the partition that owns its **handler's** file — the route's own registration
+  file may be owned by another group, as NodeGoat's `routes/index.js` registers every route while the
+  handlers live in files that follow their routes' auth groups; the hops in any file; a nested
+  closure is a hop entered as `exact`), depth ≤ 6, at most 50 paths per partition, ordered by `(sink
+  class severity rank, auth == unauthenticated first, path length, id)`. Each hop = `{ file, line,
+  function, edge_confidence }`; a path carries `min_confidence` (the weakest edge).
 - The analyzer dispatch payload gains `candidate_paths[]` (part of the cache key, so a graph change
   invalidates the analyzer cache correctly).
 - `agents/oswe-analyzer.md` gains one instruction block: candidate paths are *structural* hints; confirm
@@ -351,11 +368,22 @@ Runs deterministically **before** the LLM verifier, on the aggregated findings a
 and writes its own artifact `structural.json` (schema `structural-check.schema.json`), keyed by
 `OSWE-N` finding id and `CHAIN-N` + transition index.
 
-**Per finding** — let `S` = `enclosing_fn(source)`, `K` = `enclosing_fn(sink)`:
+**Per finding** — let `S` = `enclosing_fn(source)`, `K` = `enclosing_fn(sink)`, where a location
+`{ file, line }` maps to the function the graph's own `source` / `sink` nodes on that line sit in when
+every such node (those of the location's role first) agrees (byte-precise), else to the innermost
+function containing the line — except that when that function *opens* on the line and an enclosing
+function contains the line too, the location is read **both ways** (`dao.find(id, (err, rows) => {` is
+the caller's call and the callback's first line): the verdict stands only when both readings give one
+`structural_path`, else `"n/a"` (`"ambiguous location: the line opens a nested function"`), so the
+caller reading — which reaches every closure the caller defines through `nests` — can never prove a
+path into an unrelated sibling closure; the two ends of one line are read together. A `call-path`
+transition's `from_anchor` is read as the caller's call site and its `to_anchor` as the function it
+opens (SKILL.md §5 defines them so). `nests` edges count as `exact` edges in every search below and
+never make a closure incomplete:
 
 | condition | `structural_path` |
 |---|---|
-| `S == K`, or a **forward** path `S → … → K` over `exact` `calls` edges (depth ≤ 6) | `"proven"` |
+| `S == K`, or a **forward** path `S → … → K` over `exact` `calls` / `nests` edges (depth ≤ 6) — a sink inside a callback of the source's function is proven | `"proven"` |
 | no forward path, but a **reverse** path `K → … → S` over `exact` edges — the source is read inside a callee and flows back through a return value (`handler() { eval(readInput()); }`) | `"n/a"` (return-value flow is real but not modelled; the graph must not contradict it) |
 | `S` and `K` connected only through `name-only` / `unresolved` edges, in either direction | `"n/a"` |
 | source or sink line maps to no graph node | `"n/a"` |
@@ -471,6 +499,21 @@ README: "How it works" gains the graph step and the structural-proof rule; "Hone
 resolution limits of §1.4. `BENCHMARK.md` gains the SP10 table with the gate read.
 
 ---
+
+## 4.4 Pre-campaign amendments (2026-11-06, from the real-NodeGoat probe)
+
+Probing a real NodeGoat checkout before the Task 20 campaign found that the graph was right (every
+handler → DAO call `exact`) while the consumers were blind: zero candidate paths (every route is
+registered in `routes/index.js`, owned by the unauthenticated group, while the handlers' files follow
+their routes' groups), sinks inside callbacks unreachable (no edge from a function to its closures),
+and three NodeGoat idioms unresolved (a `const helper = () => {}` nested in a method, `this.m()` from
+a callback inside a constructor-style method, a ctor-body helper called from a callback). The
+amendments above — `nests` edges (§1.2, §3.2, §3.3, §3.4), nested definitions and the constructor-style
+lexical class body (§1.4), handler-file root binding (§3.3), byte-precise / opening-line mapping (§3.4)
+— plus a wider Node surface (HTTP clients, `redirect(`, `fs` read / write, template compilers, Express
+auth-middleware conventions such as `isLoggedIn`) turn that probe into 12 candidates (eval, `$where`
+through a nested helper, `needle.get`, `res.redirect`) and `proven` for the cross-file NoSQL and the
+SSRF flows. Gates in §4.2 are unchanged.
 
 ## 5. Out of scope (explicit)
 

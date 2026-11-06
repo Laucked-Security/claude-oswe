@@ -207,8 +207,8 @@ parse-args → recon → build graph   (tree-sitter, vendored, zero-install)
 
 - **Application graph (SP10).** A deterministic helper parses the code with a vendored tree-sitter
   (no install, identifiers and line numbers only, never source text) into files, functions, calls,
-  routes and sinks. Partitions are cut by what each route reaches; the analyzer gets the candidate
-  route → sink paths as *hints* to confirm or refute (flows outside the list are still expected); a
+  closures, routes and sinks. Partitions are cut by what each route reaches; the analyzer gets the
+  candidate route → sink paths as *hints* to confirm or refute (flows outside the list are still expected); a
   structural check marks each finding's source → sink `proven`, `absent` or `n/a`, which feeds the
   verifier and `apply-verdicts`: a "strong static proof" finding with `absent` is capped to "to
   verify", so its chain can no longer be Critical. If the graph cannot be built, every phase falls
@@ -276,9 +276,9 @@ chains on real vulnerable code; stays quiet on clean code.
 - **Five stacks**, one curated reference page each — broad sink coverage, not an exhaustive SAST ruleset.
 - **The graph resolves calls conservatively, not completely.** No type inference; no virtual dispatch
   beyond a conservative override check (a `this.x()` that a subclass overrides is only a candidate);
-  calls through function values (callbacks, lambdas passed around), dynamic dispatch, reflection and
-  dynamic requires stay unresolved. A call resolved by name alone (`name-only`) is a hint, **never**
-  proof — `proven` needs exact edges.
+  a callback or closure is reached from the function that *defines* it (a `nests` edge), but a function
+  value passed around by name, dynamic dispatch, reflection and dynamic requires stay unresolved. A
+  call resolved by name alone (`name-only`) is a hint, **never** proof — `proven` needs exact edges.
   Known gaps of the vendored grammars: C# 12 primary constructors and raw string literals (`"""…"""`)
   do not parse; PHP 8.4's `new C()->m()` (no parentheses) is mis-parsed. What the graph cannot decide
   is `n/a`, not `absent`.

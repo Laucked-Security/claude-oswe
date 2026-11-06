@@ -231,8 +231,10 @@ literal temp file and run under the usual `trap`:
   exit "$rc" )                                                         # preserve the CLI's exit code
 ```
 
-→ `{ partition_id, candidate_paths: [ { id, route, hops, sink, min_confidence } ] }` (≤ 50, ranked).
-Exit 1 = malformed input (our bug — fix the call); exit 2 = IO/usage → fix the call. **With
+→ `{ partition_id, candidate_paths: [ { id, route, hops, sink, min_confidence } ] }` (≤ 50, ranked; a
+route belongs to the partition that owns its **handler's** file, so a route registered in another
+partition's file still lists here when its handler is read here). Exit 1 = malformed input (our bug —
+fix the call); exit 2 = IO/usage → fix the call. **With
 `graph = null`, do not run it: `candidate_paths` = `[]`.** Pass the `candidate_paths` array to the
 analyzer as a JSON block in its prompt, right after the file list (an empty array is passed as `[]`), and
 put the same array in its `dispatch_input` below — so a graph change invalidates the analyzer cache.
@@ -398,9 +400,12 @@ structural file is named** (§6b):
 **Keep `structural-<structural-token>.json` until §6b has consumed it** (purged with the rest of
 `.oswe/tmp/`). Read it into orchestration state as `structural` = `{ findings: { "OSWE-N": { structural_path, reason } },
 transitions: { "CHAIN-N": [ { index, structural_path, reason } ] } }`, where `structural_path` is
-`proven` (same function, or a forward call path over exact edges), `absent` (the graph saw both ends,
-resolved every call around them exactly, and found **no** call path within six edges) or `n/a`
-(anything the graph cannot decide, an unresolved call near either end included). Exit 1 =
+`proven` (same function, or a forward path over exact call edges and `nests` edges — a sink inside a
+callback or closure of the source's function counts), `absent` (the graph saw both ends, resolved
+every call around them exactly, and found **no** call path within six edges) or `n/a` (anything the
+graph cannot decide: an unresolved call near either end, or a source / sink cited on the line where a
+nested function opens when the two readings of that line disagree — cite the sink's own line, not the
+line of the call that takes the callback, when you can). Exit 1 =
 malformed findings/chains (our bug in §4/§5 — fix the construction); exit 2 = IO/usage → fix the call.
 This result is the **authoritative channel** for structure: it goes to the verifier as read-only
 context (§6) and to `apply-verdicts.mjs --structural` (§6b) — **never** as a verifier counterexample.
