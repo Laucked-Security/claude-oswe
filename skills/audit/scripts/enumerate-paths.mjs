@@ -22,17 +22,22 @@
 //   { "graph": null, "reason" } is graph null, { "graph": <object> } is that object. Unreadable / unparsable
 //   => exit 2, like --file; the loaded graph is validated like an inline one.
 //
-// Candidates. Every `route` node whose file is in partition.files and whose handler is non-null is a root
-// (a route with no handler produces nothing). From the handler, ONE shortest path per reachable function
-// is computed over `calls` edges of confidence `exact` or `name-only` that have a target (never
-// `unresolved`), through functions in ANY file of the graph: only the root — the route and its handler —
-// is bound to partition.files (a route whose handler lives in another partition produces nothing), so a
-// path from this partition's route into a callee owned by another partition is still listed (a shared
-// helper is claimed by one partition only, see partition-graph.mjs). Cost = (hops, name-only edge count),
+// Candidates. Every `route` node whose handler is a function in partition.files is a root (a route with
+// no handler produces nothing). The route's own registration file may lie in another partition:
+// partition-graph.mjs owns a route file by one auth group while a handler's file follows the group of
+// its routes, so a mixed-auth route file (NodeGoat's routes/index.js) would otherwise leave its other
+// groups' routes without candidates; the handler's file is where the sink code is read. From the
+// handler, ONE shortest path per reachable function is computed over `calls` edges of confidence
+// `exact` or `name-only` that have a target (never `unresolved`) and over `nests` edges — a function
+// lexically nested in another (a callback, a closure, a local helper) runs within it, so a nested
+// function is a hop entered with edge_confidence "exact" — through functions in ANY file of the graph:
+// only the root — the handler — is bound to partition.files, so a path from this partition's route
+// into a callee owned by another partition is still listed (a shared helper is claimed by one
+// partition only, see partition-graph.mjs). Cost = (hops, name-only edge count),
 // compared lexicographically; ties go to the predecessor with the smaller function id (plain string
 // comparison). It is a level-synchronous BFS with a secondary relaxation, so the work is linear in the
 // edges even when the number of distinct paths is exponential. max_depth bounds the length of a candidate
-// in hops: hops.length <= max_depth (the handler is hop 1), i.e. at most max_depth - 1 calls edges.
+// in hops: hops.length <= max_depth (the handler is hop 1), i.e. at most max_depth - 1 calls / nests edges.
 // Every `sink` whose enclosing_fn is a function on a settled shortest path yields one candidate for that
 // (route, sink) pair; a module-level sink (enclosing_fn null) is never a candidate.
 //
@@ -93,27 +98,27 @@ function checkInput(input) {
 
 // ---- graph index ------------------------------------------------------------------------------------
 
-// Everything the search needs, built in one pass over nodes and edges: the roots (routes in the partition's
-// files whose handler is in them too) and the call graph over every function of the graph.
+// Everything the search needs, built in one pass over nodes and edges: the roots (routes whose handler
+// is a known function in the partition's files) and the call graph over every function of the graph.
 function indexGraph(graph, files) {
   const inPartition = new Set(files.map(pathKey));
   const has = (file) => inPartition.has(pathKey(file));
   const fnById = new Map(); // id -> function node, every file
-  const candidates = []; // route nodes in the partition with a handler
+  const candidates = []; // route nodes with a handler, any file
   const sinksByFn = new Map(); // function id -> sink nodes enclosed by it
   const push = (map, key, value) => (map.has(key) ? map.get(key).push(value) : map.set(key, [value]));
   for (const n of graph.nodes) {
     if (n.type === "function") fnById.set(n.id, n);
-    else if (n.type === "route" && n.handler !== null && has(n.file)) candidates.push(n);
+    else if (n.type === "route" && n.handler !== null) candidates.push(n);
     else if (n.type === "sink" && n.enclosing_fn !== null) push(sinksByFn, n.enclosing_fn, n);
   }
-  // a root's handler must be a known function in the partition's files
+  // a root's handler must be a known function in the partition's files (the route's own file may not be)
   const routes = candidates.filter((r) => fnById.has(r.handler) && has(fnById.get(r.handler).file));
   const callees = new Map(); // function id -> [{ to, confidence }] between known functions
   for (const e of graph.edges) {
-    if (e.type === "calls" && e.to !== null && FOLLOWED_CONFIDENCE.has(e.confidence) && fnById.has(e.from) && fnById.has(e.to)) {
-      push(callees, e.from, { to: e.to, confidence: e.confidence });
-    }
+    if (!fnById.has(e.from) || e.to === null || !fnById.has(e.to)) continue;
+    if (e.type === "calls" && FOLLOWED_CONFIDENCE.has(e.confidence)) push(callees, e.from, { to: e.to, confidence: e.confidence });
+    else if (e.type === "nests") push(callees, e.from, { to: e.to, confidence: "exact" });
   }
   return { fnById, routes, sinksByFn, callees };
 }

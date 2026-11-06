@@ -14,7 +14,7 @@
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
-import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, repoPath } from "./common.mjs";
+import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, define, repoPath } from "./common.mjs";
 
 export const lang = { id: "javascript", stack: "node", langIds: ["javascript", "typescript", "tsx"], frameworks: ["express", "nest"], implicitThisCalls: false, submoduleImports: false, callableLocals: true, overloads: false };
 
@@ -111,7 +111,7 @@ const isRequireCall = (node) =>
 
 // ---- state ----------------------------------------------------------------------------------------
 
-const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map() });
+const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map(), definitions: new Set() });
 
 function newState(path, surface) {
   return {
@@ -224,14 +224,13 @@ function addParameters(node, frame) {
   }
 }
 
-function functionName(node, ctx) {
-  const own = field(node, "name");
-  if (own) return own.text;
-  if (ctx.parentType === "variable_declarator" && ctx.field === "value") {
-    const declared = field(node.parent, "name");
-    if (declared?.type === "identifier") return declared.text;
-  }
-  return null;
+// A function's own name, and the identifier of the declarator that initialises it (`const f = () =>
+// {}`): an anonymous function / arrow takes the declarator's name and then binds it in the enclosing
+// scope (`binds_name`); a named function expression keeps its own, which binds nothing outside it.
+function functionNames(node, ctx) {
+  const own = field(node, "name")?.text ?? null;
+  const declared = ctx.parentType === "variable_declarator" && ctx.field === "value" && field(node.parent, "name")?.type === "identifier" ? field(node.parent, "name").text : null;
+  return { own, declared };
 }
 
 // ---- constructor-style classes (NodeGoat: `function F(db) { this.m = (req, res) => {...}; }`) -----
@@ -263,13 +262,20 @@ function constructorMethod(node, ctx, st, enclosing) {
 }
 
 const ctorClass = (st, name) => (st.ctorClasses.has(name) ? st.ctorClasses.get(name) : st.ctorClasses.set(name, { start: null, methods: [] }).get(name));
+// The start byte of the constructor-style function the walk is inside (at most one: they are top-level).
+const constructorStart = (st) => st.fnStack.find((frame) => frame.ctorName)?.startIndex ?? null;
 
 function onFunction(node, st, ctx) {
   const enclosing = st.fnStack.at(-1) ?? null;
   const isMethod = node.type === "method_definition";
   const ctorMethod = constructorMethod(node, ctx, st, enclosing);
   const cls = isMethod && ctx.parentType === "class_body" ? st.classStack.at(-1)?.name ?? null : ctorMethod?.cls ?? null;
-  let name = ctorMethod?.name ?? functionName(node, ctx);
+  const { own, declared } = functionNames(node, ctx);
+  let name = ctorMethod?.name ?? own ?? declared;
+  // the name is a binding of the enclosing scope: a declaration, or an anonymous function / arrow
+  // named by its declarator (resolve.mjs's nested definitions); not a method, a named function
+  // expression or a constructor-style method
+  const bindsName = !ctorMethod && (DECLARATION_FUNCTIONS.has(node.type) || (own === null && declared !== null));
   if (ctorMethod) {
     const entry = ctorClass(st, ctorMethod.cls);
     if (!entry.methods.includes(ctorMethod.name)) entry.methods.push(ctorMethod.name);
@@ -288,8 +294,11 @@ function onFunction(node, st, ctx) {
   } else {
     qualifiedName = enclosing ? `${enclosing.qualifiedName}.${name}` : name;
   }
+  // a declaration is a definition, never a scope_name: a nested `function f() {}` is found by
+  // resolve.mjs through its container (scope_names only carry parameters and value locals), while
+  // its name shadows an outer class binding (common.mjs define)
   if (DECLARATION_FUNCTIONS.has(node.type) && name !== "<anon>") {
-    if (enclosing) enclosing.bindings.add(name);
+    if (enclosing) define(enclosing, name);
     else st.topLevel.set(name, node.startIndex);
   }
   st.functions.push({
@@ -303,8 +312,11 @@ function onFunction(node, st, ctx) {
     kind: isMethod || ctorMethod ? "method" : node.type === "arrow_function" ? "arrow" : "function",
     exported: false,
     class: cls,
-    // an arrow's lexical class body: resolve.mjs inherits a containing method's class only within it
-    ...(node.type === "arrow_function" && !ctorMethod ? { class_start_byte: st.classStack.at(-1)?.start ?? null } : {})
+    ...(bindsName ? { binds_name: true } : {}),
+    // an arrow's lexical class body — a `class` body, else the constructor-style function it sits in
+    // (whose classes[] entry is anchored at that function): resolve.mjs inherits a containing method's
+    // class only within it
+    ...(node.type === "arrow_function" && !ctorMethod ? { class_start_byte: st.classStack.at(-1)?.start ?? constructorStart(st) } : {})
   });
   const frame = newFrame(node.startIndex, qualifiedName);
   if (isConstructorStyle(node, ctx, enclosing)) {
@@ -324,9 +336,19 @@ function onDeclarator(node, st) {
     st.imports.push(requireImport(nameNode, value));
     return;
   }
-  if (!st.fnStack.length && value && DEFINITION_VALUES.has(value.type)) {
-    if (nameNode?.type === "identifier") st.topLevel.set(nameNode.text, value.startIndex); // a definition, not a local
-    return;
+  if (value && DEFINITION_VALUES.has(value.type)) {
+    if (!st.fnStack.length) {
+      if (nameNode?.type === "identifier") st.topLevel.set(nameNode.text, value.startIndex); // a definition, not a local
+      return;
+    }
+    // nested: an anonymous function / arrow takes the declarator's name — a definition resolve.mjs
+    // finds through its container (binds_name), not a scope_name, though it shadows an outer class
+    // binding; a class or a named function expression (`const f = function g() {}` defines g, not f)
+    // shadows like any local
+    if (value.type !== "class" && !field(value, "name")) {
+      for (const name of patternNames(nameNode)) define(currentFrame(st), name);
+      return;
+    }
   }
   const frame = currentFrame(st);
   for (const name of patternNames(nameNode)) frame.bindings.add(name);

@@ -72,6 +72,62 @@ test("rule 1: the same name shadowed by a parameter is unresolved, callee_text k
   assert.equal(r.callee_text, "foo");
 });
 
+// ---- rule 1: definitions nested in a function -----------------------------------------------------
+
+const span = (name, start, end, cls = null) => ({ ...fn(name, start, cls), end_byte: end });
+// a nested definition the extractor marked `binds_name` (`const f = () => {}`, `function f() {}`, `def f():`)
+const nestedFn = (name, qualified, start, end) => ({ ...fn(name, start), qualified_name: qualified, end_byte: end, kind: "arrow", binds_name: true });
+
+test("rule 1 (nested): a helper defined in the call's enclosing function is exact and wins over a same-named top-level function", () => {
+  const a = file("a.js", {
+    functions: [fn("helper", 0), span("main", 20, 100), nestedFn("helper", "main.helper", 30, 40), nestedFn("<anon>", "main.<anon>@3:1", 60, 90)],
+    calls: [call("helper", 50, { enc: 20 }), call("helper", 70, { enc: 60 })]
+  });
+  const results = resolveAll([a]);
+  assert.deepEqual(only(results, "a.js", 50).to, { path: "a.js", qualified_name: "main.helper", start_byte: 30 });
+  assert.equal(only(results, "a.js", 50).confidence, "exact");
+  // from a closure nested deeper in main: the chain of containers reaches main's helper
+  assert.deepEqual(only(results, "a.js", 70).to, { path: "a.js", qualified_name: "main.helper", start_byte: 30 });
+  assert.equal(only(results, "a.js", 70).confidence, "exact");
+});
+
+test("rule 1 (nested): a parameter still shadows; two nested definitions at one level are a redefinition (never the top-level one)", () => {
+  const a = file("a.js", {
+    functions: [fn("helper", 0), span("main", 20, 100), nestedFn("helper", "main.helper", 30, 40), nestedFn("helper", "main.helper", 42, 48)],
+    calls: [call("helper", 50, { enc: 20 }), call("helper", 55, { enc: 20, scope: ["helper"] })]
+  });
+  const results = resolveAll([a]);
+  assert.deepEqual([only(results, "a.js", 50).to, only(results, "a.js", 50).confidence], [null, "unresolved"]);
+  assert.deepEqual([only(results, "a.js", 55).to, only(results, "a.js", 55).confidence], [null, "unresolved"]);
+});
+
+test("rule 1 (nested): a nested function without binds_name (an object-literal method, a named function expression) is no definition: the real target stays", () => {
+  const unbound = (name, qualified, start, end, kind) => ({ ...fn(name, start), qualified_name: qualified, end_byte: end, kind });
+  const a = file("a.js", {
+    functions: [fn("query", 0), span("make", 20, 100), unbound("query", "make.query", 30, 40, "method"), unbound("index", "make.index", 50, 60, "function")],
+    calls: [call("query", 35, { enc: 30 }), call("index", 70, { enc: 20 })]
+  });
+  const results = resolveAll([a]);
+  assert.deepEqual(only(results, "a.js", 35).to, { path: "a.js", qualified_name: "query", start_byte: 0 }); // the top-level query, not the method wrapping it
+  assert.deepEqual([only(results, "a.js", 70).to, only(results, "a.js", 70).confidence], [null, "unresolved"]); // `function index` passed as an argument binds nothing
+});
+
+test("rule 1 (nested): a helper nested in a sibling function is invisible (the top-level definition, else nothing); a method's nested helper resolves", () => {
+  const a = file("a.js", {
+    functions: [span("main", 20, 100), span("other", 120, 160), nestedFn("helper", "other.helper", 130, 140), fn("top", 200)],
+    calls: [call("helper", 50, { enc: 20 }), call("top", 60, { enc: 20 })]
+  });
+  const results = resolveAll([a]);
+  assert.deepEqual([only(results, "a.js", 50).to, only(results, "a.js", 50).confidence], [null, "unresolved"]); // rule 4 never counts nested definitions
+  assert.equal(only(results, "a.js", 60).confidence, "exact");
+  const b = file("b.js", {
+    functions: [span("run", 10, 60, "K"), nestedFn("helper", "K.run.helper", 20, 30)],
+    classes: [cls("K", 0, ["run"])],
+    calls: [call("helper", 40, { enc: 10 })]
+  });
+  assert.deepEqual(only(resolveAll([b]), "b.js", 40).to, { path: "b.js", qualified_name: "K.run.helper", start_byte: 20 });
+});
+
 // A bare foo() inside a method of K, where K defines foo (and AdminK overrides it on request).
 function implicitThisFile(path, { override = false, importFoo = false } = {}) {
   const classes = [cls("K", 0, ["run", "foo"])];

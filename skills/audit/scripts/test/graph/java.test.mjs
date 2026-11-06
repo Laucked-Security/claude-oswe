@@ -38,6 +38,11 @@ test("lang descriptor", () => {
   assert.deepEqual(lang, { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true });
 });
 
+test("functions: a lambda named by the local it initialises carries binds_name (resolve.mjs's nested definitions); an argument lambda and a method do not", async () => {
+  const x = await extract("class K {\n  void m(java.util.List<String> list) {\n    Runnable r = () -> {};\n    list.forEach(x -> {});\n  }\n}\n");
+  assert.deepEqual(x.functions.map((f) => [f.qualified_name, f.kind, f.binds_name ?? false]), [["K.m", "method", false], ["K.m.r", "lambda", true], ["K.m.<anon>@4:18", "lambda", false]]);
+});
+
 // ---- routes -------------------------------------------------------------------------------------
 
 test("Spring: class @RequestMapping prefix + @PostMapping ⇒ POST /api/run, @PreAuthorize ⇒ middleware text", async () => {

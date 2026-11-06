@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "graph.schema.json",
   "title": "OSWE Application Graph",
-  "$comment": "SP10 app graph: deterministic tree-sitter structural index (files, functions, routes, sources, sinks; imports/calls/handles/uses_middleware edges). Node ids are 12 lowercase hex characters; edges reference node ids. Nodes and edges are oneOf-discriminated by the const 'type'.",
+  "$comment": "SP10 app graph: deterministic tree-sitter structural index (files, functions, routes, sources, sinks; imports/calls/handles/uses_middleware/nests edges — a nests edge links a function to one lexically nested in it, a closure that runs within it). Node ids are 12 lowercase hex characters; edges reference node ids. Nodes and edges are oneOf-discriminated by the const 'type'.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "generated_by", "stats", "nodes", "edges"],
@@ -29,7 +29,8 @@
           { "$ref": "#/$defs/importsEdge" },
           { "$ref": "#/$defs/callsEdge" },
           { "$ref": "#/$defs/handlesEdge" },
-          { "$ref": "#/$defs/usesMiddlewareEdge" }
+          { "$ref": "#/$defs/usesMiddlewareEdge" },
+          { "$ref": "#/$defs/nestsEdge" }
         ]
       }
     }
@@ -151,6 +152,15 @@
         "from": { "$ref": "#/$defs/nodeId" },
         "to": { "$ref": "#/$defs/nodeId" },
         "order": { "$ref": "#/$defs/count" }
+      }
+    },
+    "nestsEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "from", "to"],
+      "properties": {
+        "type": { "const": "nests" },
+        "from": { "$ref": "#/$defs/nodeId" },
+        "to": { "$ref": "#/$defs/nodeId" }
       }
     },
     "stats": {

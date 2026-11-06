@@ -36,8 +36,9 @@ const ZERO_STATS = {
 //   routes: [{ file, auth, handler?, method?, path? }]     (handler names a function)
 //   calls:  [[fromName, toName | null, confidence]]
 //   sinks:  [{ fn: name | null, class, callee?, file? }]   (fn null = module level)
+//   nests:  [[outerName, nestedName]]
 // Files are derived from `fns`, `routes` and `sinks`.
-function synth({ fns = {}, routes = [], calls = [], sinks = [] }) {
+function synth({ fns = {}, routes = [], calls = [], sinks = [], nests = [] }) {
   const fnId = Object.fromEntries(Object.keys(fns).map((name) => [name, hex12()]));
   const files = [...new Set([...Object.values(fns), ...routes.map((r) => r.file), ...sinks.map((s) => s.file).filter(Boolean)])];
   const nodes = files.map((path) => ({ type: "file", id: hex12(), path, stack: "node", lang: "javascript", parse_status: "ok" }));
@@ -56,6 +57,7 @@ function synth({ fns = {}, routes = [], calls = [], sinks = [] }) {
   for (const [from, to, confidence] of calls) {
     edges.push({ type: "calls", from: fnId[from], to: to ? fnId[to] : null, line: 1, callee_text: to ?? "unknown", confidence });
   }
+  for (const [from, to] of nests) edges.push({ type: "nests", from: fnId[from], to: fnId[to] });
   for (const s of sinks) {
     const file = s.file ?? (s.fn ? fns[s.fn] : "module.js");
     nodes.push({ type: "sink", id: hex12(), file, line: 9, enclosing_fn: s.fn ? fnId[s.fn] : null, class: s.class, callee: s.callee ?? `${s.class}.call`, pattern: s.class });
@@ -380,12 +382,12 @@ test("cycles terminate and module-level sinks (enclosing_fn null) are never cand
   assert.deepEqual(names(out.candidate_paths[0]), ["h", "x", "y"]);
 });
 
-test("routes without a handler yield nothing; routes in files outside the partition are not enumerated", () => {
+test("routes without a handler yield nothing; a route whose handler lives in another partition's file is that partition's root, not this one's", () => {
   const graph = synth({
     fns: { h: "a.js", other: "b.js" },
     routes: [
       { file: "a.js", auth: "authenticated" }, // no handler
-      { file: "b.js", auth: "authenticated", handler: "other" } // another partition's route
+      { file: "b.js", auth: "authenticated", handler: "other" } // handled in b.js
     ],
     sinks: [{ fn: "h", class: "sql" }, { fn: "other", class: "sql" }]
   });
@@ -393,14 +395,34 @@ test("routes without a handler yield nothing; routes in files outside the partit
   assert.equal(enumeratePaths({ graph, partition: part(["b.js"]) }).candidate_paths.length, 1);
 });
 
-test("a route whose handler lives outside the partition's files yields nothing", () => {
+test("roots are bound by the handler's file, not the route's: a route registered in another partition's file yields its candidates where its handler lives", () => {
   const graph = synth({
     fns: { h: "ctl/c.js" },
-    routes: [{ file: "a.js", auth: "authenticated", handler: "h" }],
+    routes: [{ file: "routes/index.js", auth: "authenticated", handler: "h", path: "/c" }],
     sinks: [{ fn: "h", class: "sql" }]
   });
-  assert.deepEqual(enumeratePaths({ graph, partition: part(["a.js"]) }).candidate_paths, []);
-  assert.equal(enumeratePaths({ graph, partition: part(["a.js", "ctl/c.js"]) }).candidate_paths.length, 1);
+  // NodeGoat's routes/index.js registers every route while the handlers live in other files owned by other groups
+  const out = enumeratePaths({ graph, partition: part(["ctl/c.js"], "ctl") });
+  assert.deepEqual(out.candidate_paths.map((c) => [c.id, c.route.file, c.route.path_pattern, c.hops.map((x) => x.file)]), [["CP-ctl-1", "routes/index.js", "/c", ["ctl/c.js"]]]);
+  assert.deepEqual(enumeratePaths({ graph, partition: part(["routes/index.js"]) }).candidate_paths, []);
+  assert.equal(enumeratePaths({ graph, partition: part(["routes/index.js", "ctl/c.js"]) }).candidate_paths.length, 1);
+});
+
+test("nests edges are hops entered as exact: a sink inside a handler's callback is a candidate, and the closure counts toward max_depth", () => {
+  const graph = synth({
+    fns: { h: "a.js", cb: "a.js", helper: "a.js" },
+    routes: [{ file: "a.js", auth: "unauthenticated", handler: "h" }],
+    nests: [["h", "cb"]],
+    calls: [["cb", "helper", "name-only"]],
+    sinks: [{ fn: "cb", class: "cmd-exec" }, { fn: "helper", class: "sql" }]
+  });
+  const out = enumeratePaths({ graph, partition: part(["a.js"]) });
+  assert.deepEqual(out.candidate_paths.map((c) => [names(c), c.hops.map((x) => x.edge_confidence), c.min_confidence]), [
+    [["h", "cb"], ["exact", "exact"], "exact"],
+    [["h", "cb", "helper"], ["exact", "exact", "name-only"], "name-only"]
+  ]);
+  assert.deepEqual(enumeratePaths({ graph, partition: part(["a.js"]), max_depth: 1 }).candidate_paths, []);
+  assert.equal(enumeratePaths({ graph, partition: part(["a.js"]), max_depth: 2 }).candidate_paths.length, 1);
 });
 
 test("I1: a function outside the partition is not a wall: hops traverse any file of the graph", () => {

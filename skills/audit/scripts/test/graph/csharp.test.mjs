@@ -315,6 +315,11 @@ test("calls: top-level statement locals bind receivers; class bodies do not see 
   assert.deepEqual(callRows(y), [["a.Go", null, "A"], ["a.Up", null, null]]);
 });
 
+test("functions: a lambda named by the local it initialises carries binds_name (resolve.mjs's nested definitions); an argument lambda and a method do not", async () => {
+  const x = await extract("class K {\n  void M() {\n    Action a = () => {};\n    Run(x => x);\n    a();\n  }\n}\n");
+  assert.deepEqual(x.functions.map((f) => [f.qualified_name, f.kind, f.binds_name ?? false]), [["K.M", "method", false], ["K.M.a", "lambda", true], ["K.M.<anon>@4:9", "lambda", false]]);
+});
+
 test("calls: scope_names always [] (callableLocals: false); anchored at the method name, enclosed by the innermost function; attribute arguments and nameof are not calls", async () => {
   const x = await extractFixture("Services/Runner.cs");
   const text = fixtureText("Services/Runner.cs");

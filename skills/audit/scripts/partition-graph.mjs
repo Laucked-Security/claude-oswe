@@ -29,9 +29,10 @@
 // Graph mode.
 //  1. Reachability. From every route, its own file plus the file of every function reached from the
 //     route's `handles` and `uses_middleware` targets by following `calls` edges of confidence `exact`
-//     or `name-only` (never `unresolved`), transitively, cycle-safe. Function -> file is the function
-//     node's `file`. A route whose file has no `file` node (so no stack) is ignored; an edge naming an
-//     unknown function id is ignored.
+//     or `name-only` (never `unresolved`) and `nests` edges (a callback / closure / local helper runs
+//     within its enclosing function, and its own calls are reached through it), transitively,
+//     cycle-safe. Function -> file is the function node's `file`. A route whose file has no `file`
+//     node (so no stack) is ignored; an edge naming an unknown function id is ignored.
 //  2. Grouping. Group key = (stack of the route file's `file` node, route auth, module) where module is
 //     the first path segment of the route file ("root" for a top-level file). Partition id =
 //     g-<stack>-<auth>-<module>, every character outside [A-Za-z0-9_.-] replaced by "_" (groups whose
@@ -109,6 +110,8 @@ function indexGraph(graph) {
   for (const e of graph.edges) {
     if (e.type === "calls") {
       if (e.to !== null && FOLLOWED_CONFIDENCE.has(e.confidence)) push(callees, e.from, e.to);
+    } else if (e.type === "nests") {
+      push(callees, e.from, e.to); // a closure runs within its enclosing function
     } else if (e.type === "handles" || e.type === "uses_middleware") {
       push(seeds, e.from, e.to);
     }

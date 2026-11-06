@@ -1,9 +1,14 @@
 // Import and call resolution for the SP10 application graph (spec §1.4), language-independent.
 // It consumes the per-file Extracts the language modules emit (see lang/javascript.mjs) and decides,
 // with graded confidence, which parsed function each call targets:
-//   exact      a demonstrated binding: a same-file definition, an import resolved (exactly) to a
-//              file whose export names the function, `this.m()` / a receiver of a known class whose
-//              method no subclass overrides;
+//   exact      a demonstrated binding: a same-file definition (top-level, or nested in the call's
+//              enclosing function or one enclosing it — a `const f = () => {}` / `function f() {}` /
+//              `def f():` helper that the extractor marked `binds_name` (its name is bound in the
+//              scope enclosing it: a nested declaration, or an anonymous function / arrow / lambda
+//              named by the local or assignment initialising it — never an object-literal method or
+//              a named function expression), the innermost such definition winning), an import
+//              resolved (exactly) to a file whose export names the function, `this.m()` / a receiver
+//              of a known class whose method no subclass overrides;
 //   name-only  a candidate, not a proof: the method is overridden in a subclass, the import was
 //              resolved heuristically, the bare name is defined exactly once across all files, or
 //              (overloads, below) no definition is the only one matching the call's arity;
@@ -194,7 +199,7 @@ function importBinding(extract, local) {
 // ---- shared lookups -------------------------------------------------------------------------------
 
 function context(files, importMap, classIndex) {
-  return { extracts: new Map(files.map((f) => [f.path, f.extract])), importMap, classIndex };
+  return { extracts: new Map(files.map((f) => [f.path, f.extract])), importMap, classIndex, parents: new Map() };
 }
 
 // The import binding of `local` in a file with its resolved target: { binding, resolved | null }, or
@@ -418,10 +423,33 @@ function importedFunction({ binding, resolved }, ctx, argCount) {
   return fn ? target(resolved.path, fn, weaker("exact", resolved.confidence)) : null;
 }
 
+// Rule 1 for a definition nested in a function: a `const f = () => {}` / `function f() {}` / `def f():`
+// declared in the call's enclosing function or in one enclosing it (lexical scoping: the innermost
+// such definition wins; two at one level are a redefinition, null). Only a function the extractor
+// marked `binds_name` counts — its name is bound in the scope enclosing it — so an object-literal
+// method or a named function expression (`function index() {}` passed as an argument), which bind
+// nothing there, never shadow or replace the real target. The extractors keep such definitions out of
+// scope_names (only parameters and value locals shadow), so a nested helper resolves like a top-level
+// one. Containment is by byte range (parentsOf), within the file.
+// -> target | null (nested definitions exist but are ambiguous) | undefined (none in scope).
+function nestedDefinition(site, name, ctx) {
+  if (!site.enclosing) return undefined;
+  const named = functionsIn(ctx, site.path).filter((f) => f.binds_name === true && f.name === name && f.class == null && !isTopLevel(f));
+  if (!named.length) return undefined;
+  const parents = parentsIn(ctx, site.path);
+  for (let scope = site.enclosing; scope; scope = parents.get(scope) ?? null) {
+    const here = named.filter((f) => parents.get(f) === scope);
+    if (here.length) return here.length === 1 ? target(site.path, here[0], "exact") : null;
+  }
+  return undefined;
+}
+
 // Rules 1, 2, 4 for a bare identifier callee (already known not to be shadowed). The same-class
 // method step and methods in rule 4's count apply only to implicit-this languages.
 function resolveBare(site, name, ctx) {
   const argCount = site.call.arg_count ?? null;
+  const nested = nestedDefinition(site, name, ctx);
+  if (nested !== undefined) return nested;
   const local = pickDefinition(functionsIn(ctx, site.path).filter((f) => isTopLevel(f) && f.name === name), argCount, ctx.overloads.has(site.path));
   if (local) return target(site.path, local.fn, local.confidence);
   if (site.implicitThis && site.ownClass) {
@@ -489,12 +517,29 @@ function definitionsByName(files) {
 
 const LEXICAL_THIS = new Set(["lambda", "arrow"]);
 
-// The innermost function of `functions` strictly containing `inner` by byte range (null if none).
-function container(inner, functions) {
-  return functions
-    .filter((f) => (f.start_byte < inner.start_byte || (f.start_byte === inner.start_byte && f.end_byte > inner.end_byte)) && inner.start_byte < f.end_byte)
-    .reduce((a, b) => (a && (a.start_byte > b.start_byte || (a.start_byte === b.start_byte && a.end_byte <= b.end_byte)) ? a : b), null);
+// The lexical container of every function of one file: Map<fn, the innermost function strictly
+// containing it by byte range | null>, from one sweep over the functions sorted by (start_byte,
+// -end_byte, qualified_name) — O(F log F) and independent of the input order (two functions with one
+// byte range are twins: the later one takes the first one's container, neither contains the other).
+// Shared with build-graph.mjs, whose `nests` edges are exactly this relation.
+export function parentsOf(functions) {
+  const order = [...functions].sort((a, b) => a.start_byte - b.start_byte || b.end_byte - a.end_byte || compare(a.qualified_name, b.qualified_name));
+  const parents = new Map();
+  const open = []; // the containers of the current position, outermost first
+  for (const fn of order) {
+    while (open.length && open.at(-1).end_byte <= fn.start_byte) open.pop();
+    let parent = open.at(-1) ?? null;
+    if (parent && parent.start_byte === fn.start_byte && parent.end_byte === fn.end_byte) parent = parents.get(parent) ?? null;
+    parents.set(fn, parent);
+    open.push(fn);
+  }
+  return parents;
 }
+
+const parentsIn = (ctx, path) => {
+  if (!ctx.parents.has(path)) ctx.parents.set(path, parentsOf(functionsIn(ctx, path)));
+  return ctx.parents.get(path);
+};
 
 // The class a call's enclosing function acts for (rule 3's `this`, the implicit-this step): its own
 // class, or — for a lambda / arrow, whose `this` is lexical — the class of the innermost method
@@ -506,11 +551,11 @@ function container(inner, functions) {
 function ownClassOf(enclosing, ctx, path) {
   if (!enclosing || enclosing.class != null || !LEXICAL_THIS.has(enclosing.kind)) return enclosing?.class ?? null;
   const classStart = enclosing.class_start_byte ?? null;
-  const functions = functionsIn(ctx, path);
+  const parents = parentsIn(ctx, path);
   let fn = enclosing;
   while (fn && fn.class == null && LEXICAL_THIS.has(fn.kind)) {
     if ((fn.class_start_byte ?? null) !== classStart) return null;
-    fn = container(fn, functions);
+    fn = parents.get(fn) ?? null;
   }
   if (fn?.class == null || classStart == null) return null;
   return classAt(ctx, path, classStart)?.name === fn.class ? fn.class : null;

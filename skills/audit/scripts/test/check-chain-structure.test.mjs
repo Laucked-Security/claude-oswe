@@ -25,16 +25,25 @@ const ZERO_STATS = {
 };
 
 // Schema-valid synthetic graph from a compact description:
-//   fns:   { name: [file, line_start, line_end] }   (ids derive from the name, in declaration order)
-//   calls: [[fromName, toName | null, confidence]]
-function synth({ fns = {}, calls = [] }) {
+//   fns:     { name: [file, line_start, line_end] }   (ids derive from the name, in declaration order)
+//   calls:   [[fromName, toName | null, confidence]]
+//   nests:   [[outerName, nestedName]]
+//   anchors: [[file, line, fnName | null, "source" | "sink"]]   (the graph's own source / sink nodes)
+function synth({ fns = {}, calls = [], nests = [], anchors = [] }) {
   const fnId = Object.fromEntries(Object.keys(fns).map((name) => [name, hex12()]));
   const files = [...new Set(Object.values(fns).map(([file]) => file))];
   const nodes = files.map((path) => ({ type: "file", id: hex12(), path, stack: "node", lang: "javascript", parse_status: "ok" }));
   for (const [name, [file, line_start, line_end]] of Object.entries(fns)) {
     nodes.push({ type: "function", id: fnId[name], file, name, qualified_name: name, line_start, line_end, kind: "function", exported: false });
   }
+  for (const [file, line, fn, type] of anchors) {
+    const enclosing_fn = fn === null ? null : fnId[fn];
+    nodes.push(type === "source"
+      ? { type, id: hex12(), file, line, enclosing_fn, kind: "query", pattern: "req.query" }
+      : { type, id: hex12(), file, line, enclosing_fn, class: "eval", callee: "eval", pattern: "eval(" });
+  }
   const edges = calls.map(([from, to, confidence]) => ({ type: "calls", from: fnId[from], to: to ? fnId[to] : null, line: 1, callee_text: to ?? "unknown", confidence }));
+  for (const [from, to] of nests) edges.push({ type: "nests", from: fnId[from], to: fnId[to] });
   const graph = { version: 1, generated_by: "test", stats: ZERO_STATS, nodes, edges };
   assert.deepEqual(validate("graph", graph), { valid: true, errors: [] }, "the synthetic graph must itself be schema-valid");
   return graph;
@@ -157,20 +166,100 @@ test("cycles terminate", () => {
 
 // ---- location mapping -------------------------------------------------------------------------------
 
-test("enclosingFn: the innermost function containing the line (greatest line_start, then smallest line_end); none => null", () => {
-  const graph = synth({ fns: { outer: ["a.js", 1, 20], inner: ["a.js", 5, 10], tight: ["a.js", 5, 8], other: ["b.js", 1, 20] } });
+test("enclosingFn: the innermost function containing the line (greatest line_start, then smallest line_end); a function opening on the line does not capture it; none => null", () => {
+  const graph = synth({ fns: { outer: ["a.js", 1, 20], inner: ["a.js", 5, 10], tight: ["a.js", 6, 8], other: ["b.js", 1, 20], solo: ["s.js", 3, 3], wrap: ["w.js", 1, 9], cb: ["w.js", 4, 9] } });
   const name = (f) => (f === null ? null : f.qualified_name);
   assert.equal(name(enclosingFn(graph, "a.js", 2)), "outer");
   assert.equal(name(enclosingFn(graph, "a.js", 9)), "inner");
-  assert.equal(name(enclosingFn(graph, "a.js", 5)), "tight");
+  assert.equal(name(enclosingFn(graph, "a.js", 5)), "outer"); // inner opens on line 5: `dao.find(id, (err, rows) => {` belongs to outer
+  assert.equal(name(enclosingFn(graph, "a.js", 6)), "inner"); // tight opens on line 6
+  assert.equal(name(enclosingFn(graph, "a.js", 7)), "tight");
   assert.equal(name(enclosingFn(graph, "a.js", 8)), "tight");
   assert.equal(name(enclosingFn(graph, "a.js", 20)), "outer");
   assert.equal(name(enclosingFn(graph, "a.js", 21)), null);
   assert.equal(name(enclosingFn(graph, "c.js", 1)), null);
+  assert.equal(name(enclosingFn(graph, "s.js", 3)), "solo"); // a one-line arrow with no enclosing function keeps the line
+  assert.equal(name(enclosingFn(graph, "w.js", 4)), "wrap");
+  assert.equal(name(enclosingFn(graph, "w.js", 5)), "cb");
   // the innermost choice decides the verdict: inner -> other is exact, outer -> other is not
   const g2 = synth({ fns: { outer: ["a.js", 1, 20], inner: ["a.js", 5, 10], t: ["b.js", 1, 3] }, calls: [["inner", "t", "exact"]] });
   assert.equal(one(g2, ["a.js", 6], ["b.js", 2]).structural_path, "proven");
   assert.equal(one(g2, ["a.js", 2], ["b.js", 2]).structural_path, "absent");
+});
+
+test("nests edges are exact edges: a sink inside a closure of the source's function is proven; a source inside the closure with the sink in the parent is reverse (n/a)", () => {
+  const graph = synth({ fns: { outer: ["a.js", 1, 20], cb: ["a.js", 5, 10], far: ["b.js", 1, 3] }, nests: [["outer", "cb"]], calls: [["cb", "far", "exact"]] });
+  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 7]), { structural_path: "proven", reason: "forward exact path (1 edges)" });
+  assert.deepEqual(one(graph, ["a.js", 2], ["b.js", 2]), { structural_path: "proven", reason: "forward exact path (2 edges)" });
+  assert.deepEqual(one(graph, ["a.js", 7], ["a.js", 15]), { structural_path: "n/a", reason: "return-value flow not modelled" });
+});
+
+test("nests edges never make a closure incomplete, and an unresolved call inside a closure is reached through them", () => {
+  const clean = synth({ fns: { s: ["a.js", 1, 10], cb: ["a.js", 3, 6], k: ["k.js", 1, 3] }, nests: [["s", "cb"]] });
+  assert.deepEqual(one(clean, ["a.js", 2], ["k.js", 2]), { structural_path: "absent", reason: "no connection within 6 edges" });
+  const dirty = synth({ fns: { s: ["a.js", 1, 10], cb: ["a.js", 3, 6], k: ["k.js", 1, 3] }, nests: [["s", "cb"]], calls: [["cb", null, "unresolved"]] });
+  assert.deepEqual(one(dirty, ["a.js", 2], ["k.js", 2]), { structural_path: "n/a", reason: "graph incomplete on the path" });
+});
+
+test("mapping prefers the graph's own anchors: a source on the line where a callback opens maps to the function the graph put it in; disagreeing or module-level anchors fall back to the line rule", () => {
+  const fns = { outer: ["a.js", 1, 20], cb: ["a.js", 5, 10] };
+  // `db.get(x, (e, d) => use(req.query.q)` on line 5: the graph anchored the source inside cb (byte-precise); the line rule alone says outer
+  const inside = synth({ fns, nests: [["outer", "cb"]], anchors: [["a.js", 5, "cb", "source"], ["a.js", 8, "cb", "sink"]] });
+  assert.deepEqual(one(inside, ["a.js", 5], ["a.js", 8]), { structural_path: "proven", reason: "same function" });
+  const bare = synth({ fns, nests: [["outer", "cb"]] });
+  assert.deepEqual(one(bare, ["a.js", 5], ["a.js", 8]), { structural_path: "proven", reason: "forward exact path (1 edges)" });
+  // two sinks on one line in different functions: no single anchor, the line rule decides (cb for both ends)
+  const split = synth({ fns, anchors: [["a.js", 8, "cb", "sink"], ["a.js", 8, "outer", "sink"]] });
+  assert.deepEqual(one(split, ["a.js", 8], ["a.js", 8]), { structural_path: "proven", reason: "same function" });
+  const moduleLevel = synth({ fns, anchors: [["a.js", 2, null, "source"]] });
+  assert.deepEqual(one(moduleLevel, ["a.js", 2], ["a.js", 3]), { structural_path: "proven", reason: "same function" });
+});
+
+test("a finding end on a line that opens a nested function is read both ways: readings that disagree are n/a (ambiguous), readings that agree keep the verdict", () => {
+  // Flask app factory: create_app defines search (3-6) and admin (8-12); a source cited on the `def search(q):` line
+  const graph = synth({ fns: { create_app: ["app.py", 1, 20], search: ["app.py", 3, 6], admin: ["app.py", 8, 12] }, nests: [["create_app", "search"], ["create_app", "admin"]] });
+  assert.deepEqual(one(graph, ["app.py", 3], ["app.py", 10]), { structural_path: "n/a", reason: "ambiguous location: the line opens a nested function" }); // create_app reaches admin, search does not
+  assert.deepEqual(one(graph, ["app.py", 4], ["app.py", 10]), { structural_path: "absent", reason: "no connection within 6 edges" });
+  assert.deepEqual(one(graph, ["app.py", 3], ["app.py", 5]), { structural_path: "proven", reason: "forward exact path (1 edges)" }); // create_app -> search, or search itself
+  // one line, one reading: both ends of a one-line arrow handler inside setup sit in the same function
+  const oneLiner = synth({ fns: { setup: ["a.js", 1, 10], arrow: ["a.js", 3, 3] }, nests: [["setup", "arrow"]] });
+  assert.deepEqual(one(oneLiner, ["a.js", 3], ["a.js", 3]), { structural_path: "proven", reason: "same function" });
+});
+
+test("transition anchors have roles: a from_anchor on a callback-opening line is the caller's call site, a to_anchor on a def line is that function", () => {
+  const graph = synth({
+    fns: { h: ["a.js", 1, 10], cb: ["a.js", 3, 8], mod: ["b.js", 1, 25], dao: ["b.js", 12, 20] },
+    nests: [["h", "cb"], ["mod", "dao"]],
+    calls: [["h", "dao", "exact"]]
+  });
+  const anchored = { kind: "call-path", from_anchor: { file: "a.js", line: 3 }, to_anchor: { file: "b.js", line: 12 } };
+  const out = checkChainStructure({ graph, findings: [finding("OSWE-1", ["a.js", 2], ["b.js", 15])], chains: [chain("CHAIN-1", [transition("OSWE-1", "OSWE-1", anchored)])] });
+  assert.deepEqual(out.transitions["CHAIN-1"], [{ index: 0, structural_path: "proven", reason: "forward exact path (1 edges)" }]);
+  // the same two lines as a finding's source and sink are ambiguous on both ends: (h, mod) is absent, (h, dao) proven
+  assert.deepEqual(one(graph, ["a.js", 3], ["b.js", 12]), { structural_path: "n/a", reason: "ambiguous location: the line opens a nested function" });
+});
+
+test("transition anchors never use the graph's anchors: a from_anchor on a one-line `dao.find(id, (e, r) => eval(r))` is the caller's call site even though the line's only anchor sits in the callback", () => {
+  const graph = synth({
+    fns: { h: ["a.js", 1, 10], cb: ["a.js", 3, 3], dao: ["b.js", 1, 5] },
+    nests: [["h", "cb"]],
+    calls: [["h", "dao", "exact"]],
+    anchors: [["a.js", 3, "cb", "sink"]]
+  });
+  const anchored = { kind: "call-path", from_anchor: { file: "a.js", line: 3 }, to_anchor: { file: "b.js", line: 2 } };
+  const out = checkChainStructure({ graph, findings: [finding("OSWE-1", ["a.js", 2], ["b.js", 3])], chains: [chain("CHAIN-1", [transition("OSWE-1", "OSWE-1", anchored)])] });
+  assert.deepEqual(out.transitions["CHAIN-1"], [{ index: 0, structural_path: "proven", reason: "forward exact path (1 edges)" }]);
+  // the same line as a finding's sink is an expression: the anchor places it in the callback
+  assert.deepEqual(one(graph, ["a.js", 2], ["a.js", 3]), { structural_path: "proven", reason: "forward exact path (1 edges)" });
+});
+
+test("anchors prefer the location's own role, and mixed module-level / in-function anchors on one line fall back to the line rule", () => {
+  const fns = { outer: ["a.js", 1, 20], cb: ["a.js", 5, 10] };
+  // line 5: `cache.get(req.query.k, (err, v) => eval(v))` — the source node sits in outer, the sink node in cb
+  const roles = synth({ fns, nests: [["outer", "cb"]], anchors: [["a.js", 5, "outer", "source"], ["a.js", 5, "cb", "sink"]] });
+  assert.deepEqual(one(roles, ["a.js", 5], ["a.js", 5]), { structural_path: "proven", reason: "forward exact path (1 edges)" });
+  const mixed = synth({ fns, anchors: [["a.js", 7, null, "sink"], ["a.js", 7, "cb", "sink"]] });
+  assert.deepEqual(one(mixed, ["a.js", 2], ["a.js", 7]), { structural_path: "absent", reason: "no connection within 6 edges" }); // line rule: outer -> cb, no nests edge here
 });
 
 test("finding paths are normalised (backslashes -> /, leading ./ stripped) before comparing with graph paths", () => {

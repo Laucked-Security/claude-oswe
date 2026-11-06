@@ -7,6 +7,12 @@
 // (type, from, to, line, start_byte); CRLF is normalised to LF before parsing, so two builds of the
 // same input — on any checkout — are byte-identical. No Date, no randomness, no absolute paths.
 //
+// Besides `calls`, a `nests` edge links every function to each function lexically nested in it (its
+// innermost container by byte range, resolve.mjs's parentsOf): a closure, callback or local helper
+// runs only within its enclosing function, so partition-graph, enumerate-paths and
+// check-chain-structure follow `nests` like an exact call (callback-style code keeps most of its
+// calls inside closures).
+//
 // API: buildGraph({ projectDir, scopeRealpath, stacks, frameworks, excludes, referencesDir, vendorDir })
 //        -> Promise<{ graph } | { graph: null, reason }>     (throws InputError on malformed input)
 //
@@ -46,7 +52,7 @@ import { parseSource, parserAvailable, VENDOR_DIR } from "./parser.mjs";
 import { walkFiles, DEFAULT_EXCLUDES } from "./walk.mjs";
 import { loadSurface, normalizeToken } from "./surface.mjs";
 import { matchesPattern } from "./match.mjs";
-import { loadResolutionConfigs, resolveImports, buildClassIndex, resolveCalls } from "./resolve.mjs";
+import { loadResolutionConfigs, resolveImports, buildClassIndex, resolveCalls, parentsOf } from "./resolve.mjs";
 import { nodeId, edgeKey } from "./ids.mjs";
 
 export const GENERATED_BY = "oswe-build-graph/1";
@@ -534,6 +540,24 @@ function callEdges(calls, parsed) {
   return edges;
 }
 
+// One `nests` edge per function lexically nested in another function of its file, from the innermost
+// container (by byte range, resolve.mjs's parentsOf) to the nested function.
+function nestEdges(parsed) {
+  const edges = [];
+  for (const file of parsed) {
+    const parents = parentsOf(file.extract.functions);
+    for (const fn of file.extract.functions) {
+      const parent = parents.get(fn) ?? null;
+      if (!parent) continue;
+      edges.push({
+        line: null, start: null,
+        edge: { type: "nests", from: nodeId("function", file.path, parent.qualified_name, parent.start_byte), to: nodeId("function", file.path, fn.qualified_name, fn.start_byte) }
+      });
+    }
+  }
+  return edges;
+}
+
 // `handles` / `uses_middleware` (order = position in `middlewares`; it also fills the key's offset slot).
 function routeEdges(routes) {
   const edges = [];
@@ -620,7 +644,7 @@ async function assemble(prep) {
   const routes = buildRoutes(parsed, routeTexts, importMap, (path) => surfaceOf(stackOfPath.get(path)), notExtractedOf);
 
   const nodes = sortNodes([...files.map(fileNode), ...parsed.flatMap(extractNodes), ...routes.map((r) => r.node)]);
-  const edges = sortEdges([...importEdges(parsed, importMap), ...callEdges(calls, parsed), ...routeEdges(routes)]);
+  const edges = sortEdges([...importEdges(parsed, importMap), ...callEdges(calls, parsed), ...nestEdges(parsed), ...routeEdges(routes)]);
   const graph = { version: 1, generated_by: GENERATED_BY, stats: buildStats(prep, nodes, edges, notExtracted), nodes, edges };
 
   if (!validate("graph", graph).valid) return { graph: null, reason: ENVELOPE_REASONS.invalidGraph };

@@ -6,6 +6,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeToken, classifyPattern, loadSurface } from "../../graph/surface.mjs";
 import { sinkClassFor, SINK_CLASS_RULES } from "../../graph/sink-classes.mjs";
+import { matchesPattern } from "../../graph/match.mjs";
 
 const REFERENCES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "references");
 const STACKS = ["php", "node", "python", "java", "dotnet"];
@@ -227,6 +228,24 @@ test("sinkClassFor lower-cases its input; one case per class and a rule-order ch
     ["Path.Combine", "dotnet", "file-read"],
     ["res.sendFile", "node", "file-read"],
     ["axios", "node", "ssrf"],
+    ["needle.get", "node", "ssrf"],
+    ["http.get", "node", "ssrf"],
+    ["https.request", "node", "ssrf"],
+    ["request", "node", "ssrf"],
+    ["got.post", "node", "ssrf"],
+    ["superagent.get", "node", "ssrf"],
+    ["readFileSync", "node", "file-read"],
+    ["createReadStream", "node", "file-read"],
+    ["createWriteStream", "node", "file-write"],
+    ["_.template", "node", "template"],
+    ["handlebars.compile", "node", "template"],
+    ["pug.compile", "node", "template"],
+    ["knex.raw", "node", "sql"],
+    ["sequelize.literal", "node", "sql"],
+    ["vm.runInContext", "node", "eval"],
+    ["vm.runInThisContext", "node", "eval"],
+    ["unserialize", "node", "deser"],
+    ["res.redirect", "node", "redirect"],
     ["XmlDocument", "dotnet", "xxe"],
     ["setAttribute", "java", "trust-boundary"],
     ["redirect", "node", "redirect"],
@@ -246,6 +265,24 @@ test("SINK_CLASS_RULES is a frozen ordered table ending before the 'other' defau
     "file-write", "file-read", "ssrf", "xxe", "trust-boundary", "redirect"
   ]);
   for (const r of SINK_CLASS_RULES) assert.equal(typeof r.test, "function");
+});
+
+test("node surface: HTTP clients, redirect, fs and template sinks are call-shaped (a bare `redirect(` matches `res.redirect`); Express auth conventions are word markers (bare or last segment)", () => {
+  const node = loadSurface("node", REFERENCES_DIR);
+  const sink = (raw) => node.sinks.find((p) => p.raw === raw);
+  for (const raw of ["needle.get", "fetch(", "request(", "redirect(", "readFile(", "createWriteStream(", "_.template"]) assert.equal(sink(raw)?.shape, "call", raw);
+  assert.equal(sinkClassFor(sink("needle.get").normalized, "node"), "ssrf");
+  assert.equal(sinkClassFor(sink("redirect(").normalized, "node"), "redirect");
+  assert.equal(sinkClassFor(sink("readFile(").normalized, "node"), "file-read");
+  assert.ok(matchesPattern(sink("redirect("), { category: "call", text: "res.redirect" }));
+  assert.ok(matchesPattern(sink("request("), { category: "call", text: "http.request" }));
+  assert.ok(!matchesPattern(sink("redirect("), { category: "call", text: "this.redirect" }));
+  for (const raw of ["isLoggedIn", "isAuthenticated", "ensureLoggedIn", "requireLogin", "isAdmin"]) {
+    const marker = node.auth_markers.find((p) => p.raw === raw);
+    assert.equal(marker?.shape, "word", raw);
+    assert.ok(matchesPattern(marker, { category: "identifier", text: raw }), raw);
+    assert.ok(matchesPattern(marker, { category: "identifier", text: `auth.${raw}` }), `auth.${raw}`);
+  }
 });
 
 test("every real sink token maps to a defined sink class", () => {

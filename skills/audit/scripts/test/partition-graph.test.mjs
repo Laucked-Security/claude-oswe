@@ -41,7 +41,8 @@ const ZERO_STATS = {
 //   fns:    { name: file }                  (function ids are derived from the name)
 //   routes: [{ file, auth, handler?, middlewares? }]   (handler / middlewares name functions)
 //   calls:  [[fromName, toName | null, confidence]]
-function synth({ files = [], fns = {}, routes = [], calls = [] }) {
+//   nests:  [[outerName, nestedName]]
+function synth({ files = [], fns = {}, routes = [], calls = [], nests = [] }) {
   const fnId = Object.fromEntries(Object.keys(fns).map((name) => [name, hex12()]));
   const nodes = [];
   const edges = [];
@@ -64,10 +65,24 @@ function synth({ files = [], fns = {}, routes = [], calls = [] }) {
   for (const [from, to, confidence] of calls) {
     edges.push({ type: "calls", from: fnId[from], to: to ? fnId[to] : null, line: 1, callee_text: to ?? "unknown", confidence });
   }
+  for (const [from, to] of nests) edges.push({ type: "nests", from: fnId[from], to: fnId[to] });
   const graph = { version: 1, generated_by: "test", stats: ZERO_STATS, nodes, edges };
   assert.deepEqual(validate("graph", graph), { valid: true, errors: [] }, "the synthetic graph must itself be schema-valid");
   return graph;
 }
+
+test("nests edges extend reachability: a file reached only from inside a handler's callback is claimed by the route's group", () => {
+  const graph = synth({
+    files: ["a.js", "z.js"],
+    fns: { h: "a.js", cb: "a.js", z: "z.js" },
+    routes: [{ file: "a.js", auth: "authenticated", handler: "h" }],
+    nests: [["h", "cb"]],
+    calls: [["cb", "z", "exact"]]
+  });
+  const out = partitionGraph({ graph, fallback_partitions: [{ partition_id: "p", stack: "node", files: ["a.js", "z.js"] }] });
+  assert.deepEqual(out.partitions.map((p) => [p.partition_id, p.files]), [["g-node-authenticated-root", ["a.js", "z.js"]]]);
+  assert.deepEqual(out.orphan_partition_ids, []);
+});
 
 const fallbackOf = (...partitions) => partitions.map(([partition_id, stack, files]) => ({ partition_id, stack, files }));
 

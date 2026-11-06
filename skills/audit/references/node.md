@@ -40,8 +40,8 @@
 ```surface
 {
   "sources": ["req.query", "req.body", "req.params", "req.headers", "req.cookies", "req.files", "@Query(", "@Body(", "@Param(", "@Headers(", "@Req("],
-  "sinks": ["child_process.exec", "execSync", ".spawn(", "execFile", "eval(", "new Function", "vm.runInNewContext", "$where", "$ne", "$gt", "$regex", "child_process", "require(", ".query(", "sequelize.query", "res.sendFile"],
+  "sinks": ["child_process.exec", "execSync", ".spawn(", "execFile", "eval(", "new Function", "vm.runInNewContext", "vm.runInContext", "vm.runInThisContext", "$where", "$ne", "$gt", "$regex", "child_process", "require(", ".query(", "sequelize.query", "sequelize.literal", "knex.raw", "res.sendFile", "readFile(", "readFileSync(", "createReadStream(", "writeFile(", "writeFileSync(", "createWriteStream(", "axios(", "axios.get", "axios.post", "axios.request", "fetch(", "got(", "got.get", "got.post", "needle.get", "needle.post", "needle.request", "http.get", "https.get", "http.request", "https.request", "request(", "superagent.get", "redirect(", "unserialize(", "yaml.load", "lodash.template", "_.template", "handlebars.compile", "pug.compile", "ejs.compile"],
   "sanitizers": ["mongo-sanitize", "escape("],
-  "auth_markers": ["passport.authenticate", "@UseGuards", "ensureAuthenticated", "req.isAuthenticated(", "requireAuth", "@Roles("]
+  "auth_markers": ["passport.authenticate", "@UseGuards", "ensureAuthenticated", "req.isAuthenticated(", "requireAuth", "@Roles(", "isLoggedIn", "isAuthenticated", "ensureLoggedIn", "requireLogin", "requireUser", "verifyToken", "authenticateToken", "checkAuth", "isAdmin"]
 }
 ```

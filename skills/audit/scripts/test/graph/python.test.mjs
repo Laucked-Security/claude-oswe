@@ -192,15 +192,41 @@ test("calls: scope_names hold parameters, locals, loop / with / except / walrus 
       "    try:\n        pass\n    except E as l:\n        pass\n    if (w := 1):\n        pass\n    [q for q in a]\n    def nested():\n        pass\n    class Local:\n        pass\n    run()\n"
   );
   const run = x.calls.find((c) => c.callee_text === "run");
-  assert.deepEqual(run.scope_names, ["G", "Local", "a", "b", "c", "d", "e", "g", "h", "i", "j", "k", "l", "nested", "q", "w"]);
+  // a nested def (`nested`) is a definition resolve.mjs reaches through its container, not a shadowing local
+  assert.deepEqual(run.scope_names, ["G", "Local", "a", "b", "c", "d", "e", "g", "h", "i", "j", "k", "l", "q", "w"]);
   assert.equal(run.enclosing_start_byte, x.functions.find((fn) => fn.name === "f").start_byte);
+});
+
+test("calls: a nested def and an `x = lambda` target are definitions (binds_name), not scope_names; an anonymous lambda binds nothing; an ordinary local still shadows", async () => {
+  const x = await extract("def outer(a):\n    def inner():\n        pass\n    check = lambda: 1\n    plain = 2\n    cb(lambda: 2)\n    inner()\n    check()\n    plain()\n");
+  const scopes = Object.fromEntries(x.calls.filter((c) => c.callee_text !== "cb").map((c) => [c.callee_text, c.scope_names]));
+  assert.deepEqual(scopes, { inner: ["a", "plain"], check: ["a", "plain"], plain: ["a", "plain"] });
+  assert.deepEqual(x.functions.map((f) => [f.qualified_name, f.kind, f.binds_name ?? false]), [
+    ["outer", "function", true], ["outer.inner", "function", true], ["outer.check", "lambda", true], ["outer.<anon>@6:8", "lambda", false]
+  ]);
+});
+
+test("calls: a name bound to a lambda or a nested def carries no class — before or after `x = C()`, and from an inner scope — so x.m() has no receiver class", async () => {
+  const x = await extract(
+    "class C:\n    def m(self):\n        pass\n\ndef f():\n    x = C()\n    x = lambda: 1\n    x.m()\n\ndef g():\n    y = C()\n    y.m()\n\n" +
+      "def h():\n    z = lambda: 1\n    z = C()\n    z.m()\n\ndef i():\n    w = C()\n    def inner():\n        w = lambda: 1\n        w.m()\n    w.m()\n\ndef j():\n    v = C()\n    def v():\n        pass\n    v.m()\n"
+  );
+  const call = (callee, line) => x.calls.find((c) => c.callee_text === callee && c.line === line);
+  assert.equal(call("x.m", 8).receiver_class, null); // rebound to a lambda after C()
+  assert.equal(call("y.m", 12).receiver_class, "C");
+  assert.equal(call("z.m", 17).receiver_class, null); // bound to a lambda before C(): bound twice, no class
+  assert.equal(call("w.m", 23).receiver_class, null); // the inner lambda shadows the outer class binding
+  assert.equal(call("w.m", 24).receiver_class, "C"); // the outer scope keeps it
+  assert.equal(call("v.m", 30).receiver_class, null); // a nested def rebinds the name
+  assert.ok(!x.calls.some((c) => c.scope_names.includes("inner")), "a definition alone is not a scope_name");
+  assert.ok(call("z.m", 17).scope_names.includes("z"), "a name bound to a lambda and then to an instance is an ordinary (shadowing) local");
 });
 
 test("calls: the fixture's shadowing case, decorators are not calls, anchors at the callee's last identifier", async () => {
   const x = await extractFixture("app.py");
   const cb = x.calls.find((c) => c.callee_text === "cb");
   assert.ok(cb.scope_names.includes("cb"), "the parameter cb shadows the module-level def");
-  assert.deepEqual(x.calls.find((c) => c.callee_text === "helper").scope_names, ["app", "check", "runner"]);
+  assert.deepEqual(x.calls.find((c) => c.callee_text === "helper").scope_names, ["app", "runner"]); // `check = lambda` is a definition
   assert.ok(!x.calls.some((c) => c.callee_text === "app.route" || c.callee_text === "login_required"));
   const text = readFileSync(join(FIXTURE_DIR, "app.py"), "utf8").replace(/\r\n/g, "\n");
   const run = x.calls.find((c) => c.callee_text === "runner.run");

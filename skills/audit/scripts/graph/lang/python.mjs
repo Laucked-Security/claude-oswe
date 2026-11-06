@@ -15,9 +15,10 @@
 //   classes    `extends` is the last dotted segment of the first base (`object` and keyword
 //              arguments ignored); further bases are only noted ("multiple inheritance").
 //   scopes     scope_names are the bindings of every enclosing def / lambda (parameters,
-//              assignment / loop / with / except / walrus / comprehension targets, nested def and
-//              class names) plus the module's assignment targets. Imports and module-level def /
-//              class names never shadow. A class body binds nothing visible to its methods.
+//              assignment / loop / with / except / walrus / comprehension targets, nested class
+//              names) plus the module's assignment targets. Imports, def names (a nested def is a
+//              definition resolve.mjs finds through its container) and `x = lambda` targets never
+//              shadow. A class body binds nothing visible to its methods.
 //   receivers  `self` is a method's first parameter, whatever its name (`self`, `cls`, `me`), as
 //              long as the method is not a `@staticmethod` and does not rebind it: `self.m()` ->
 //              receiver "this"; `self.a.m()` -> the declared class of attribute a; any other
@@ -36,7 +37,7 @@
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
 import { posix } from "node:path";
 import { normalizeToken } from "../surface.mjs";
-import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, lastSegment, repoPath } from "./common.mjs";
+import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, define, lastSegment, repoPath } from "./common.mjs";
 
 export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true, callableLocals: true, overloads: false };
 
@@ -145,7 +146,7 @@ function constructedClass(value) {
 
 // A method's frame also records its receiver parameter (`selfName`, the first parameter, whatever its
 // name), whether the body rebinds it, and its class's attribute types (see receiverOf).
-const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map(), selfName: null, selfRebound: false, fieldTypes: null });
+const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map(), definitions: new Set(), selfName: null, selfRebound: false, fieldTypes: null });
 
 function newState(path, surface) {
   return {
@@ -166,10 +167,14 @@ const functionFrames = (st) => st.scopes.filter((s) => s.frame).map((s) => s.fra
 const innermostFrame = (st) => st.scopes.findLast((s) => s.frame)?.frame ?? null;
 const atModule = (st) => st.scopes.length === 0;
 
-// Record `name` as bound in `frame`; a second binding to a different class (or to no class) drops
-// the class: the name is then demonstrably bound, but not to one class.
+// Record `name` as bound in `frame`; a second binding to a different class (or to no class, a nested
+// function definition included) drops the class: the name is then demonstrably bound, but not to one
+// class.
 function addBinding(frame, name, cls) {
-  if (!frame.bindings.has(name)) {
+  if (frame.definitions.has(name)) {
+    frame.bindings.add(name);
+    frame.classOf.delete(name);
+  } else if (!frame.bindings.has(name)) {
     frame.bindings.add(name);
     if (cls) frame.classOf.set(name, cls);
   } else if (frame.classOf.get(name) !== cls) frame.classOf.delete(name);
@@ -185,6 +190,15 @@ function bind(st, name, { cls = null, assignment = false } = {}) {
     addBinding(top.frame, name, cls);
     if (top.frame.selfName === name) top.frame.selfRebound = true;
   } else if (assignment) addBinding(st.module, name, cls);
+}
+
+// The name is bound to a nested function (`def name`, `name = lambda`) in the scope bind() would use:
+// a definition resolve.mjs reaches through its container, never a scope_name, but a name that carries
+// no class and shadows an outer class binding (common.mjs define / receiverClass).
+function defineName(st, name) {
+  const top = st.scopes.at(-1);
+  if (top?.cls) return;
+  define(top ? top.frame : st.module, name);
 }
 
 // ---- sources and sinks ----------------------------------------------------------------------------
@@ -294,6 +308,9 @@ function onFunction(node, st, ctx) {
   const top = st.scopes.at(-1);
   const cls = node.type === "function_definition" && top?.cls ? top.cls.name : null;
   let name = functionName(node, ctx);
+  // a def, or a lambda named by the assignment initialising it, binds its name in the enclosing scope
+  // (resolve.mjs's nested definitions); an anonymous lambda binds nothing
+  const bindsName = node.type === "function_definition" || name !== null;
   let qualifiedName;
   if (!name) {
     name = "<anon>";
@@ -303,9 +320,11 @@ function onFunction(node, st, ctx) {
   } else {
     qualifiedName = enclosing ? `${enclosing.qualifiedName}.${name}` : name;
   }
+  // a def is a definition, never a scope_name (a nested one is resolved through its container), but
+  // its name carries no class from here on
   if (node.type === "function_definition") {
     if (atModule(st)) st.topLevel.push([name, node.startIndex]);
-    else bind(st, name);
+    defineName(st, name);
   }
   const selfName = cls ? receiverParameter(node) : null;
   st.functions.push({
@@ -319,6 +338,7 @@ function onFunction(node, st, ctx) {
     kind: node.type === "lambda" ? "lambda" : cls ? "method" : "function",
     exported: false,
     class: cls,
+    ...(bindsName ? { binds_name: true } : {}),
     // a lambda's lexical class body: resolve.mjs inherits a containing method's class only within it
     ...(node.type === "lambda" ? { class_start_byte: st.scopes.findLast((s) => s.cls)?.cls.start ?? null } : {})
   });
@@ -334,7 +354,10 @@ function onAssignment(node, st) {
   const left = field(node, "left");
   const right = field(node, "right");
   const cls = left?.type === "identifier" ? typeName(field(node, "type")) ?? constructedClass(right) : null;
-  for (const name of patternNames(left)) bind(st, name, { cls, assignment: true });
+  // `x = lambda: ...` defines the function named x (onFunction): a definition, not a scope_name, and a
+  // name that carries no class before or after (`x = C()` either side of it)
+  if (left?.type === "identifier" && right?.type === "lambda") defineName(st, left.text);
+  else for (const name of patternNames(left)) bind(st, name, { cls, assignment: true });
   if (!atModule(st) || left?.type !== "identifier") return;
   if (left.text === "__all__" && (right?.type === "list" || right?.type === "tuple")) {
     const names = namedOf(right).map(stringValue);

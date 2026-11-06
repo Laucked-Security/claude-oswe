@@ -76,9 +76,13 @@ export function walk(tree, st, handlers, cursorHandlers) {
 
 // ---- scopes ---------------------------------------------------------------------------------------
 
-// A scope's frame of `bindings` / `classOf` (see receiverClass): a function's (with its start byte
-// and qualified name), a block's or a class body's. NO_FRAME binds nothing; it is never written to.
-export const newFrame = (startIndex = null, qualifiedName = null) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map() });
+// A scope's frame of `bindings` / `classOf` / `definitions` (see receiverClass): a function's (with its
+// start byte and qualified name), a block's or a class body's. `definitions` are the names the scope
+// binds to a nested function (`const f = () => {}`, `def f():`, `x = lambda`): never scope_names
+// (resolve.mjs reaches those definitions through their container), but a name bound to a function
+// carries no class and shadows an outer class binding like any local. NO_FRAME binds nothing; it is
+// never written to.
+export const newFrame = (startIndex = null, qualifiedName = null) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map(), definitions: new Set() });
 export const NO_FRAME = newFrame();
 
 export function bind(frame, name, cls) {
@@ -86,6 +90,13 @@ export function bind(frame, name, cls) {
   frame.bindings.add(name);
   if (cls) frame.classOf.set(name, cls);
   else frame.classOf.delete(name);
+}
+
+// Record `name` as bound to a nested function in `frame`: a definition, not a scope_name.
+export function define(frame, name) {
+  if (!frame || !name) return;
+  frame.definitions.add(name);
+  frame.classOf.delete(name);
 }
 
 // For the modules whose state keeps `st.scopes` (innermost last: `{ frame, fn: true }` for a
@@ -104,12 +115,12 @@ export const innermostClass = (st) => innermostClassScope(st)?.cls ?? null;
 export const enclosingName = (st) => innermostFunction(st)?.qualifiedName ?? innermostClass(st)?.qualifiedName ?? st.moduleName;
 
 // The class a receiver name is demonstrably bound to: the innermost scope binding the name wins (a
-// plain parameter or local shadows an outer constructed / annotated binding). Frames carry
-// `bindings: Set<name>` and `classOf: Map<name, class>`.
+// plain parameter or local, or a nested function definition, shadows an outer constructed / annotated
+// binding). Frames carry `bindings: Set<name>`, `classOf: Map<name, class>` and `definitions: Set<name>`.
 export function receiverClass(name, frames, moduleFrame) {
   for (const frame of [...frames].reverse()) {
     if (frame.classOf.has(name)) return frame.classOf.get(name);
-    if (frame.bindings.has(name)) return null;
+    if (frame.bindings.has(name) || frame.definitions?.has(name)) return null;
   }
   return moduleFrame.classOf.get(name) ?? null;
 }

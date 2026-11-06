@@ -464,6 +464,16 @@
       "to": "e3a8ac4d7b87",
       "confidence": "exact",
       "specifier": "com.ex.service.UserService"
+    },
+    {
+      "type": "nests",
+      "from": "389e6b7fe06f",
+      "to": "896c3c98c6ad"
+    },
+    {
+      "type": "nests",
+      "from": "e3137580c744",
+      "to": "00698bea4101"
     }
   ]
 }

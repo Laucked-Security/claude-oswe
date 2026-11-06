@@ -435,6 +435,21 @@ test("(6) overloaded handlers: a route inside none of them falls back to the tex
   assert.deepEqual(graph.stats.coverage_matrix.node.not_extracted, ["route(overloaded handler)"]);
 });
 
+test("nests edges: a closure or local helper is linked from its innermost enclosing function, and a nested helper call resolves exact", async (t) => {
+  const dir = tempDir(t);
+  put(dir, "a.js", "function h(req, res) {\n  const helper = () => { eval(req.body.x); };\n  db.get(1, (e, d) => { helper(); });\n}\napp.post('/x', h);\nmodule.exports = h;\n");
+  const { graph } = await build(dir);
+  const h = fnNamed(graph, "a.js", "h");
+  const helper = fnNamed(graph, "a.js", "h.helper");
+  const cb = nodesOf(graph, "function").find((n) => n.qualified_name.startsWith("h.<anon>@"));
+  const nests = graph.edges.filter((e) => e.type === "nests").map((e) => `${e.from}>${e.to}`).sort();
+  assert.deepEqual(nests, [`${h.id}>${helper.id}`, `${h.id}>${cb.id}`].sort());
+  assert.deepEqual(graph.edges.filter((e) => e.type === "calls" && e.callee_text === "helper").map((e) => [e.from, e.to, e.confidence]), [[cb.id, helper.id, "exact"]]);
+  assert.equal(nodesOf(graph, "sink").find((n) => n.callee === "eval").enclosing_fn, helper.id);
+  assert.equal(graph.stats.calls_exact, 1);
+  assert.deepEqual(validate("graph", graph), { valid: true, errors: [] });
+});
+
 test("(6) a mount cycle drops the cycle-closing mount: the root's routes stay unprefixed", async (t) => {
   const dir = tempDir(t);
   put(dir, "a.js", "const b = require('./b');\napp.use('/b', b);\napp.get('/x', (req, res) => {});\nmodule.exports = app;\n");

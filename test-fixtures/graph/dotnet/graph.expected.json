@@ -8,9 +8,9 @@
     "files_skipped": 0,
     "functions": 15,
     "calls_total": 10,
-    "calls_exact": 2,
+    "calls_exact": 3,
     "calls_name_only": 3,
-    "calls_unresolved": 5,
+    "calls_unresolved": 4,
     "routes_by_auth": {
       "unauthenticated": 4,
       "authenticated": 2,
@@ -420,10 +420,10 @@
     {
       "type": "calls",
       "from": "22fbb41b121c",
-      "to": null,
+      "to": "d8ac7c86144d",
       "line": 20,
       "callee_text": "a",
-      "confidence": "unresolved"
+      "confidence": "exact"
     },
     {
       "type": "calls",
@@ -531,6 +531,11 @@
       "to": "974ab8c45760",
       "confidence": "heuristic",
       "specifier": "Demo.Services"
+    },
+    {
+      "type": "nests",
+      "from": "22fbb41b121c",
+      "to": "d8ac7c86144d"
     }
   ]
 }

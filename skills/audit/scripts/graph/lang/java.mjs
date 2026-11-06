@@ -367,7 +367,9 @@ function onFunction(node, st, ctx) {
   if (node.type === "lambda_expression") {
     const local = lambdaName(node, ctx);
     const qualifiedName = `${enclosingName(st)}.${local ?? anonLabel(node)}`;
-    fn = { name: local ?? "<anon>", qualified_name: qualifiedName, kind: "lambda", exported: false, class: null, classStart: innermostClass(st)?.start ?? null };
+    // a lambda named by the local it initialises binds that name in the enclosing scope (resolve.mjs's
+    // nested definitions)
+    fn = { name: local ?? "<anon>", qualified_name: qualifiedName, kind: "lambda", exported: false, class: null, classStart: innermostClass(st)?.start ?? null, bindsName: local !== null };
   } else {
     const name = field(node, "name")?.text ?? "<anon>";
     const isPublic = owner?.isInterface || hasModifier(node, "public");
@@ -384,6 +386,7 @@ function onFunction(node, st, ctx) {
     kind: fn.kind,
     exported: fn.exported,
     class: fn.class,
+    ...(fn.bindsName ? { binds_name: true } : {}),
     // a lambda's lexical class body: resolve.mjs inherits a containing method's class only within it
     ...(fn.kind === "lambda" ? { class_start_byte: fn.classStart } : {}),
     // an interface method without a default body, an abstract (or native) method: resolve.mjs never

@@ -40,7 +40,8 @@ function fullGraph() {
     { type: "calls", from: ID(3), to: ID(4), line: 7, callee_text: "helper", confidence: "exact" },
     { type: "calls", from: ID(3), to: null, line: 8, callee_text: "mystery", confidence: "unresolved" },
     { type: "handles", from: ID(5), to: ID(3) },
-    { type: "uses_middleware", from: ID(5), to: ID(4), order: 0 }
+    { type: "uses_middleware", from: ID(5), to: ID(4), order: 0 },
+    { type: "nests", from: ID(3), to: ID(4) }
   ];
   g.stats.coverage_matrix = {
     node: { frameworks_detected: ["express"], extractors_applied: ["routes"], not_extracted: [], patterns_unmatched: [] }
@@ -69,6 +70,15 @@ test("graph: calls edge missing confidence is rejected", () => {
   const g = fullGraph();
   delete g.edges[1].confidence;
   assert.equal(validate("graph", g).valid, false);
+});
+
+test("graph: a nests edge carries only from and to (no confidence, no null target)", () => {
+  const withConfidence = fullGraph();
+  withConfidence.edges.push({ type: "nests", from: ID(3), to: ID(4), confidence: "exact" });
+  assert.equal(validate("graph", withConfidence).valid, false);
+  const nullTarget = fullGraph();
+  nullTarget.edges.push({ type: "nests", from: ID(3), to: null });
+  assert.equal(validate("graph", nullTarget).valid, false);
 });
 
 test("graph: node with an unknown type is rejected", () => {

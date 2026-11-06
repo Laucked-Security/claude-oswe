@@ -9,7 +9,8 @@
 // API: checkChainStructure({ graph, findings, chains, max_depth = 6 })
 //        -> { findings: { "OSWE-N": { structural_path, reason } },
 //             transitions: { "CHAIN-N": [ { index, structural_path, reason } ] } }
-//      enclosingFn(graph, file, line) -> the innermost function node containing the line, or null.
+//      enclosingFn(graph, file, line) -> the caller-side reading of the line: the innermost function node
+//      containing it, except one opening on the line when an enclosing function contains it too; or null.
 //      throws InputError (message "bad input: ...") on malformed input. `graph` is the graph object or null
 //      (no graph: every finding and every transition is "n/a" with reason "graph unavailable"). `findings`
 //      are the aggregated findings (finding_id OSWE-N, source / sink { file, line, ... }); `chains` are
@@ -26,14 +27,28 @@
 //   { "graph": null, "reason" } is graph null, { "graph": <object> } is that object. Unreadable / unparsable
 //   => exit 2, like --file; the loaded graph is validated like an inline one.
 //
-// Mapping. A location { file, line } maps to enclosingFn: the function node of that file with
-// line_start <= line <= line_end, the innermost one when several match (greatest line_start, then smallest
-// line_end, then smaller id). The location's file and the graph's paths compare in graph/text.mjs's pathKey
-// form (backslashes -> "/", leading "./" stripped, case folded on win32 only).
+// Mapping. A location { file, line } maps to the function the graph itself anchored there when every
+// `source` / `sink` node of the graph on that line — those of the location's own role (source nodes for
+// a source end, sink nodes for a sink end) when there are any, else all of them — has the same non-null
+// enclosing_fn (byte-precise: a callback opening on the sink's line does not capture a sink that precedes
+// it). Otherwise it maps to the functions of that file containing the line (line_start <= line <=
+// line_end): the innermost one (greatest line_start, then smallest line_end, then smaller id) — or, when
+// that one OPENS on the line and an enclosing function contains the line too, BOTH the enclosing one
+// (preferred) and the opening one: `dao.find(id, (err, rows) => {` is the caller's call and the callback's
+// first line. A finding's source or sink read both ways must give one structural_path, else the verdict
+// is n/a "ambiguous location: the line opens a nested function" (a parent reaches every closure it
+// defines through `nests`); the two ends of one line are read together. A call-path transition's
+// from_anchor is the caller's call site (the enclosing reading only), its to_anchor the entry it reaches
+// (the opening function); anchors place expressions, so neither uses them. The location's file and the
+// graph's paths compare in graph/text.mjs's pathKey form (backslashes -> "/", leading "./" stripped,
+// case folded on win32 only).
 //
-// Connectivity. BFS over `calls` edges with a non-null `to`, at most max_depth edges. An "exact" search
-// follows only `exact` edges; an "any" search follows `exact` and `name-only` edges (never `unresolved`).
-// Forward = from the source's function S toward the sink's function K; reverse = from K toward S.
+// Connectivity. BFS over `calls` edges with a non-null `to` and over `nests` edges (a function lexically
+// nested in another — a callback, a closure, a local helper — runs within it, so a nests edge is followed
+// like an exact call and never counts as a non-exact one), at most max_depth edges. An "exact" search
+// follows only `exact` calls and nests edges; an "any" search follows `exact` and `name-only` calls plus
+// nests edges (never `unresolved`). Forward = from the source's function S toward the sink's function K;
+// reverse = from K toward S.
 //
 // Decision table between a from-location (source) and a to-location (sink), evaluated in this order:
 //   source maps to no function                      -> n/a    "source line maps to no function"
@@ -138,47 +153,93 @@ function checkInput(input) {
 
 // ---- graph index ------------------------------------------------------------------------------------
 
-// The innermost of the functions containing `line`: greatest line_start, then smallest line_end, then
-// smaller id, so the choice does not depend on node order.
-function innermost(fns, line) {
-  let best = null;
+// The functions of `fns` containing `line`: `innermost` (greatest line_start, then smallest line_end,
+// then smaller id, so the choice does not depend on node order) and `enclosing`, the innermost among
+// those that opened BEFORE the line (null when none). When `innermost` opens on the line, a location
+// there may sit in either: `dao.find(id, (err, rows) => {` is the caller's call and the callback's
+// first line.
+function containing(fns, line) {
+  const inner = (a, b) => (a === null || b.line_start > a.line_start || (b.line_start === a.line_start && (b.line_end < a.line_end || (b.line_end === a.line_end && compare(b.id, a.id) < 0))) ? b : a);
+  let innermost = null;
+  let enclosing = null;
   for (const fn of fns) {
     if (fn.line_start > line || line > fn.line_end) continue;
-    if (best === null || fn.line_start > best.line_start || (fn.line_start === best.line_start && (fn.line_end < best.line_end || (fn.line_end === best.line_end && compare(fn.id, best.id) < 0)))) {
-      best = fn;
-    }
+    innermost = inner(innermost, fn);
+    if (fn.line_start < line) enclosing = inner(enclosing, fn);
   }
-  return best;
+  return { innermost, enclosing };
 }
 
+// The caller-side reading of a line: the innermost function containing it, except one opening on the
+// line when an enclosing function contains the line too (header, "Mapping"); none => null.
 export function enclosingFn(graph, file, line) {
   const key = pathKey(file);
-  return innermost(graph.nodes.filter((n) => n.type === "function" && pathKey(n.file) === key), line);
+  const { innermost, enclosing } = containing(graph.nodes.filter((n) => n.type === "function" && pathKey(n.file) === key), line);
+  return innermost !== null && innermost.line_start === line && enclosing !== null ? enclosing : innermost;
 }
 
 function indexGraph(graph) {
   const fnsByFile = new Map(); // pathKey(file) -> function nodes
+  const fnById = new Map(); // function id -> function node
+  const anchors = new Map(); // "<pathKey(file)>\0<line>" -> enclosing_fn of every source / sink node on that line
+  const push = (map, from, to) => (map.has(from) ? map.get(from).push(to) : map.set(from, [to]));
   for (const n of graph.nodes) {
-    if (n.type !== "function") continue;
-    const key = pathKey(n.file);
-    if (fnsByFile.has(key)) fnsByFile.get(key).push(n);
-    else fnsByFile.set(key, [n]);
+    if (n.type === "function") {
+      fnById.set(n.id, n);
+      push(fnsByFile, pathKey(n.file), n);
+    } else if (n.type === "source" || n.type === "sink") {
+      push(anchors, `${pathKey(n.file)}\u0000${n.line}`, { type: n.type, fn: n.enclosing_fn });
+    }
   }
   const exact = new Map(); // function id -> callee ids over exact edges
   const any = new Map(); // function id -> callee ids over exact and name-only edges
   const incomplete = new Set(); // function ids with an outgoing call that is not exact (any `to`, null included)
-  const push = (map, from, to) => (map.has(from) ? map.get(from).push(to) : map.set(from, [to]));
   for (const e of graph.edges) {
+    if (e.type === "nests") {
+      push(exact, e.from, e.to);
+      push(any, e.from, e.to);
+      continue;
+    }
     if (e.type !== "calls") continue;
     if (e.confidence !== "exact") incomplete.add(e.from);
     if (e.to === null) continue;
     if (e.confidence === "exact") push(exact, e.from, e.to);
     if (e.confidence === "exact" || e.confidence === "name-only") push(any, e.from, e.to);
   }
-  return { fnsByFile, exact, any, incomplete };
+  return { fnsByFile, fnById, anchors, exact, any, incomplete };
 }
 
-const mapLocation = ({ fnsByFile }, { file, line }) => innermost(fnsByFile.get(pathKey(file)) ?? [], line);
+// The graph's own anchor for a line, as a function node: the enclosing_fn every source / sink node of
+// the preferred role on that line shares (source nodes for a source end, sink nodes for a sink end), else
+// every node of any role there; undefined when there is none, when they disagree or when it is
+// module-level (null).
+function anchorFor(index, key, line, role) {
+  const all = index.anchors.get(`${key}\u0000${line}`);
+  if (!all) return undefined;
+  const preferred = all.filter((a) => a.type === role);
+  const chosen = preferred.length ? preferred : all;
+  const fn = chosen[0].fn;
+  return fn !== null && chosen.every((a) => a.fn === fn) ? index.fnById.get(fn) : undefined;
+}
+
+// The functions a location may sit in, preferred reading first (header, "Mapping"). role: "source" /
+// "sink" — a finding end, an expression on the line, which the graph's own anchors may place; "call-site"
+// — a call-path transition's from_anchor, the caller's call (a callback opening on the line is its
+// argument); "entry" — a to_anchor, the function control enters (the one opening on the line, if any).
+// Anchors place expressions, not call sites or entries (a one-line `dao.find(id, (e, r) => eval(r))`
+// anchors `eval` inside the callback while the call site is the caller's), so the two transition roles
+// use the line rules only. [] when no function contains the line.
+function candidates(index, { file, line }, role) {
+  const key = pathKey(file);
+  const anchored = role === "source" || role === "sink" ? anchorFor(index, key, line, role) : undefined;
+  if (anchored) return [anchored];
+  const { innermost, enclosing } = containing(index.fnsByFile.get(key) ?? [], line);
+  if (innermost === null) return [];
+  if (innermost.line_start !== line || enclosing === null) return [innermost];
+  if (role === "entry") return [innermost];
+  if (role === "call-site") return [enclosing];
+  return [enclosing, innermost];
+}
 
 // ---- connectivity -----------------------------------------------------------------------------------
 
@@ -227,11 +288,26 @@ function closureComplete(index, start, maxDepth) {
 
 // ---- decision table ---------------------------------------------------------------------------------
 
-function decide(index, fromLoc, toLoc, maxDepth) {
-  const s = mapLocation(index, fromLoc);
-  if (s === null) return verdict("n/a", "source line maps to no function");
-  const k = mapLocation(index, toLoc);
-  if (k === null) return verdict("n/a", "sink line maps to no function");
+const AMBIGUOUS_LOCATION = "ambiguous location: the line opens a nested function";
+
+// The table between two locations. Each end is read as `candidates` says; a finding end on the line
+// where a nested function opens is read both ways, and the verdict stands only when every reading
+// agrees on structural_path (the preferred reading's reason), else n/a: a parent reaches every closure
+// it defines through `nests`, so reading a location in the parent must never prove a path into an
+// unrelated sibling closure. The two ends of one line are read together (one line, one reading).
+function decide(index, fromLoc, toLoc, maxDepth, [fromRole, toRole] = ["source", "sink"]) {
+  const ss = candidates(index, fromLoc, fromRole);
+  if (!ss.length) return verdict("n/a", "source line maps to no function");
+  const ks = candidates(index, toLoc, toRole);
+  if (!ks.length) return verdict("n/a", "sink line maps to no function");
+  const oneLine = ss.length === 2 && ks.length === 2 && fromLoc.line === toLoc.line && pathKey(fromLoc.file) === pathKey(toLoc.file);
+  const pairs = oneLine ? [[ss[0], ks[0]], [ss[1], ks[1]]] : ss.flatMap((s) => ks.map((k) => [s, k]));
+  const verdicts = pairs.map(([s, k]) => decideBetween(index, s, k, maxDepth));
+  return verdicts.every((v) => v.structural_path === verdicts[0].structural_path) ? verdicts[0] : verdict("n/a", AMBIGUOUS_LOCATION);
+}
+
+// The table between two mapped functions (header, "Decision table").
+function decideBetween(index, s, k, maxDepth) {
   if (s.id === k.id) return verdict("proven", "same function");
   const forward = distance(index.exact, s.id, k.id, maxDepth);
   if (forward !== null) return verdict("proven", `forward exact path (${forward} edges)`);
@@ -246,11 +322,11 @@ function decide(index, fromLoc, toLoc, maxDepth) {
 function decideTransition(index, t, findingsById, maxDepth) {
   if (t.kind === undefined) return verdict("n/a", "transition has no kind");
   if (t.kind !== "call-path") return verdict("n/a", `transition kind ${t.kind} not structurally checkable`);
-  if (t.from_anchor !== undefined && t.to_anchor !== undefined) return decide(index, t.from_anchor, t.to_anchor, maxDepth);
+  if (t.from_anchor !== undefined && t.to_anchor !== undefined) return decide(index, t.from_anchor, t.to_anchor, maxDepth, ["call-site", "entry"]);
   const from = findingsById.get(t.from);
   const to = findingsById.get(t.to);
   if (from === undefined || to === undefined) return verdict("n/a", "transition references unknown finding");
-  return decide(index, from.sink, to.source, maxDepth);
+  return decide(index, from.sink, to.source, maxDepth, ["sink", "source"]);
 }
 
 // ---- API --------------------------------------------------------------------------------------------

@@ -446,3 +446,60 @@ test("I9: a function whose body assigns this.<m> = function / arrow is a constru
     ["/p", "plainObj.show", null]
   ]);
 });
+
+test("calls: nested function declarations and `const f = () => {}` are definitions (binds_name), not scope_names; `const C = class {}` and `const f = function g() {}` still shadow", async () => {
+  const x = await extract("function outer(p) {\n  function decl() {}\n  const arrow = () => {};\n  const Local = class {};\n  const g = function named() {};\n  let value = 1;\n  decl(); arrow(); value(); Local(); g(); named();\n}\n");
+  const scopes = Object.fromEntries(x.calls.map((c) => [c.callee_text, c.scope_names]));
+  const locals = ["Local", "g", "p", "value"];
+  assert.deepEqual(scopes, { decl: locals, arrow: locals, value: locals, Local: locals, g: locals, named: locals });
+  assert.deepEqual(x.functions.map((f) => [f.qualified_name, f.binds_name ?? false]), [["outer", true], ["outer.decl", true], ["outer.arrow", true], ["outer.named", false]]);
+});
+
+test("calls: a nested definition shadows an outer receiver class without becoming a scope_name", async () => {
+  const x = await extract("const svc = new UserService();\nfunction outer() {\n  svc.run();\n  function inner() {\n    const svc = () => {};\n    svc.run();\n  }\n  function other() {\n    function svc() {}\n    svc.run();\n  }\n}\n");
+  // scope_names carry the module-level `svc` local only: neither nested definition is a scope_name
+  assert.deepEqual(x.calls.filter((c) => c.callee_text === "svc.run").map((c) => [c.line, c.receiver_class, c.scope_names]), [[3, "UserService", ["svc"]], [6, null, ["svc"]], [10, null, ["svc"]]]);
+});
+
+async function resolveFiles(sources) {
+  const files = [];
+  for (const [path, text] of sources) files.push({ path, langId: "javascript", stack: "node", extract: await extract(text, { path }) });
+  const langModules = new Map([["javascript", javascriptModule]]);
+  const importMap = resolveImports(files, { langModules, filePaths: new Set(files.map((f) => f.path)), configs: {} });
+  return resolveCalls(files, importMap, { classIndex: buildClassIndex(files, importMap), langModules });
+}
+
+test("rule 1 (nested) on real code: an object-literal method wrapping an import, a named function expression argument, `const f = function g`, `const C = class`", async () => {
+  const results = await resolveFiles([
+    ["src/db.js", "function query(sql) {}\nmodule.exports = { query };\n"],
+    [
+      "src/a.js",
+      "const { query } = require('./db');\nfunction index() {}\nfunction f() {}\nfunction Local() {}\n" +
+        "module.exports = function make(app) {\n  app.get('/', function index(req, res) {});\n  const o = { query(sql) { return query(sql); } };\n" +
+        "  const f = function named() {};\n  const Local = class {};\n  index(); f(); named(); Local();\n  return o;\n};\n"
+    ]
+  ]);
+  const hit = (callee) => results.find((r) => r.from_path === "src/a.js" && r.callee_text === callee);
+  assert.deepEqual([hit("query").to, hit("query").confidence], [{ path: "src/db.js", qualified_name: "query", start_byte: 0 }, "exact"]); // the delegating wrapper reaches db.js, never itself
+  assert.deepEqual([hit("index").to?.qualified_name, hit("index").confidence], ["index", "exact"]); // the top-level index, not the argument named index
+  assert.deepEqual([hit("f").to, hit("f").confidence], [null, "unresolved"]); // `const f = function named` shadows the top-level f
+  assert.deepEqual([hit("named").to, hit("named").confidence], [null, "unresolved"]); // a named function expression binds nothing outside itself
+  assert.deepEqual([hit("Local").to, hit("Local").confidence], [null, "unresolved"]); // `const Local = class` shadows the top-level Local
+});
+
+test("I9: arrows inside a constructor-style function carry its start as class_start_byte, so `this.m()` and a ctor-body helper resolve from nested callbacks", async () => {
+  const text =
+    "function MemosHandler(db) {\n  const prepare = (u) => {};\n  this.addMemos = (req, res, next) => {\n    dao.insert(req.body.memo, (err, docs) => {\n      prepare(docs);\n      this.displayMemos(req, res, next);\n    });\n  };\n" +
+    "  this.displayMemos = (req, res, next) => {};\n}\nfunction plain() { const inner = () => {}; inner(); }\nmodule.exports = MemosHandler;\n";
+  const { extract: x, results } = await resolveSource("app/memos.js", text);
+  const ctor = x.functions.find((f) => f.qualified_name === "MemosHandler");
+  const cb = x.functions.find((f) => f.qualified_name.startsWith("MemosHandler.addMemos.<anon>@"));
+  assert.equal(cb.class_start_byte, ctor.start_byte);
+  assert.equal(x.functions.find((f) => f.qualified_name === "MemosHandler.prepare").class_start_byte, ctor.start_byte);
+  assert.equal(x.functions.find((f) => f.qualified_name === "plain.inner").class_start_byte, null);
+  const hit = (callee) => results.find((r) => r.callee_text === callee);
+  assert.deepEqual([hit("this.displayMemos").to?.qualified_name, hit("this.displayMemos").confidence], ["MemosHandler.displayMemos", "exact"]);
+  assert.deepEqual([hit("prepare").to?.qualified_name, hit("prepare").confidence], ["MemosHandler.prepare", "exact"]);
+  assert.deepEqual([hit("inner").to?.qualified_name, hit("inner").confidence], ["plain.inner", "exact"]);
+  assert.equal(hit("dao.insert").confidence, "unresolved");
+});
