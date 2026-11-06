@@ -256,7 +256,7 @@ into the output. Queries are tree-sitter `.scm` strings kept inside the module.
 |---|---|---|
 | JS/TS | Express, Nest | `app/router.<verb>(path, mw…, handler)`, `app/router.use(path?, mw)` with registration order, `@Controller`/`@Get…`/`@UseGuards` |
 | Python | Flask, Django, FastAPI | `@app.route`/`@bp.route` (+ `methods=`), `urlpatterns` incl. `include()` one level, `@router.<verb>`, `@login_required`/`Depends(...)` auth markers |
-| Java | Spring | `@RequestMapping`/`@GetMapping`…, class-level prefix, `@PreAuthorize`/`@Secured`, `SecurityFilterChain` matchers recorded file-level as `unknown` auth hints |
+| Java | Spring, Servlet | `@RequestMapping`/`@GetMapping`…, class-level prefix, `@PreAuthorize`/`@Secured`; `SecurityFilterChain` / `configure(HttpSecurity)` request rules (`requestMatchers`/`antMatchers`/`mvcMatchers` + the call chained on them: `permitAll`/`authenticated`/`hasRole`…, `anyRequest`; `securityMatcher` scope; `web.ignoring()`) applied first-match to every java route, several chains voting by agreement (§4.4); an unread config stays the file-level `unknown` hint; `@WebServlet` + `doGet`/`doPost`/…/`service`, `@ServletSecurity`, a servlet `Filter` as an `unknown` hint |
 | PHP | Laravel, Symfony | `Route::<verb>(…)`, `Route::group/middleware(…)`, `->middleware('auth')`, `#[Route]`, `#[IsGranted]` |
 | C# | ASP.NET Core & classic | `[HttpGet]`/`[Route]`/`[Authorize]`/`[AllowAnonymous]`, `MapGet/MapPost` minimal APIs, class-level route prefix |
 
@@ -514,6 +514,76 @@ lexical class body (§1.4), handler-file root binding (§3.3), byte-precise / op
 auth-middleware conventions such as `isLoggedIn`) turn that probe into 12 candidates (eval, `$where`
 through a nested helper, `needle.get`, `res.redirect`) and `proven` for the cross-file NoSQL and the
 SSRF flows. Gates in §4.2 are unchanged.
+
+**Second probe (WebGoat, BenchmarkJava, flaskr), same day.** Building the graph of the other three
+campaign targets before any audit run exposed four more blind spots, all on the Java side:
+WebGoat's 246 lesson routes were `unknown` because its one `SecurityFilterChain` uses the lambda DSL
+(`authorizeHttpRequests(auth -> auth.requestMatchers(...).permitAll()...anyRequest().authenticated())`),
+which the extractor only noted; the Java surface saw one SQL sink in all of WebGoat (its tokens were
+written against declared types, `Statement.execute`, so `statement.executeQuery(query)` on a local
+never matched) and no SSRF, path-traversal or file sink at all; `.getValue(` (meant for SpEL) turned
+every `session.getValue` / `entry.getValue` into an `eval` candidate (27 in WebGoat, 1 204 in
+BenchmarkJava), crowding the real sinks out of the 50 ranked candidates; and BenchmarkJava's 2 740
+`@WebServlet` test cases had no route at all, leaving the whole corpus as one orphan partition.
+Amendments: (1) `security_chains` — java.mjs emits, for each method returning a
+`SecurityFilterChain` or overriding `configure(HttpSecurity)`, its `securityMatcher` scope and its
+rules in source order: a `requestMatchers` / `antMatchers` / `mvcMatchers` (optional `HttpMethod.X`)
+or `anyRequest` matcher INSIDE an `authorizeHttpRequests(...)` / `authorizeRequests()` call, whose
+auth is the call chained directly on it (`permitAll` / `anonymous` → unauthenticated, the
+authorization rules → authenticated, `access(...)` / `hasIpAddress` / `not()` / anything else →
+unknown; a non-literal pattern or `regexMatchers` → `patterns: null`, noted). Matchers elsewhere
+(`requiresChannel`, `csrf.ignoringRequestMatchers`) and rule-named calls elsewhere (`formLogin(l ->
+l.permitAll())`) are not rules — the first cut paired matchers with the next rule-named call in
+source order and the independent review showed it turning an IP-restricted admin path
+`unauthenticated`. `requestMatchers(antMatcher("/p"))` reads the factory's literal (verb kept when
+the factories agree); a RequestMatcher object or a constant is unreadable. Rules the extractor cannot
+see — the chain's `HttpSecurity` handed to a helper (`common(http)`), `http.with(dsl)` / `apply`, an
+authorize call given a method reference or a Customizer value — are an unreadable rule at their
+position, so first-match makes every route not settled before them `unknown`. A chain without any
+rule is still emitted (noted "security(unread chain)") and votes `unknown`; a chain whose
+`securityMatcher` scope is not literal (a RequestMatcher object, a constant, a `regexMatcher`), or
+opened with the zero-argument `securityMatchers()` / Spring 5 `requestMatchers()`, has an unread
+scope and votes on every route; a `WebSecurityCustomizer` / `configure(WebSecurity)` with
+`web.ignoring()` literal matchers is a chain scoped to them that permits exactly them, verb kept.
+build-graph applies the rules first-match (Spring's AntPathMatcher: `?`, `*`, whole-segment `**`,
+`{var}`, `{*rest}`, an empty trailing token dropped; a pattern without a leading `/` or with a
+`{var:regex}` constraint is unreadable → unknown) to every java route no marker already
+authenticates; a route serving ANY verb against verb-specific rules is `unknown` unless every verb
+it serves agrees. With several chains (WebGoat hosts two contexts, WebGoat and WebWolf, each with
+its own chain) the chains whose scope (path and verb) fully covers the route vote, else the unscoped
+ones (plus, for a route serving ANY verb, the chains covering only some of its verbs), every
+unread-scope chain always votes, and a route no chain covers for sure casts an `unknown` vote; the
+route takes the verdict only when the votes agree — `unknown` otherwise, because the graph cannot
+tell which context serves a route. Four hints turn an `unauthenticated` verdict into `unknown`: the
+§2.4 file-level hint (a security type named in a file that yields no chain: WebFlux chains,
+`@EnableWebSecurity` without a readable config...), a `web.xml` at a conventional location
+(`src/main/webapp/WEB-INF`, `WebContent/WEB-INF`, `web/WEB-INF`, `WEB-INF`) declaring a
+`<security-constraint>` with an `<auth-constraint>`, Spring Security named in `pom.xml` /
+`build.gradle(.kts)` while no chain was read (Boot's default chain authenticates everything), and a
+servlet filter class when no chain exists (Boot registers every Filter bean on `/*`). Residuals,
+all in the safe direction: `formLogin().permitAll()` / `logout().permitAll()` are not rules (a
+login route reads as its chain says), `requestMatchers(CONSTANT)` is unreadable, a non-literal
+ignore is only noted, `web.xml` url-patterns are not matched (any constraint hints every route),
+`X.super.m()` keeps X as receiver. (2) `@WebServlet` routes: one per `doGet` / `doPost` / … /
+`service` method on the class's first literal pattern, framework `servlet` (further patterns
+noted), with the class's and method's auth annotations (`@ServletSecurity`, `@RolesAllowed`) as
+middleware texts; a `@WebFilter`, `implements Filter`, or `HttpFilter` / `GenericFilter` /
+`OncePerRequestFilter` / `GenericFilterBean` subclass is the hint "servlet(filter)" that turns an
+unmarked servlet route `unknown` — BenchmarkJava's helper filters make its 5 480 servlet routes
+`unknown` rather than `unauthenticated`. `super.m()` now carries the
+superclass as receiver class, so `ProfileUpload.uploadFileHandler → super.execute` resolves. (3)
+The Java surface widened to method-shaped tokens (`executeQuery(`, `executeUpdate(`,
+`prepareStatement(`, `queryFor*(`, `batchUpdate(`, `Runtime.exec`, `openConnection(`, `openStream(`,
+`RestTemplate`, `WebClient`, `HttpClient`, `getForObject(`…, `FileInputStream`, `FileOutputStream`,
+`Files.read*/write*/copy`, `FileCopyUtils.copy`, `createNewFile(`, `XMLInputFactory[.newInstance]`,
+`DocumentBuilderFactory.newInstance`, `createXMLStreamReader(`, `createUnmarshaller(`, `.unmarshal(`,
+`TransformerFactory`, `SchemaFactory`, `Ognl.getValue`, `createValueExpression(`; sources
+`getParameterValues`, `getParameterMap`, `getPart(`, `getRequestURI`, `getPathInfo`) and
+`.getValue(` dropped — `parseExpression(` already anchors every SpEL chain, `Ognl.getValue` keeps
+OGNL. No existing token of any stack changes class. (4) The benchmark scorer's class synonyms gain
+path-traversal, XXE and insecure-deserialization groups (and `authorization` under access-control)
+for the WebGoat manifest, whose JKU entry is declared graph-blind up front. Gates in §4.2 are
+unchanged.
 
 ## 5. Out of scope (explicit)
 
