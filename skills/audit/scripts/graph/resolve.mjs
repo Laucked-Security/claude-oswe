@@ -27,7 +27,8 @@
 //
 // Input records are `{ path, langId, stack, extract }` with repo-relative forward-slash paths.
 //   loadResolutionConfigs(projectDir, scopeRealpath) -> { tsconfig, jsconfig, packageJson,
-//     composerJson, pyproject, setupCfg, read: [{ path, sha256 }], errors: [{ file, message }] }
+//     composerJson, pyproject, setupCfg, pomXml, buildGradle, buildGradleKts, webXml (text, for
+//     build-graph's Java auth hints), read: [{ path, sha256 }], errors: [{ file, message }] }
 //     with message one of CONFIG_ERRORS: "invalid JSON" | "unreadable" | "escapes project" (never
 //     repo content, never an absolute path).
 //   resolveImports(files, { langModules, filePaths, configs })   (one resolveImportSpecifier call per
@@ -70,7 +71,16 @@ const CONFIG_FILES = [
   ["package.json", "packageJson", "json"],
   ["composer.json", "composerJson", "json"],
   ["pyproject.toml", "pyproject", "text"],
-  ["setup.cfg", "setupCfg", "text"]
+  ["setup.cfg", "setupCfg", "text"],
+  // Java auth hints (build-graph.mjs springSecurity): the build file names Spring Security, the
+  // servlet deployment descriptor (its conventional locations) declares a security constraint
+  ["pom.xml", "pomXml", "text"],
+  ["build.gradle", "buildGradle", "text"],
+  ["build.gradle.kts", "buildGradleKts", "text"],
+  ["src/main/webapp/WEB-INF/web.xml", "webXml", "text"],
+  ["WebContent/WEB-INF/web.xml", "webXml", "text"],
+  ["web/WEB-INF/web.xml", "webXml", "text"],
+  ["WEB-INF/web.xml", "webXml", "text"]
 ];
 
 // Config error messages are a fixed vocabulary: never the parser's or the OS's message, which can quote
@@ -105,7 +115,7 @@ export function loadResolutionConfigs(projectDir, scopeRealpath) {
   const root = realpathSync(resolve(projectDir));
   const scope = scopeRealpath ? resolve(scopeRealpath) : root;
   const dirs = scope === root ? [root] : [root, scope];
-  const result = { tsconfig: null, jsconfig: null, packageJson: null, composerJson: null, pyproject: null, setupCfg: null, read: [], errors: [] };
+  const result = { tsconfig: null, jsconfig: null, packageJson: null, composerJson: null, pyproject: null, setupCfg: null, pomXml: null, buildGradle: null, buildGradleKts: null, webXml: null, read: [], errors: [] };
   for (const [name, key, format] of CONFIG_FILES) {
     // Project first, then scope: a scope copy that exists overrides the project's value, even when
     // it fails to parse (the value is then null, never the project copy's).

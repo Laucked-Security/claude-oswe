@@ -249,7 +249,36 @@ test("sinkClassFor lower-cases its input; one case per class and a rule-order ch
     ["XmlDocument", "dotnet", "xxe"],
     ["setAttribute", "java", "trust-boundary"],
     ["redirect", "node", "redirect"],
-    ["frobnicate", "node", "other"]
+    ["frobnicate", "node", "other"],
+    // the Java surface widened before the SP10 campaign (spec §4.4)
+    ["Runtime.exec", "java", "cmd-exec"],
+    ["parseExpression", "java", "eval"],
+    ["getValue", "java", "other"],
+    ["executeQuery", "java", "sql"],
+    ["executeUpdate", "java", "sql"],
+    ["prepareStatement", "java", "sql"],
+    ["queryForObject", "java", "sql"],
+    ["batchUpdate", "java", "sql"],
+    ["FileInputStream", "java", "file-read"],
+    ["Files.readAllBytes", "java", "file-read"],
+    ["FileOutputStream", "java", "file-write"],
+    ["Files.write", "java", "file-write"],
+    ["FileCopyUtils.copy", "java", "file-write"],
+    ["openConnection", "java", "ssrf"],
+    ["openStream", "java", "ssrf"],
+    ["RestTemplate", "java", "ssrf"],
+    ["HttpClient", "java", "ssrf"],
+    ["getForObject", "java", "ssrf"],
+    ["XMLInputFactory", "java", "xxe"],
+    ["XMLInputFactory.newInstance", "java", "xxe"],
+    ["DocumentBuilderFactory.newInstance", "java", "xxe"],
+    ["createXMLStreamReader", "java", "xxe"],
+    ["createUnmarshaller", "java", "xxe"],
+    ["unmarshal", "java", "xxe"],
+    ["Unmarshaller", "java", "xxe"],
+    ["Ognl.getValue", "java", "eval"],
+    ["createValueExpression", "java", "eval"],
+    ["marshal.loads", "python", "deser"]
   ];
   for (const [token, stack, cls] of cases) assert.equal(sinkClassFor(token, stack), cls, `${stack} ${token}`);
   // first match wins: "nosql" ($-prefix) is evaluated before "sql"/"redirect" substrings

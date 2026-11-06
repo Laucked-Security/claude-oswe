@@ -6,15 +6,15 @@
     "files_parsed": 6,
     "files_error": 0,
     "files_skipped": 0,
-    "functions": 13,
-    "calls_total": 15,
+    "functions": 14,
+    "calls_total": 22,
     "calls_exact": 1,
     "calls_name_only": 3,
-    "calls_unresolved": 11,
+    "calls_unresolved": 18,
     "routes_by_auth": {
-      "unauthenticated": 0,
-      "authenticated": 1,
-      "unknown": 2
+      "unauthenticated": 1,
+      "authenticated": 2,
+      "unknown": 0
     },
     "coverage_matrix": {
       "java": {
@@ -22,11 +22,10 @@
           "spring"
         ],
         "extractors_applied": [
+          "servlet",
           "spring"
         ],
-        "not_extracted": [
-          "SecurityFilterChain matchers"
-        ],
+        "not_extracted": [],
         "patterns_unmatched": []
       }
     },
@@ -130,18 +129,6 @@
     },
     {
       "type": "function",
-      "id": "389e6b7fe06f",
-      "file": "src/main/java/com/ex/SecurityConfig.java",
-      "name": "filterChain",
-      "qualified_name": "SecurityConfig.filterChain",
-      "line_start": 10,
-      "line_end": 14,
-      "kind": "method",
-      "exported": true,
-      "class": "SecurityConfig"
-    },
-    {
-      "type": "function",
       "id": "3d1a4019ab32",
       "file": "src/main/java/com/ex/di/DiApi.java",
       "name": "run",
@@ -178,12 +165,12 @@
     },
     {
       "type": "function",
-      "id": "896c3c98c6ad",
+      "id": "5736e79b6fe4",
       "file": "src/main/java/com/ex/SecurityConfig.java",
       "name": "<anon>",
-      "qualified_name": "SecurityConfig.filterChain.<anon>@12:36",
-      "line_start": 12,
-      "line_end": 12,
+      "qualified_name": "SecurityConfig.filterChain.<anon>@13:36",
+      "line_start": 13,
+      "line_end": 16,
       "kind": "lambda",
       "exported": false
     },
@@ -210,6 +197,29 @@
       "kind": "method",
       "exported": true,
       "class": "Api"
+    },
+    {
+      "type": "function",
+      "id": "a27b6ab3a984",
+      "file": "src/main/java/com/ex/SecurityConfig.java",
+      "name": "<anon>",
+      "qualified_name": "SecurityConfig.filterChain.<anon>@17:24",
+      "line_start": 17,
+      "line_end": 17,
+      "kind": "lambda",
+      "exported": false
+    },
+    {
+      "type": "function",
+      "id": "abab35f2a78f",
+      "file": "src/main/java/com/ex/SecurityConfig.java",
+      "name": "filterChain",
+      "qualified_name": "SecurityConfig.filterChain",
+      "line_start": 11,
+      "line_end": 19,
+      "kind": "method",
+      "exported": true,
+      "class": "SecurityConfig"
     },
     {
       "type": "function",
@@ -259,7 +269,7 @@
       "handler": "a17503fd1b6d",
       "middlewares": [],
       "framework": "spring",
-      "auth": "unknown"
+      "auth": "unauthenticated"
     },
     {
       "type": "route",
@@ -271,7 +281,7 @@
       "handler": "3d1a4019ab32",
       "middlewares": [],
       "framework": "spring",
-      "auth": "unknown"
+      "auth": "authenticated"
     },
     {
       "type": "sink",
@@ -349,22 +359,6 @@
     },
     {
       "type": "calls",
-      "from": "389e6b7fe06f",
-      "to": null,
-      "line": 12,
-      "callee_text": "http.authorizeHttpRequests",
-      "confidence": "unresolved"
-    },
-    {
-      "type": "calls",
-      "from": "389e6b7fe06f",
-      "to": null,
-      "line": 13,
-      "callee_text": "http.build",
-      "confidence": "unresolved"
-    },
-    {
-      "type": "calls",
       "from": "3d1a4019ab32",
       "to": "485fc90a9c70",
       "line": 17,
@@ -405,18 +399,90 @@
     },
     {
       "type": "calls",
-      "from": "896c3c98c6ad",
+      "from": "5736e79b6fe4",
       "to": null,
-      "line": 12,
-      "callee_text": "auth.anyRequest",
+      "line": 14,
+      "callee_text": "auth.requestMatchers",
       "confidence": "unresolved"
     },
     {
       "type": "calls",
-      "from": "896c3c98c6ad",
+      "from": "5736e79b6fe4",
       "to": null,
-      "line": 12,
-      "callee_text": "auth.anyRequest.authenticated",
+      "line": 14,
+      "callee_text": "auth.requestMatchers.permitAll",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "5736e79b6fe4",
+      "to": null,
+      "line": 15,
+      "callee_text": "auth.requestMatchers.permitAll.requestMatchers",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "5736e79b6fe4",
+      "to": null,
+      "line": 15,
+      "callee_text": "auth.requestMatchers.permitAll.requestMatchers.hasRole",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "5736e79b6fe4",
+      "to": null,
+      "line": 16,
+      "callee_text": "auth.requestMatchers.permitAll.requestMatchers.hasRole.anyRequest",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "5736e79b6fe4",
+      "to": null,
+      "line": 16,
+      "callee_text": "auth.requestMatchers.permitAll.requestMatchers.hasRole.anyRequest.authenticated",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "a27b6ab3a984",
+      "to": null,
+      "line": 17,
+      "callee_text": "login.loginPage",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "a27b6ab3a984",
+      "to": null,
+      "line": 17,
+      "callee_text": "login.loginPage.permitAll",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "abab35f2a78f",
+      "to": null,
+      "line": 13,
+      "callee_text": "http.authorizeHttpRequests",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "abab35f2a78f",
+      "to": null,
+      "line": 17,
+      "callee_text": "http.authorizeHttpRequests.formLogin",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "abab35f2a78f",
+      "to": null,
+      "line": 18,
+      "callee_text": "http.build",
       "confidence": "unresolved"
     },
     {
@@ -467,8 +533,13 @@
     },
     {
       "type": "nests",
-      "from": "389e6b7fe06f",
-      "to": "896c3c98c6ad"
+      "from": "abab35f2a78f",
+      "to": "5736e79b6fe4"
+    },
+    {
+      "type": "nests",
+      "from": "abab35f2a78f",
+      "to": "a27b6ab3a984"
     },
     {
       "type": "nests",

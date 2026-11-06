@@ -22,7 +22,12 @@ const SYNONYMS = [
   ["redos","regex-dos","regular-expression-dos"],
   ["ssrf","server-side-request-forgery"],
   ["open-redirect","unvalidated-redirect","redirect"],
-  ["access-control","broken-access-control","authz","idor","missing-authorization","missing-function-level-access-control"]
+  ["access-control","broken-access-control","authz","authorization","idor","missing-authorization","missing-function-level-access-control"],
+  // added for the WebGoat manifest (SP10 campaign), before any WebGoat run; the graph's own sink
+  // class ids (deser, file-read, file-write) are accepted too
+  ["path-traversal","directory-traversal","file-path-traversal","zip-slip","arbitrary-file-write","arbitrary-file-read","file-write","file-read","unrestricted-file-upload","arbitrary-file-upload"],
+  ["xxe","xml-external-entity","xml-external-entities"],
+  ["insecure-deserialization","deserialization","unsafe-deserialization","java-deserialization","deser"]
 ];
 
 // Build a lookup: token -> group index, for O(1) group resolution.
