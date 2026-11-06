@@ -158,7 +158,7 @@ Report:  .oswe/reports/oswe-report-2026-06-16-1600.md  (+ .html)
 | **PHP** | Laravel, Symfony, vanilla | type-juggling/magic-hash auth bypass, unrestricted upload, SQLi, command injection, PHP object injection |
 | **Node.js** | Express, Nest | NoSQL operator injection, SSJI (`eval`), prototype pollution, command injection, SSRF |
 | **Python** | Flask, Django | SSTI (`render_template_string`), `pickle`/`yaml.load` deserialization, mass assignment, SQLi |
-| **Java** | Spring | SpEL/OGNL injection, Java deserialization gadget chains, command injection, XXE |
+| **Java** | Spring, Servlet | SpEL/OGNL injection, Java deserialization gadget chains, command injection, SQLi, XXE, SSRF, path traversal |
 | **.NET** | ASP.NET (Core & classic) | forgeable/unsigned auth cookies, `BinaryFormatter` deserialization, command injection, XXE |
 
 Each stack has a curated source→sink reference under [`skills/audit/references/`](skills/audit/references/).
