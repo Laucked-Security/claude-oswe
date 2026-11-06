@@ -34,7 +34,17 @@ never outlive the audit. Rules:
 - **Per use:** every helper invocation deletes its own temp file(s) immediately after — wrap the
   `node …` call in `( trap 'rm -f <the literal temp files>' EXIT … )` so the file is gone even if the
   command errors. This applies to confine-path, aggregate-findings, validate-batch, validate-output,
-  and apply-verdicts alike.
+  and apply-verdicts alike, and to the SP10 graph helpers' per-call files: `graph-in-<token>.json`
+  (§1.5), `partitions-in-<token>.json` / `partitions-<token>.json` (§2),
+  `candidate-paths-in-<token>.json` / `candidate-paths-<token>.json` (§3) and
+  `structural-in-<token>.json` (§5.5).
+- **Exactly two files outlive a single helper call:** the app graph
+  `graph-<graph-token>.json` (written in §1.5, read by §2, §3, §5.5 and §7) and the structural result
+  `structural-<structural-token>.json` (written in §5.5, read by §6 and §6b). Each has its own literal
+  token, chosen once where the file is written and reused wherever it is named. Keep them **out** of the
+  per-call `trap` and delete them with the rest of `.oswe/tmp/` at audit end / abort (below). They hold
+  identifiers, paths and line numbers only — no source text, no secrets — but they live **only** in
+  `.oswe/tmp/` (plus build-graph's own checkpoint cache entry for the graph) and are never copied elsewhere.
 - **At audit end** (after the report is written) **and on ANY abort** (Node missing, confinement
   failure, orchestrator-input bug, etc.): `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"`. Do not leave the
   directory behind. `.oswe/reports/` is kept (the report is already `[REDACTED]`-safe); `.oswe/tmp/` is not.
@@ -113,9 +123,69 @@ purged at clean exit (§7.5 Finalize) and only persists between a kill and the n
   (§2) separates the surface by module / framework; **partition by stack too**, so each partition is
   analyzed against its own stack's reference.
 
+### 1.5 Build app graph (deterministic, SP10)
+With the stacks and frameworks known and the scope confined, build the application graph (files,
+functions, calls, routes, sinks — identifiers and line numbers only, never source text) with the tested
+helper. **Do not build or reason about the graph by hand.** Write
+`{ "projectDir": "${CLAUDE_PROJECT_DIR}", "scope_realpath": "<confined scope from §1>", "stacks": [<detected stacks: php|node|python|java|dotnet>], "frameworks": [<detected framework ids>], "referencesDir": "${CLAUDE_PLUGIN_ROOT}/skills/audit/references" }`
+to a literal temp file, where `frameworks` uses **only** the ids `express`, `nest`, `flask`, `django`,
+`fastapi`, `spring`, `laravel`, `symfony`, `aspnet` (a detected framework outside this list is simply
+omitted — its files are still parsed, just without a route extractor). Omit `excludes`: the helper's
+defaults mirror the recon exclusion list above. Choose the run-long literal **`<graph-token>`** now
+(e.g. `g4b81d2c`) and **reuse this literal token wherever the graph file is named** (§2, §3, §5.5, §7);
+per-call files keep a fresh `<token>` each time. Run inside a `trap` that removes **only the input**:
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-in-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/graph/build-graph.mjs" \
+    --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-in-<token>.json" \
+    --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --checkpoint-dir "${checkpoint_dir}" )
+# the subshell's exit status IS build-graph's (0 ok, graph or null envelope / 1 malformed input / 2 IO)
+```
+
+**Keep `graph-<graph-token>.json` for the whole run** (see Temp-file hygiene).
+On a resume the helper prints `build-graph: cache hit` on stderr and rewrites the identical graph.
+- **`graph` in orchestration state.** Exit 0 with an object carrying `nodes[]` ⇒ `graph` = that file.
+  Exit 0 with `{ "graph": null, "reason": "<…>" }`, **or** exit 1 (malformed input) / exit 2 (IO) ⇒
+  `graph = null`, `graph_reason` = the `reason` (or the printed message) — on exit 1/2, also write
+  `{ "graph": null, "reason": "<that message>" }` to `graph-<graph-token>.json` with the file tool, so the
+  file always exists for `--graph` below — and record in Coverage:
+  `App graph unavailable: <reason> — partitions, candidate paths and structural checks fell back to pre-SP10 behaviour.`
+  **Building the graph never aborts the audit**; with `graph = null` every later phase behaves as
+  before SP10 (§2 partition-graph returns your own partitions, §3 skips enumerate-paths, §5.5 reports
+  everything `n/a`, §6b's structural rule then changes nothing).
+- **Passing the graph to a helper.** §2, §3 and §5.5 hand the graph to their helper **by path** with
+  `--graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json"`; their `--file` inputs stay small
+  and carry no `graph` key. The helpers read `{ "graph": null, "reason" }` as `graph = null`. Never
+  re-type the graph: read only its `stats` for the report (as §7 describes), and never paste nodes or
+  edges into a prompt.
+
 ### 2. Partition & prioritize
 Partition the surface **by module / framework / authentication boundary** (never one agent per
-route). Prioritize partitions by exposure to the **unauthenticated** surface.
+route). Prioritize partitions by exposure to the **unauthenticated** surface. These directory
+partitions (`{ partition_id, stack, files: [repo-rel paths] }`) are the **fallback**; the graph then
+re-cuts them by route reachability with the tested helper. Write
+`{ "fallback_partitions": [<the partitions above>] }` to a literal temp file and run, under the usual
+`trap` (the graph goes by path, per §1.5 — also when it is the `graph: null` envelope):
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/partition-graph.mjs" \
+    --file  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-in-<token>.json" \
+    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --out   "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"
+  rc=$?                                                              # capture BEFORE cat
+  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/partitions-<token>.json"      # <-- THIS stdout is the result you keep
+  exit "$rc" )                                                       # preserve the CLI's exit code
+```
+
+→ `{ mode, partitions, orphan_partition_ids }` (keep the printed JSON; the `--out` file is gone with the trap). **Use the returned `partitions`
+for everything after** (SARIF lead assignment below, §2.5, §3, §7), and note `mode`
+(`graph` | `fallback`) and `orphan_partition_ids` for the report's App graph section. With
+`graph = null`, or a graph with no routes, `mode` is `fallback` and `partitions` is byte-for-byte your
+own list (zero regression). Exit 1 = malformed input (our bug — fix the call, do not drop to
+unpartitioned); exit 2 = IO/usage → fix the call.
 - **Assign each SARIF lead to the partition that contains its `location.file`.** A lead whose file is
   in no analyzed partition (excluded dir, or beyond the partition budget) is recorded as a **coverage
   gap ("lead not analyzed")** — never silently dropped (the precision ledger must account for every lead).
@@ -125,7 +195,7 @@ The analyzer pass is the expensive step, capped at a **budget of 12 partitions**
 cap; **allocate** it deterministically so the budget lands on the highest-attack-surface partitions and
 the rest become ranked, justified gaps (never an opaque wall).
 
-- Build the **file→partition map** from §2 (factual: `{ partition_id, stack, files: [repo-rel paths] }`
+- Build the **file→partition map** from §2's returned `partitions` (factual: `{ partition_id, stack, files: [repo-rel paths] }`
   per partition) and write `{ "projectDir": "<CLAUDE_PROJECT_DIR>", "referencesDir":
   "<CLAUDE_PLUGIN_ROOT>/skills/audit/references", "partitions": [...] }` to a literal temp file. Run,
   under the usual `trap`:
@@ -146,6 +216,29 @@ the rest become ranked, justified gaps (never an opaque wall).
   them and the run is behaviorally identical to today (empty `deprioritized` list).
 
 ### 3. Analyze
+**Candidate paths before each analyzer dispatch (SP10).** For each partition in `analyze[]` (inline or
+subagent), when `graph` is non-null, write `{ "partition": <that partition's record from §2> }` to a
+literal temp file and run under the usual `trap`:
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-in-<token>.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/enumerate-paths.mjs" \
+    --file  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-in-<token>.json" \
+    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --out   "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"
+  rc=$?                                                                # capture BEFORE cat
+  cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/candidate-paths-<token>.json"   # <-- THIS stdout is the result you keep
+  exit "$rc" )                                                         # preserve the CLI's exit code
+```
+
+→ `{ partition_id, candidate_paths: [ { id, route, hops, sink, min_confidence } ] }` (≤ 50, ranked; a
+route belongs to the partition that owns its **handler's** file, so a route registered in another
+partition's file still lists here when its handler is read here). Exit 1 = malformed input (our bug —
+fix the call); exit 2 = IO/usage → fix the call. **With
+`graph = null`, do not run it: `candidate_paths` = `[]`.** Pass the `candidate_paths` array to the
+analyzer as a JSON block in its prompt, right after the file list (an empty array is passed as `[]`), and
+put the same array in its `dispatch_input` below — so a graph change invalidates the analyzer cache.
+
 **Cache lookup before each analyzer dispatch (SP5 v1).** Before each analyzer call, write
 `{"checkpoint_dir": "<run checkpoint_dir>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "analyzer-response", "target_id": "<partition_id>", "dispatch_input": {<canonical dispatch payload — see below>}}`
 to a literal temp file, then run inside a `trap`:
@@ -158,7 +251,7 @@ was already done inside the helper against the analyzer-response schema). On `hi
 dispatch the analyzer as today.
 
 The `dispatch_input` for an analyzer call MUST be:
-`{ "partition_id": "<id>", "files": [<sorted file paths>], "file_content_digest": "<from surface-scan vector>", "references_loaded": [<sorted stack names>], "agent_contract_files": [<sorted abs paths>] }`
+`{ "partition_id": "<id>", "files": [<sorted file paths>], "file_content_digest": "<from surface-scan vector>", "references_loaded": [<sorted stack names>], "candidate_paths": [<enumerate-paths' array, unchanged; [] when graph is null>], "agent_contract_files": [<sorted abs paths>] }`
 where `agent_contract_files` includes:
 - `${CLAUDE_PLUGIN_ROOT}/agents/oswe-analyzer.md`
 - Each `${CLAUDE_PLUGIN_ROOT}/skills/audit/references/<lang>.md` actually loaded for the partition
@@ -270,6 +363,53 @@ The helper implements these rules (documented here for review; the code is the s
 Assemble exploit chains (`chain.schema.json`) toward unauthenticated RCE from the aggregated
 findings. **Validate each built chain** against `chain.schema.json`.
 
+**Every transition you write carries a `kind` (SP10)** — it tells §5.5 which links the graph can check:
+- **`"call-path"`** — the next finding's source is reached by **calling into it** from the previous
+  finding's sink (a code path). Add `from_anchor` / `to_anchor` (`{ file, line }`) when you can pin the
+  exact call site and the entry it reaches; without anchors §5.5 checks the `from` finding's sink
+  against the `to` finding's source. The **`entry`** transition is a `call-path` too: anchor it from the
+  `entry_point`'s `file:line` to the first finding's source (without anchors it is `n/a`, since `entry`
+  is not a finding).
+  `{ "from": "OSWE-1", "to": "OSWE-2", "how": "login() calls loadProfile(), whose unserialize() is OSWE-2's source", "evidence": [{ "file": "app/auth.php", "line": 41 }], "kind": "call-path", "from_anchor": { "file": "app/auth.php", "line": 41 }, "to_anchor": { "file": "app/profile.php", "line": 12 } }`
+- **`"shared-state"`** — the link is data **written then read** (session, DB row, file, config, cache):
+  `{ "from": "OSWE-2", "to": "OSWE-3", "how": "the upload writes uploads/shell.php; index.php include()s ?page= from that dir", "evidence": [{ "file": "upload.php", "line": 22 }, { "file": "index.php", "line": 7 }], "kind": "shared-state" }`
+- **`"auth-gain"`** — the first finding **grants authentication or a role** the next one requires:
+  `{ "from": "OSWE-1", "to": "OSWE-2", "how": "type-juggling login sets $_SESSION['admin']; the admin-only import route requires it", "evidence": [{ "file": "login.php", "line": 13 }, { "file": "admin/import.php", "line": 3 }], "kind": "auth-gain" }`
+
+`shared-state` and `auth-gain` links are not structurally checkable (§5.5 reports them `n/a`); they
+remain the verifier's call. Never pick `call-path` just to get a check — a wrong kind earns an `absent`.
+
+### 5.5 Structural check (deterministic, SP10)
+After §5 and **before** §6, check every aggregated finding (source → sink) and every `call-path`
+transition against the graph with the tested helper — **it runs even with `graph = null`** (everything
+is then `n/a`, reason `graph unavailable`). Write `{ "findings": [<every aggregated finding from §4>],
+"chains": [<every validated chain from §5>] }` to a literal temp file and run under a `trap` that removes
+**only the input** (the graph goes by path, per §1.5 — also when it is the `graph: null` envelope).
+Choose the run-long literal **`<structural-token>`** now and **reuse this literal token wherever the
+structural file is named** (§6b):
+
+```bash
+( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-in-<token>.json"' EXIT
+  node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/check-chain-structure.mjs" \
+    --file  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-in-<token>.json" \
+    --graph "${CLAUDE_PROJECT_DIR}/.oswe/tmp/graph-<graph-token>.json" \
+    --out   "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-<structural-token>.json" )
+# the subshell's exit status IS the helper's (0 ok / 1 malformed input / 2 IO|usage)
+```
+
+**Keep `structural-<structural-token>.json` until §6b has consumed it** (purged with the rest of
+`.oswe/tmp/`). Read it into orchestration state as `structural` = `{ findings: { "OSWE-N": { structural_path, reason } },
+transitions: { "CHAIN-N": [ { index, structural_path, reason } ] } }`, where `structural_path` is
+`proven` (same function, or a forward path over exact call edges and `nests` edges — a sink inside a
+callback or closure of the source's function counts), `absent` (the graph saw both ends, resolved
+every call around them exactly, and found **no** call path within six edges) or `n/a` (anything the
+graph cannot decide: an unresolved call near either end, or a source / sink cited on the line where a
+nested function opens when the two readings of that line disagree — cite the sink's own line, not the
+line of the call that takes the callback, when you can). Exit 1 =
+malformed findings/chains (our bug in §4/§5 — fix the construction); exit 2 = IO/usage → fix the call.
+This result is the **authoritative channel** for structure: it goes to the verifier as read-only
+context (§6) and to `apply-verdicts.mjs --structural` (§6b) — **never** as a verifier counterexample.
+
 ### 6. Verify (batched, with bound batches)
 - **Build the target set**: all findings used in a candidate chain, all provisional-`High` findings,
   and the full chain(s). **Deduplicate by `target_type:target_id`** — a finding can be both a chain
@@ -285,10 +425,16 @@ findings. **Validate each built chain** against `chain.schema.json`.
   again — neutralize immediately** (set its response to `{ "status": "error", "verdicts": [] }`,
   keeping `batch_id` + `expected_targets`; never delete the wrapper, or its `expected_targets` — and
   thus the coverage gap — vanish). When you do re-dispatch, add the `batch_id` to the set first.
+- **Structural context in the verifier prompt (SP10).** For each target of the batch, give the
+  verifier its §5.5 result as a labelled read-only block: for a finding, `structural_path` + `reason`
+  from `structural.findings["OSWE-N"]`; for a chain, the same for each member finding **and** each
+  transition (`structural.transitions["CHAIN-N"][index]`). It is evidence from a deterministic graph
+  check, not a claim to refute (see `agents/oswe-verifier.md`).
 
 **Cache lookup before each verifier batch dispatch (SP5 v1).** Before each verifier batch, write
-`{"checkpoint_dir": "<...>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "verifier-response", "target_id": "<batch_id>", "dispatch_input": {"batch_id": "<id>", "expected_targets": [<sorted>], "finding_or_chain_canonical": {<...>}, "agent_contract_files": [<sorted abs paths>]}}`
-and call `agent-response-cache.mjs --lookup`. The `agent_contract_files` for a verifier call MUST
+`{"checkpoint_dir": "<...>", "plugin_root": "${CLAUDE_PLUGIN_ROOT}", "kind": "verifier-response", "target_id": "<batch_id>", "dispatch_input": {"batch_id": "<id>", "expected_targets": [<sorted>], "finding_or_chain_canonical": {<...>}, "structural": {<the whole §5.5 structural object, unchanged>}, "agent_contract_files": [<sorted abs paths>]}}`
+and call `agent-response-cache.mjs --lookup`. (`structural` is in the key so a graph change
+invalidates verifier caches.) The `agent_contract_files` for a verifier call MUST
 include:
 - `${CLAUDE_PLUGIN_ROOT}/agents/oswe-verifier.md`
 - `${CLAUDE_PLUGIN_ROOT}/skills/audit/SKILL.md`
@@ -356,13 +502,16 @@ invocation** §6's preflight loop already settled — once that loop reached `ok
 it printed to stdout** (captured in Step B; the temp `--out` file is gone by then). The invocation,
 for reference and for the preflight loop: write a single JSON input
 `{ "findings": [...], "chains": [...], "batches": [...] }` (the bound wrappers from §6) to a literal
-temp path and run the tested CLI (a process, not an importable tool):
+temp path and run the tested CLI (a process, not an importable tool), passing the §5.5 structural
+file with `--structural` (the preflight loop and the final run use this **same** command; the trap
+does **not** remove the structural file — it is purged with `.oswe/tmp/` at the end):
 
 ```bash
 ( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"' EXIT
   node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/apply-verdicts.mjs" \
     --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-7f3c1a9e.json" \
     --out  "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json" \
+    --structural "${CLAUDE_PROJECT_DIR}/.oswe/tmp/structural-<structural-token>.json" \
     --checkpoint-dir "${checkpoint_dir}"
   rc=$?                                                           # capture BEFORE cat
   cat "${CLAUDE_PROJECT_DIR}/.oswe/tmp/av-out-7f3c1a9e.json"      # <-- THIS stdout is the result you keep
@@ -380,7 +529,15 @@ The CLI encodes the entire decision and returns `{ ok, error, error_kind, error_
   or downgraded**;
 - `Critical` **only if** the chain is accepted, **every** member is `accepted` (a `downgraded` member
   caps it below Critical), `entry_point.auth == "unauthenticated"`, and `final_impact == "unauth-rce"`;
-- a chain with **no verdict** stays **`not-requested`** (not rejected) and is added to `gaps`.
+- a chain with **no verdict** stays **`not-requested`** (not rejected) and is added to `gaps`;
+- **structural ceiling (SP10, `--structural`)**: every finding listed in the structural file gets its
+  `structural_path`. A finding whose `final_confidence` is `strong static proof` but whose
+  `structural_path` is `absent` is **downgraded to `to verify`** with `verification_notes:
+  ["structural: absent"]` (verdict and `final_severity` unchanged) — so a chain with such a member can no
+  longer be Critical. A chain **downgrade** that exceeds the post-cap member ceiling is **clamped** to it
+  with chain `verification_notes: ["structural: member cap"]` instead of failing. Both notes are the audit
+  trail: surface them in the report (§7). A missing/unreadable structural file is exit 2 (fix the call);
+  a schema-invalid one is `ok:false`, `error_kind: "orchestrator-input"` (fix §5.5).
 
 By the time you consume the result here, §6's preflight loop has already driven `applyVerdicts` to
 **`ok:true`** (every `verifier-output` error retried once then neutralized, every target surfacing as
@@ -407,28 +564,37 @@ to `provisional_severity` only for `not-requested` items). See Report format bel
   reason. `inconclusive`/`not-analyzed` leads are listed under **Coverage**, not here. **With no
   `--sarif` (leads empty), neither section is emitted and the Markdown is identical to today's output.**
 
-**Then emit the visual HTML report (alongside the `.md`, same basename).** Build a **non-sensitive
-`summary` object** (see "HTML export" below) from the final findings/chains/`gaps` plus the
-orchestrator's aggregated analyzer-coverage state, write it to a literal `.oswe/tmp/` path (file tool,
-no shell interpolation), and run the tested helper under the usual `trap`:
+**Then emit the canonical `report.json` (alongside the `.md`, same basename).** This is the
+machine-readable artifact downstream tooling (benchmark ledger, baseline/diff, exports) keys on.
+Build a **`[REDACTED]`-safe parts object** `{ run, coverage, findings, chains, verdicts,
+lead_adjudications, app_graph }` — `run` = `{ run_id, generated: "YYYY-MM-DD", scope }`; `coverage` = the
+aggregated analyzer coverage (`analyzed`, `skipped`); `findings`/`chains`/`verdicts` = the final
+validated objects; `lead_adjudications` = the per-lead outcomes (only when `--sarif` leads were
+ingested); `app_graph` (SP10, always present) = `{ "available": true, "stats": <graph.stats, verbatim> }`
+when `graph` is non-null, else `{ "available": false, "reason": "<graph_reason from §1.5>" }` — **never**
+set `multi_file_chain_count` yourself (the helper computes it from the chains). **Reading `stats`
+without loading the graph:** read only the leading part of `graph-<graph-token>.json` (its top-level keys
+are ordered `version`, `generated_by`, `stats`, `nodes`, `edges`), copy the `stats` object verbatim, and
+never load `nodes`/`edges` into context. Write the parts object to a literal `.oswe/tmp/` path (file tool, no shell interpolation), and run the
+tested helper under the usual `trap`:
+`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/write-report.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" )`.
+Like every export here, **`report.json` can never fail the audit**: on a non-zero exit (1 = the parts failed
+`report.schema.json` validation — a bug to fix; 2 = IO), note `report.json export failed: <reason>`
+in the chat summary and continue — the `.md` remains the guaranteed artifact.
+
+**Then emit the visual HTML report (alongside the `.md`, same basename) — after `report.json`, because
+the summary's `app_graph` is read back from the `report.json` just written.** Build a **non-sensitive
+`summary` object** (see "HTML export" below) from the final findings/chains/`gaps`, the
+orchestrator's aggregated analyzer-coverage state, and that `report.json`'s `app_graph` (it is the last
+top-level key of the file, so reading the file's tail is enough); write it to a literal `.oswe/tmp/`
+path (file tool, no shell interpolation), and run the tested helper under the usual `trap`:
 `( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/render-html.mjs" --md "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.md" --summary "${CLAUDE_PROJECT_DIR}/.oswe/tmp/summary-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.html" --checkpoint-dir "${checkpoint_dir}" )`.
+If `report.json` could not be written, build the summary **without** `app_graph` (the Markdown body still
+carries the App graph section).
 **The HTML can never fail the audit.** On a non-zero exit (1 = summary the orchestrator built wrong;
 2 = IO), note `HTML export failed: <reason>; Markdown report at <path>` in the chat summary and
 continue — the `.md` is the guaranteed artifact. The atomic write means a failure never leaves a
 partial `.html`.
-
-**Then emit the canonical `report.json` (alongside the `.md`, same basename).** This is the
-machine-readable artifact downstream tooling (benchmark ledger, baseline/diff, exports) keys on.
-Build a **`[REDACTED]`-safe parts object** `{ run, coverage, findings, chains, verdicts,
-lead_adjudications }` — `run` = `{ run_id, generated: "YYYY-MM-DD", scope }`; `coverage` = the
-aggregated analyzer coverage (`analyzed`, `skipped`); `findings`/`chains`/`verdicts` = the final
-validated objects; `lead_adjudications` = the per-lead outcomes (only when `--sarif` leads were
-ingested) — write it to a literal `.oswe/tmp/` path (file tool, no shell interpolation), and run the
-tested helper under the usual `trap`:
-`( trap 'rm -f "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json"' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/write-report.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/tmp/report-parts-<token>.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" )`.
-Like the HTML, **`report.json` can never fail the audit**: on a non-zero exit (1 = the parts failed
-`report.schema.json` validation — a bug to fix; 2 = IO), note `report.json export failed: <reason>`
-in the chat summary and continue — the `.md` remains the guaranteed artifact.
 
 **Then emit the SARIF 2.1.0 export** (reading the `report.json` just written):
 `( trap 'true' EXIT; node "${CLAUDE_PLUGIN_ROOT}/skills/audit/scripts/export-sarif.mjs" --file "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.json" --out "${CLAUDE_PROJECT_DIR}/.oswe/reports/oswe-report-YYYY-MM-DD-HHMM.sarif" )`.
@@ -475,7 +641,8 @@ finalize** — the checkpoint must remain on disk for the next `/oswe:audit` inv
 and resume from. (`.md` not written = real abort; HTML-only failure = clean exit.)
 
 **Then purge temp:** `rm -rf "${CLAUDE_PROJECT_DIR}/.oswe/tmp"` (the report is `[REDACTED]`-safe; the
-raw intermediate files are not — see Temp-file hygiene). This runs on the success path; on any abort
+raw intermediate files are not — see Temp-file hygiene). This also removes the two run-long SP10 files,
+`graph-<graph-token>.json` and `structural-<structural-token>.json`. This runs on the success path; on any abort
 earlier in the pipeline, purge before exiting too.
 
 ## Validation
@@ -528,6 +695,10 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
     the annex (§ “Dismissed findings”) with its reason.
   - Findings with `vuln_class:”trust-boundary”` are **excluded** here; they appear instead in the
     dedicated **Hygiene / Trust-boundary** section below.
+  - **Structural (SP10)**: in each finding block, a `Structural:` line showing the finding's
+    `structural_path` (`proven` / `absent` / `n/a`) and any `verification_notes` (e.g.
+    `structural: absent` = confidence capped to `to verify`). A chain carrying `structural: member cap`
+    shows that note in its Exploit chains block.
 - **Hygiene / Trust-boundary (CWE-501)**: a **separate** section, placed after exploit findings and
   visually distinct, for accepted findings with `vuln_class:”trust-boundary”`. These are
   **non-exploitable hygiene findings** (attacker data written into trusted/session state), always
@@ -563,6 +734,19 @@ path; if `node` is missing the audit has already aborted.) `.oswe/tmp/` is gitig
   blind spot is the false-negative by indirection (a sink reached via a wrapper/alias is invisible to
   substring matching), so a **low `deprioritized` score is not proof of a thin surface** — a SARIF
   input backstops this; a no-SARIF run does not.
+- **App graph unavailable (SP10):** when §1.5 left `graph = null`, Coverage carries the sentence
+  `App graph unavailable: <reason> — partitions, candidate paths and structural checks fell back to pre-SP10 behaviour.`
+- **App graph (SP10)** — a section right **after Coverage**, built from `graph.stats` and §2's result
+  (counts and closed-set labels only, never code):
+  - **Availability**: `available` / `unavailable: <reason>` (when unavailable, this line is the whole section);
+  - **Files**: parsed / parse errors / skipped, out of `files_total`;
+  - **Routes by auth class**: `unauthenticated` / `authenticated` / `unknown`;
+  - **Call resolution**: `calls_exact / calls_total` as a ratio, plus the `name-only` and `unresolved` counts;
+  - **Partitioning**: `mode` (`graph` | `fallback`) and the `orphan_partition_ids` (or "none");
+  - **Per-stack coverage matrix**: one row per stack — `frameworks_detected`, `extractors_applied`,
+    `not_extracted`;
+  - **Multi-file chains**: accepted/downgraded chains whose transitions' `evidence` spans ≥ 2 distinct
+    files (the rule `write-report.mjs` applies for `report.json`'s `multi_file_chain_count`).
 - **Annex “Dismissed findings”**: **only** items with **`outcome: "rejected"`** in `decisions`
   (a real refutation), with their `reason` — a verifier `rejected` finding/chain, or a chain implicitly
   rejected because a **member was rejected** (refuted). Items that are merely `not-requested` (unverified
@@ -585,9 +769,19 @@ only, **never** secrets, code excerpts, or `file:line`. The `summary` shape (val
   `verification_status` (sum = all findings, rejected included).
 - `coverage`: `{ analyzed, skipped }` — analyzed partitions vs coverage gaps.
 - `chains[]`: `{ id (^CHAIN-[0-9]+$), severity, entry_auth, final_impact ("unauth-rce"|"other" — map
-  any non-`unauth-rce` chain impact to `other`), nodes[], edges[{from,to,verdict}] }`, where every
-  node / edge endpoint is exactly `entry`, `RCE`, or `^OSWE-[0-9]+$` (no free text). A safe audit has
-  `chains: []` and all-zero `severity_counts`.
+  any non-`unauth-rce` chain impact to `other`), nodes[], edges[{from,to,verdict}], verification_notes? }`,
+  where every node / edge endpoint is exactly `entry`, `RCE`, or `^OSWE-[0-9]+$` (no free text).
+  `verification_notes` (SP10, optional `string[]`) = the settled chain's own `verification_notes` (e.g.
+  `structural: member cap`), copied only when the chain carries them — omit the key otherwise; the
+  HTML shows them as a `Notes:` line under the chain id. A safe audit has `chains: []` and all-zero
+  `severity_counts`.
+- `app_graph` (SP10, optional): `{ available, reason?, stats?, multi_file_chain_count }` — the
+  `app_graph` object of the `report.json` just written (§7), copied verbatim: `available:false` carries
+  the `reason`; `available:true` carries `stats` (`graph.stats`, counts and closed-set labels);
+  `multi_file_chain_count` is required in both cases and is **copied from that `report.json`'s
+  `app_graph`** — never computed or set by you — so the HTML and `report.json` agree. Omit the key only
+  when `report.json` could not be written. The HTML renders it as an "App graph" section after the
+  Exploit chains.
 
 ### Report security
 - **Never write a secret fragment.** Replace any discovered secret value with `[REDACTED]`; cite only

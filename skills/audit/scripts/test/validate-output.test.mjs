@@ -294,3 +294,77 @@ test("final-finding trust-boundary must be Low/Info when not rejected", () => {
   // a rejected trust-boundary finding has no final_severity, so the invariant does not apply:
   assert.equal(validate("final-finding", finalBase({ vuln_class: "trust-boundary", provisional_severity: "Low", verification_status: "rejected" })).valid, true);
 });
+
+// --- SP10: candidate_path_id(s), structural_path, verification_notes on findings ---
+test("finding accepts candidate_path_id, candidate_path_ids, structural_path and verification_notes", () => {
+  const f = baseFinding({
+    candidate_path_id: "CP-g-node-unauthenticated-api-12",
+    candidate_path_ids: ["CP-p-1", "CP-p-2"],
+    structural_path: "proven",
+    verification_notes: ["route R reaches sink S via 3 exact calls"]
+  });
+  const r = validate("finding", f);
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("analyzer-response accepts a raw finding that cites candidate_path_id", () => {
+  const r = validate("analyzer-response", analyzerResponse([baseFinding({ candidate_path_id: "CP-auth-1" })]));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test("structural_path accepts proven | absent | n/a and rejects anything else", () => {
+  for (const v of ["proven", "absent", "n/a"]) {
+    assert.equal(validate("finding", baseFinding({ structural_path: v })).valid, true, v);
+  }
+  for (const v of ["maybe", "yes", "", "Proven", null, true]) {
+    assert.equal(validate("finding", baseFinding({ structural_path: v })).valid, false, String(v));
+  }
+});
+
+test("final-finding accepts structural_path: proven (inherited via $ref)", () => {
+  const accepted = (over) => finalBase({ verification_status: "accepted", final_severity: "High", final_confidence: "strong static proof", direct_flow: true, ...over });
+  const r = validate("final-finding", accepted({ structural_path: "proven", candidate_path_ids: ["CP-p-1"] }));
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+  assert.equal(validate("final-finding", accepted({ structural_path: "maybe" })).valid, false);
+});
+
+test("candidate_path_id must match ^CP-.+-[0-9]+$", () => {
+  for (const ok of ["CP-p-1", "CP-g-node-unauthenticated-api-12", "CP-a-b-c-007"]) {
+    assert.equal(validate("finding", baseFinding({ candidate_path_id: ok })).valid, true, ok);
+  }
+  for (const bad of ["nope", "CP-p-", "CP--1", "cp-p-1", "CP-p-1x", "CP-p", "", 7]) {
+    assert.equal(validate("finding", baseFinding({ candidate_path_id: bad })).valid, false, JSON.stringify(bad));
+  }
+});
+
+test("candidate_path_ids: pattern per item, uniqueItems, minItems 1", () => {
+  assert.equal(validate("finding", baseFinding({ candidate_path_ids: ["CP-p-1", "CP-p-2"] })).valid, true);
+  assert.equal(validate("finding", baseFinding({ candidate_path_ids: [] })).valid, false);
+  assert.equal(validate("finding", baseFinding({ candidate_path_ids: ["CP-p-1", "CP-p-1"] })).valid, false);
+  assert.equal(validate("finding", baseFinding({ candidate_path_ids: ["nope"] })).valid, false);
+  assert.equal(validate("finding", baseFinding({ candidate_path_ids: "CP-p-1" })).valid, false);
+});
+
+test("verification_notes: an array of non-empty strings", () => {
+  assert.equal(validate("finding", baseFinding({ verification_notes: ["a", "b"] })).valid, true);
+  assert.equal(validate("finding", baseFinding({ verification_notes: [] })).valid, true);
+  assert.equal(validate("finding", baseFinding({ verification_notes: [""] })).valid, false);
+  assert.equal(validate("finding", baseFinding({ verification_notes: [1] })).valid, false);
+  assert.equal(validate("finding", baseFinding({ verification_notes: "note" })).valid, false);
+});
+
+test("the new SP10 finding fields stay optional (a plain finding is unchanged)", () => {
+  const r = validate("finding", baseFinding());
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+// --- I5: orchestration-only SP10 fields are forbidden in analyzer output ---
+test("I5: analyzer-response rejects findings carrying candidate_path_ids, structural_path or verification_notes", () => {
+  for (const extra of [{ candidate_path_ids: ["CP-auth-1"] }, { structural_path: "proven" }, { verification_notes: ["structural: absent"] }]) {
+    const r = validate("analyzer-response", analyzerResponse([baseFinding(extra)]));
+    assert.equal(r.valid, false, JSON.stringify(extra));
+  }
+  // the same fields stay valid on a finding / final-finding (the orchestrator sets them)
+  assert.equal(validate("finding", baseFinding({ candidate_path_ids: ["CP-p-1"], structural_path: "n/a", verification_notes: ["x"] })).valid, true);
+  assert.equal(validate("analyzer-response", analyzerResponse([baseFinding({ candidate_path_id: "CP-auth-1" })])).valid, true);
+});

@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "graph.schema.json",
+  "title": "OSWE Application Graph",
+  "$comment": "SP10 app graph: deterministic tree-sitter structural index (files, functions, routes, sources, sinks; imports/calls/handles/uses_middleware/nests edges — a nests edge links a function to one lexically nested in it, a closure that runs within it). Node ids are 12 lowercase hex characters; edges reference node ids. Nodes and edges are oneOf-discriminated by the const 'type'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "generated_by", "stats", "nodes", "edges"],
+  "properties": {
+    "version": { "const": 1 },
+    "generated_by": { "type": "string" },
+    "stats": { "$ref": "#/$defs/stats" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/fileNode" },
+          { "$ref": "#/$defs/functionNode" },
+          { "$ref": "#/$defs/routeNode" },
+          { "$ref": "#/$defs/sourceNode" },
+          { "$ref": "#/$defs/sinkNode" }
+        ]
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/importsEdge" },
+          { "$ref": "#/$defs/callsEdge" },
+          { "$ref": "#/$defs/handlesEdge" },
+          { "$ref": "#/$defs/usesMiddlewareEdge" },
+          { "$ref": "#/$defs/nestsEdge" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "nodeId": { "type": "string", "pattern": "^[0-9a-f]{12}$" },
+    "nodeIdOrNull": { "anyOf": [{ "$ref": "#/$defs/nodeId" }, { "type": "null" }] },
+    "line": { "type": "integer", "minimum": 1 },
+    "count": { "type": "integer", "minimum": 0 },
+    "fileNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id", "path", "stack", "lang", "parse_status"],
+      "properties": {
+        "type": { "const": "file" },
+        "id": { "$ref": "#/$defs/nodeId" },
+        "path": { "type": "string" },
+        "stack": { "enum": ["php", "node", "python", "java", "dotnet"] },
+        "lang": { "enum": ["javascript", "typescript", "tsx", "python", "java", "php", "c_sharp"] },
+        "parse_status": { "enum": ["ok", "error", "skipped"] },
+        "skip_reason": { "type": "string" }
+      }
+    },
+    "functionNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id", "file", "name", "qualified_name", "line_start", "line_end", "kind", "exported"],
+      "properties": {
+        "type": { "const": "function" },
+        "id": { "$ref": "#/$defs/nodeId" },
+        "file": { "type": "string" },
+        "name": { "type": "string" },
+        "qualified_name": { "type": "string" },
+        "line_start": { "$ref": "#/$defs/line" },
+        "line_end": { "$ref": "#/$defs/line" },
+        "kind": { "enum": ["function", "method", "arrow", "lambda"] },
+        "exported": { "type": "boolean" },
+        "class": { "type": "string" }
+      }
+    },
+    "routeNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id", "file", "line", "http_method", "path_pattern", "handler", "middlewares", "framework", "auth"],
+      "properties": {
+        "type": { "const": "route" },
+        "id": { "$ref": "#/$defs/nodeId" },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/line" },
+        "http_method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY"] },
+        "path_pattern": { "type": "string" },
+        "handler": { "$ref": "#/$defs/nodeIdOrNull" },
+        "middlewares": { "type": "array", "items": { "type": "string" } },
+        "framework": { "enum": ["express", "nest", "flask", "django", "fastapi", "spring", "laravel", "symfony", "aspnet"] },
+        "auth": { "enum": ["unauthenticated", "authenticated", "unknown"] }
+      }
+    },
+    "sourceNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id", "file", "line", "enclosing_fn", "kind", "pattern"],
+      "properties": {
+        "type": { "const": "source" },
+        "id": { "$ref": "#/$defs/nodeId" },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/line" },
+        "enclosing_fn": { "$ref": "#/$defs/nodeIdOrNull" },
+        "kind": { "enum": ["query", "body", "params", "header", "cookie", "file", "env"] },
+        "pattern": { "type": "string" }
+      }
+    },
+    "sinkNode": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id", "file", "line", "enclosing_fn", "class", "callee", "pattern"],
+      "properties": {
+        "type": { "const": "sink" },
+        "id": { "$ref": "#/$defs/nodeId" },
+        "file": { "type": "string" },
+        "line": { "$ref": "#/$defs/line" },
+        "enclosing_fn": { "$ref": "#/$defs/nodeIdOrNull" },
+        "class": { "enum": ["cmd-exec", "eval", "deser", "nosql", "template", "sql", "include", "file-write", "file-read", "ssrf", "xxe", "trust-boundary", "redirect", "other"] },
+        "callee": { "type": "string" },
+        "pattern": { "type": "string" }
+      }
+    },
+    "importsEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "from", "to", "confidence", "specifier"],
+      "properties": {
+        "type": { "const": "imports" },
+        "from": { "$ref": "#/$defs/nodeId" },
+        "to": { "$ref": "#/$defs/nodeId" },
+        "confidence": { "enum": ["exact", "heuristic"] },
+        "specifier": { "type": "string" }
+      }
+    },
+    "callsEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "from", "to", "line", "callee_text", "confidence"],
+      "properties": {
+        "type": { "const": "calls" },
+        "from": { "$ref": "#/$defs/nodeId" },
+        "to": { "$ref": "#/$defs/nodeIdOrNull" },
+        "line": { "$ref": "#/$defs/line" },
+        "callee_text": { "type": "string" },
+        "confidence": { "enum": ["exact", "name-only", "unresolved"] }
+      }
+    },
+    "handlesEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "from", "to"],
+      "properties": {
+        "type": { "const": "handles" },
+        "from": { "$ref": "#/$defs/nodeId" },
+        "to": { "$ref": "#/$defs/nodeId" }
+      }
+    },
+    "usesMiddlewareEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "from", "to", "order"],
+      "properties": {
+        "type": { "const": "uses_middleware" },
+        "from": { "$ref": "#/$defs/nodeId" },
+        "to": { "$ref": "#/$defs/nodeId" },
+        "order": { "$ref": "#/$defs/count" }
+      }
+    },
+    "nestsEdge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "from", "to"],
+      "properties": {
+        "type": { "const": "nests" },
+        "from": { "$ref": "#/$defs/nodeId" },
+        "to": { "$ref": "#/$defs/nodeId" }
+      }
+    },
+    "stats": {
+      "type": "object", "additionalProperties": false,
+      "required": ["files_total", "files_parsed", "files_error", "files_skipped", "functions", "calls_total", "calls_exact", "calls_name_only", "calls_unresolved", "routes_by_auth", "coverage_matrix", "config_errors"],
+      "properties": {
+        "files_total": { "$ref": "#/$defs/count" },
+        "files_parsed": { "$ref": "#/$defs/count" },
+        "files_error": { "$ref": "#/$defs/count" },
+        "files_skipped": { "$ref": "#/$defs/count" },
+        "functions": { "$ref": "#/$defs/count" },
+        "calls_total": { "$ref": "#/$defs/count" },
+        "calls_exact": { "$ref": "#/$defs/count" },
+        "calls_name_only": { "$ref": "#/$defs/count" },
+        "calls_unresolved": { "$ref": "#/$defs/count" },
+        "routes_by_auth": {
+          "type": "object", "additionalProperties": false,
+          "required": ["unauthenticated", "authenticated", "unknown"],
+          "properties": {
+            "unauthenticated": { "$ref": "#/$defs/count" },
+            "authenticated": { "$ref": "#/$defs/count" },
+            "unknown": { "$ref": "#/$defs/count" }
+          }
+        },
+        "coverage_matrix": {
+          "type": "object",
+          "propertyNames": { "enum": ["php", "node", "python", "java", "dotnet"] },
+          "additionalProperties": {
+            "type": "object", "additionalProperties": false,
+            "required": ["frameworks_detected", "extractors_applied", "not_extracted", "patterns_unmatched"],
+            "properties": {
+              "frameworks_detected": { "type": "array", "items": { "type": "string" } },
+              "extractors_applied": { "type": "array", "items": { "type": "string" } },
+              "not_extracted": { "type": "array", "items": { "type": "string" } },
+              "patterns_unmatched": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "config_errors": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["file", "message"],
+            "properties": { "file": { "type": "string" }, "message": { "type": "string" } }
+          }
+        }
+      }
+    }
+  }
+}

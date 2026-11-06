@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "structural-check.schema.json",
+  "title": "OSWE Structural Check",
+  "$comment": "SP10 structural-check result: per-finding and per-chain-transition verdict on whether the application graph proves a route-to-sink path. 'proven' = a graph path exists, 'absent' = the graph shows no path, 'n/a' = the check could not be anchored (no route/sink to anchor on).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings", "transitions"],
+  "properties": {
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^OSWE-[0-9]+$": { "$ref": "#/$defs/entry" }
+      }
+    },
+    "transitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^CHAIN-[0-9]+$": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["index", "structural_path", "reason"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "structural_path": { "$ref": "#/$defs/structuralPath" },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "structuralPath": { "enum": ["proven", "absent", "n/a"] },
+    "entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["structural_path", "reason"],
+      "properties": {
+        "structural_path": { "$ref": "#/$defs/structuralPath" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

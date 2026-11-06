@@ -2,6 +2,9 @@
 // analyzer/verifier responses. Proves "from fixed inputs, with no agents, the SKILL's deterministic
 // pipeline produces a valid report by passing the right contracts in the right order, with SP3
 // included". Does NOT prove analysis quality. Spec: docs/superpowers/specs/2026-06-18-oswe-e2e-replay-smoke-design.md.
+// SP10 (docs/superpowers/specs/2026-11-05-oswe-sp10-app-graph-design.md §3): the graph stages run in
+// SKILL order too — build-graph (§1.5), partition-graph (§2), enumerate-paths (§3),
+// check-chain-structure (§5.5) and apply-verdicts --structural (§6b); the t.diagnostic line counts them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -14,6 +17,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = join(HERE, "..");                                                       // skills/audit/scripts/
 const REFS = realpathSync(join(SCRIPTS, "..", "references"));                           // skills/audit/references/
 const CLI = (name) => join(SCRIPTS, `${name}.mjs`);
+const GRAPH_CLI = join(SCRIPTS, "graph", "build-graph.mjs");                            // SP10 §1.5
 const run = (args) => spawnSync(process.execPath, args, { encoding: "utf8" });
 
 test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses", (t) => {
@@ -47,19 +51,48 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   assert.ok(cpResult.stdout.trim().length > 0, "confine-path printed empty stdout");
   assert.ok(cpResult.stdout.includes("app.py"), "confine-path stdout missing app.py");
 
+  // SP10 assertion counter: the t.diagnostic line at the end proves the graph stages actually ran.
+  let sp10Assertions = 0;
+  const sp10 = (fn, ...args) => { fn(...args); sp10Assertions++; };
+
+  // === 2b. SP10 SKILL §1.5: build-graph on the temp project (stacks python, frameworks flask) ===
+  const bgIn = join(root, "_build-graph-in.json");
+  writeFileSync(bgIn, JSON.stringify({ projectDir: root, scope_realpath: root, stacks: ["python"], frameworks: ["flask"], referencesDir: REFS }));
+  const bgOut = join(root, "_graph.json");
+  const bgResult = run([GRAPH_CLI, "--file", bgIn, "--out", bgOut]);
+  sp10(assert.equal, bgResult.status, 0, `build-graph failed: ${bgResult.stderr}`);
+  const graph = JSON.parse(readFileSync(bgOut, "utf8"));
+  sp10(assert.notEqual, graph.graph, null, `build-graph returned { graph: null }: ${graph.reason}`);
+  sp10(assert.ok, graph.nodes.filter((n) => n.type === "function").length >= 1, "graph must carry at least one function node");
+  const appFileNode = graph.nodes.find((n) => n.type === "file" && n.path === "a/app.py");
+  sp10(assert.equal, appFileNode?.parse_status, "ok", "a/app.py must parse cleanly");
+
+  // === 2c. SP10 SKILL §2: partition-graph — the fixture has no routes => fallback, byte-identical ===
+  // The orchestrator's own directory partitions are the fallback; everything after uses the returned ones.
+  const fallbackPartitions = [
+    { partition_id: "partA", stack: "python", files: ["a/app.py"] },
+    { partition_id: "partB", stack: "python", files: ["b/util.py"] },
+    // partC references one missing path inside the root + one absolute path OUTSIDE the root.
+    // surface-scan classifies the first as skipped_missing (ENOENT) and the second as
+    // skipped_out_of_scope (confinePath escape). All files skipped → scannable:false with reason.
+    { partition_id: "partC", stack: "python", files: ["c/missing.py", escapeAbs] }
+  ];
+  const pgIn = join(root, "_partition-graph-in.json");
+  writeFileSync(pgIn, JSON.stringify({ fallback_partitions: fallbackPartitions }));
+  const pgOut = join(root, "_partitions.json");
+  const pgResult = run([CLI("partition-graph"), "--file", pgIn, "--graph", bgOut, "--out", pgOut]);
+  const pgPayload = pgResult.status === 0 ? JSON.parse(readFileSync(pgOut, "utf8")) : {};
+  sp10(assert.equal, pgResult.status, 0, `partition-graph failed: ${pgResult.stderr}`);
+  sp10(assert.equal, pgPayload.mode, "fallback", "no route in the fixture => fallback mode");
+  sp10(assert.equal, JSON.stringify(pgPayload.partitions), JSON.stringify(fallbackPartitions), "fallback partitions must be byte-identical");
+  sp10(assert.deepEqual, pgPayload.orphan_partition_ids, []);
+
   // === 3. PIPELINE STEP 2: surface-scan over partA (scannable) + partB (scannable, low surface) + partC (all-unreadable) ===
   const ssIn = join(root, "_surface-scan-in.json");
   writeFileSync(ssIn, JSON.stringify({
     projectDir: root,
     referencesDir: REFS,
-    partitions: [
-      { partition_id: "partA", stack: "python", files: ["a/app.py"] },
-      { partition_id: "partB", stack: "python", files: ["b/util.py"] },
-      // partC references one missing path inside the root + one absolute path OUTSIDE the root.
-      // surface-scan classifies the first as skipped_missing (ENOENT) and the second as
-      // skipped_out_of_scope (confinePath escape). All files skipped → scannable:false with reason.
-      { partition_id: "partC", stack: "python", files: ["c/missing.py", escapeAbs] }
-    ]
+    partitions: pgPayload.partitions          // partition-graph's output (SKILL §2), here == fallbackPartitions
   }));
   const ssOut = join(root, "_surface-scan-out.json");
   const ssResult = run([CLI("surface-scan"), "--file", ssIn, "--out", ssOut]);
@@ -106,6 +139,17 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   const unreadable = allocation.gaps.find((g) => g.gap_class === "unreadable-partition");
   assert.equal(unreadable.partition_id, "partC");
   assert.ok(unreadable.counts.skipped_missing + unreadable.counts.skipped_out_of_scope >= 1, "unreadable-partition must carry skip counts");
+
+  // === 4b. SP10 SKILL §3: enumerate-paths for the analyzed partition (no route => no candidate) ===
+  const epIn = join(root, "_enumerate-paths-in.json");
+  writeFileSync(epIn, JSON.stringify({ partition: pgPayload.partitions.find((p) => p.partition_id === allocation.analyze[0].partition_id) }));
+  const epOut = join(root, "_candidate-paths.json");
+  const epResult = run([CLI("enumerate-paths"), "--file", epIn, "--graph", bgOut, "--out", epOut]);
+  const epPayload = epResult.status === 0 ? JSON.parse(readFileSync(epOut, "utf8")) : {};
+  sp10(assert.equal, epResult.status, 0, `enumerate-paths failed: ${epResult.stderr}`);
+  sp10(assert.equal, epPayload.partition_id, "partA");
+  sp10(assert.ok, Array.isArray(epPayload.candidate_paths), "candidate_paths must be an array");
+  sp10(assert.equal, epPayload.candidate_paths.length, 0, "no route in the fixture => no candidate path");
 
   // === 5. PRE-BAKED ANALYZER RESPONSE for partA — one raw finding, schema-valid ===
   // Required fields per finding.schema.json: finding_id, partition_id, title, vuln_class, source,
@@ -164,7 +208,10 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
     finding_ids: ["OSWE-1"],
     transitions: [{
       from: "entry", to: "OSWE-1", how: "header → request.args → render_template_string",
-      evidence: [{ file: "a/app.py", line: 4 }]
+      evidence: [{ file: "a/app.py", line: 4 }],
+      // SP10 SKILL §5: every transition carries a kind; the entry transition is a call-path from the
+      // route entry to the first finding's source, pinned by anchors (checked structurally in §5.5).
+      kind: "call-path", from_anchor: { file: "a/app.py", line: 3 }, to_anchor: { file: "a/app.py", line: 3 }
     }],
     final_impact: "unauth-rce",
     severity: "High",                                       // Pinned per spec §3.5 — NOT Critical pre-apply.
@@ -176,6 +223,22 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   // Schema-gate the candidate chain (the SKILL §5 contract — validate each built chain)
   const chainVal = run([CLI("validate-output"), "chain", "--file", chainPath]);
   assert.equal(chainVal.status, 0, `candidate chain failed schema gate: ${chainVal.stdout}`);
+
+  // === 7b. SP10 SKILL §5.5: check-chain-structure on the aggregated findings + validated chains ===
+  // OSWE-1's source (a/app.py:3) and sink (a/app.py:4) both sit in view() => "proven" (same function);
+  // the entry -> OSWE-1 call-path transition is anchored inside view() too => "proven".
+  const ccsIn = join(root, "_structural-in.json");
+  writeFileSync(ccsIn, JSON.stringify({ findings: agPayload.findings, chains: [candidateChain] }));
+  const structuralPath = join(root, "_structural.json");
+  const ccsResult = run([CLI("check-chain-structure"), "--file", ccsIn, "--graph", bgOut, "--out", structuralPath]);
+  const structural = ccsResult.status === 0 ? JSON.parse(readFileSync(structuralPath, "utf8")) : {};
+  sp10(assert.equal, ccsResult.status, 0, `check-chain-structure failed: ${ccsResult.stderr}`);
+  for (const f of agPayload.findings) {
+    sp10(assert.ok, ["proven", "n/a"].includes(structural.findings[f.finding_id]?.structural_path),
+      `${f.finding_id} structural_path must be proven or n/a, got ${JSON.stringify(structural.findings[f.finding_id])}`);
+  }
+  sp10(assert.deepEqual, structural.findings["OSWE-1"], { structural_path: "proven", reason: "same function" });
+  sp10(assert.equal, structural.transitions["CHAIN-1"][0].structural_path, "proven", "the anchored call-path transition is proven");
 
   // === 8. PRE-BAKED VERIFIER RESPONSES — TWO SEPARATE BATCHES (apply-verdicts:105 enforces
   // 1-5 findings XOR exactly 1 chain per batch) ===
@@ -247,7 +310,7 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   const avIn = join(root, "_apply-verdicts-in.json");
   writeFileSync(avIn, JSON.stringify({ findings: findingsArr, chains: chainsArr, batches: [bFindWrapper, bChainWrapper] }));
   const avOut = join(root, "_apply-verdicts-out.json");
-  const avResult = run([CLI("apply-verdicts"), "--file", avIn, "--out", avOut]);
+  const avResult = run([CLI("apply-verdicts"), "--file", avIn, "--out", avOut, "--structural", structuralPath]);
   assert.equal(avResult.status, 0, `apply-verdicts failed: ${avResult.stderr}`);
   // The CLI ALSO prints the result JSON to stdout (SKILL §6 Step B captures stdout); the file is the
   // same payload, more convenient to parse here. Read from the file.
@@ -266,6 +329,10 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   assert.equal(finalChain.verification_status, "accepted");
   assert.equal(finalChain.severity, "Critical", "chain elevated to Critical by gating");
   assert.equal(finalChain.confidence, "strong static proof");
+  // SP10 SKILL §6b: --structural records structural_path on every finding; "proven" never caps confidence.
+  for (const f of avPayload.findings) sp10(assert.ok, typeof f.structural_path === "string", `${f.finding_id} must carry structural_path`);
+  sp10(assert.equal, finalFinding.structural_path, "proven");
+  sp10(assert.equal, finalFinding.verification_notes, undefined, "a proven finding gets no structural note");
 
   // === 11. POST-APPLY REVALIDATION (the SKILL §6b ligne 274 contract — revalidate every returned
   // finding AND every returned chain) ===
@@ -348,4 +415,6 @@ test("e2e replay smoke: 8 helpers chain via real CLIs with pre-baked responses",
   assert.match(html, /Deprioritized/, "HTML must preserve the 'Deprioritized' coverage label");
   assert.match(html, /Unreadable partition/, "HTML must preserve the 'Unreadable partition' coverage label");
   assert.match(html, /skipped_missing/, "HTML must preserve the skipped_missing count in the Coverage line");
+
+  t.diagnostic(`sp10 graph stages: ${sp10Assertions} assertions`);
 });

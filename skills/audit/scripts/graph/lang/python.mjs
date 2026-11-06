@@ -1,0 +1,732 @@
+// Python language module for the SP10 application graph (spec §2.3), Flask / Django / FastAPI.
+// extractFile walks one parsed tree (web-tree-sitter, see ../parser.mjs) and emits the per-file
+// Extract described in ./javascript.mjs: functions, calls (+ the scope / receiver hints resolve.mjs
+// needs, spec §1.4), imports, exports, classes, routes, and surface-pattern sources / sinks.
+//
+// Python specifics:
+//   functions  `def` at module level -> "function"; in a class body -> "method" (`<Class>.<name>`);
+//              nested -> "function" (`<outer>.<name>`); `lambda` -> "lambda", named by the target
+//              of `x = lambda: ...`, else `<enclosing>.<anon>@<line>:<col>`.
+//   exports    Python has no export statement: every top-level def / class whose name does not
+//              start with `_` — or, when the module sets `__all__` to a list of string literals,
+//              only those of them it names. A method is exported with its class.
+//   imports    `lang.submoduleImports: true`: `from pkg import sub` may name the module pkg.sub, which
+//              resolve.mjs tries when pkg does not export `sub`.
+//   classes    `extends` is the last dotted segment of the first base (`object` and keyword
+//              arguments ignored); further bases are only noted ("multiple inheritance").
+//   scopes     scope_names are the bindings of every enclosing def / lambda (parameters,
+//              assignment / loop / with / except / walrus / comprehension targets, nested class
+//              names) plus the module's assignment targets. Imports, def names (a nested def is a
+//              definition resolve.mjs finds through its container) and `x = lambda` targets never
+//              shadow. A class body binds nothing visible to its methods.
+//   receivers  `self` is a method's first parameter, whatever its name (`self`, `cls`, `me`), as
+//              long as the method is not a `@staticmethod` and does not rebind it: `self.m()` ->
+//              receiver "this"; `self.a.m()` -> the declared class of attribute a; any other
+//              `x.m()` (a loop variable named `cls` or a staticmethod's parameter included) -> the
+//              class x is bound to (`x = C(...)`, `x: C`, parameter `x: C`) in the innermost scope
+//              that binds x. A name bound twice to different things carries no class.
+//   routes     Flask `@<x>.route(path, methods=[...])` / `@<x>.<verb>(path)`; FastAPI the same
+//              verbs on a FastAPI / APIRouter receiver (or in a file importing fastapi), plus
+//              `Depends.<name>` middleware texts; Django module-level `urlpatterns` `path()` /
+//              `re_path()` items (method "ANY") of each list literal, also `+`-joined (`[...] +
+//              static(...)`; a non-list operand is noted "urlpatterns(non-literal)"),
+//              `include("a.urls")` as a "USE" mount backed by a
+//              namespace import of "a.urls" so build-graph prefixes the included file's routes.
+//
+// Same TreeCursor walk as the JavaScript module (see its header for why not tree-sitter queries).
+// PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
+import { posix } from "node:path";
+import { normalizeToken } from "../surface.mjs";
+import { lookup, field, namedOf, childrenOfType, lineOf, anonLabel, byStart, matchEmitter, walk, receiverClass, define, lastSegment, repoPath } from "./common.mjs";
+
+export const lang = { id: "python", stack: "python", langIds: ["python"], frameworks: ["flask", "django", "fastapi"], implicitThisCalls: false, submoduleImports: true, callableLocals: true, overloads: false };
+
+// ---- node-type tables -----------------------------------------------------------------------------
+
+// A node in one of these (parent type, field) slots is part of a callee / attribute chain: the
+// enclosing chain node is the candidate, so the part never yields a source or sink on its own.
+const CHAIN_SLOTS = new Map([["attribute", "object"], ["call", "function"]]);
+// An identifier in one of these slots (or under one of these parents) declares a name, names an
+// attribute / keyword, or spells a type annotation: it is not a value reference.
+const BINDING_SLOTS = new Map([
+  ["function_definition", "name"], ["class_definition", "name"], ["default_parameter", "name"], ["typed_default_parameter", "name"],
+  ["keyword_argument", "name"], ["attribute", "attribute"], ["assignment", "left"], ["augmented_assignment", "left"],
+  ["named_expression", "name"], ["for_statement", "left"], ["for_in_clause", "left"], ["aliased_import", "alias"]
+]);
+const BINDING_PARENTS = new Set([
+  "parameters", "lambda_parameters", "typed_parameter", "list_splat_pattern", "dictionary_splat_pattern", "pattern_list",
+  "tuple_pattern", "list_pattern", "as_pattern_target", "dotted_name", "global_statement", "nonlocal_statement", "type"
+]);
+const PATTERN_CONTAINERS = new Set(["pattern_list", "tuple_pattern", "list_pattern", "list_splat_pattern", "as_pattern_target"]);
+
+const ROUTE_VERBS = { get: "GET", post: "POST", put: "PUT", patch: "PATCH", delete: "DELETE", head: "HEAD", options: "OPTIONS" };
+const FASTAPI_CLASSES = new Set(["FastAPI", "APIRouter"]);
+const DJANGO_ROUTE_FUNCTIONS = new Set(["path", "re_path"]);
+const SOURCE_KINDS = {
+  args: "query", GET: "query",
+  form: "body", json: "body", data: "body", get_json: "body", values: "body", POST: "body", body: "body",
+  headers: "header", META: "header", cookies: "cookie", COOKIES: "cookie", files: "file", FILES: "file", environ: "env"
+};
+
+// ---- small AST helpers ----------------------------------------------------------------------------
+
+const positionalArgs = (call) => namedOf(field(call, "arguments")).filter((a) => a.type !== "keyword_argument");
+const keywordArg = (call, name) => namedOf(field(call, "arguments")).find((a) => a.type === "keyword_argument" && field(a, "name")?.text === name) ?? null;
+
+// The value of a plain string literal (prefixes and quotes dropped); null for an f-string with
+// interpolations or any other node.
+function stringValue(node) {
+  if (node?.type !== "string" || childrenOfType(node, "interpolation").length) return null;
+  return childrenOfType(node, "string_content").map((c) => c.text).join("");
+}
+
+// Callee / attribute text with call arguments and subscripts dropped (`a.b(x).c` -> `a.b.c`,
+// `a[0].c` -> `a.c`).
+function render(node) {
+  switch (node.type) {
+    case "attribute": {
+      const object = field(node, "object");
+      const attribute = field(node, "attribute");
+      return object && attribute ? `${render(object)}.${attribute.text}` : node.text;
+    }
+    case "call": {
+      const fn = field(node, "function");
+      return fn ? render(fn) : node.text;
+    }
+    case "subscript": {
+      const value = field(node, "value");
+      return value ? render(value) : node.text;
+    }
+    case "parenthesized_expression": {
+      const inner = namedOf(node)[0];
+      return inner ? render(inner) : node.text;
+    }
+    default:
+      return node.text;
+  }
+}
+const textOf = (node) => normalizeToken(render(node));
+const dottedText = (node) => namedOf(node).map((c) => c.text).join(".");
+
+// Every name a binding target declares (`a`, `a, (b, c)`, `[d, *e]`); attributes / subscripts none.
+function patternNames(node, out = []) {
+  if (!node) return out;
+  if (node.type === "identifier") out.push(node.text);
+  else if (PATTERN_CONTAINERS.has(node.type)) for (const child of namedOf(node)) patternNames(child, out);
+  return out;
+}
+
+// The class named by a type annotation: `C` / `mod.C` -> `C`; anything else (generics, strings) null.
+function typeName(node) {
+  switch (node?.type) {
+    case "type":
+      return typeName(namedOf(node)[0]);
+    case "identifier":
+      return node.text;
+    case "attribute":
+      return field(node, "attribute")?.text ?? null;
+    default:
+      return null;
+  }
+}
+
+// The class a value constructs: a call whose callee is a capitalised name or a dotted name ending in
+// a capitalised segment (`C(...)`, `pkg.C(...)`; resolve.mjs verifies it names a class). A chained
+// assignment `a = b = C()` reads through to its final value.
+function constructedClass(value) {
+  let node = value;
+  while (node?.type === "assignment") node = field(node, "right");
+  if (node?.type !== "call") return null;
+  const fn = field(node, "function");
+  const name = fn?.type === "identifier" ? fn.text : fn?.type === "attribute" ? field(fn, "attribute")?.text : null;
+  return name && /^[A-Z]/.test(name) ? name : null;
+}
+
+// ---- state ----------------------------------------------------------------------------------------
+
+// A method's frame also records its receiver parameter (`selfName`, the first parameter, whatever its
+// name), whether the body rebinds it, and its class's attribute types (see receiverOf).
+const newFrame = (startIndex, qualifiedName) => ({ startIndex, qualifiedName, bindings: new Set(), classOf: new Map(), definitions: new Set(), selfName: null, selfRebound: false, fieldTypes: null });
+
+function newState(path, surface) {
+  return {
+    moduleName: path.split("/").at(-1).replace(/\.[^.]*$/, ""),
+    surface: { sources: surface?.sources ?? [], sinks: surface?.sinks ?? [] },
+    functions: [], calls: [], imports: [], classes: [], routes: [], sources: [], sinks: [],
+    notExtracted: new Set(),
+    topLevel: [], // [name, start byte] of module-level def / class, in source order
+    allNames: null, // the module's `__all__` string list, when it has one
+    classBases: new Map(), // class name -> base texts, for Django class-based views
+    importsFastapi: false,
+    module: newFrame(null, null),
+    scopes: [] // innermost last: { frame } for a def / lambda, { cls } for a class body
+  };
+}
+
+const functionFrames = (st) => st.scopes.filter((s) => s.frame).map((s) => s.frame);
+const innermostFrame = (st) => st.scopes.findLast((s) => s.frame)?.frame ?? null;
+const atModule = (st) => st.scopes.length === 0;
+
+// Record `name` as bound in `frame`; a second binding to a different class (or to no class, a nested
+// function definition included) drops the class: the name is then demonstrably bound, but not to one
+// class.
+function addBinding(frame, name, cls) {
+  if (frame.definitions.has(name)) {
+    frame.bindings.add(name);
+    frame.classOf.delete(name);
+  } else if (!frame.bindings.has(name)) {
+    frame.bindings.add(name);
+    if (cls) frame.classOf.set(name, cls);
+  } else if (frame.classOf.get(name) !== cls) frame.classOf.delete(name);
+}
+
+// Bind in the innermost scope. A class body binds nothing (its names are attributes, invisible to
+// its methods); at module level only assignment targets are recorded (`assignment: true`). Binding a
+// method's receiver parameter again (`self = ...`, `for self in ...`) makes it an ordinary name.
+function bind(st, name, { cls = null, assignment = false } = {}) {
+  const top = st.scopes.at(-1);
+  if (top?.cls) return;
+  if (top) {
+    addBinding(top.frame, name, cls);
+    if (top.frame.selfName === name) top.frame.selfRebound = true;
+  } else if (assignment) addBinding(st.module, name, cls);
+}
+
+// The name is bound to a nested function (`def name`, `name = lambda`) in the scope bind() would use:
+// a definition resolve.mjs reaches through its container, never a scope_name, but a name that carries
+// no class and shadows an outer class binding (common.mjs define / receiverClass).
+function defineName(st, name) {
+  const top = st.scopes.at(-1);
+  if (top?.cls) return;
+  define(top ? top.frame : st.module, name);
+}
+
+// ---- sources and sinks ----------------------------------------------------------------------------
+
+const sourceKind = (pattern) => lookup(SOURCE_KINDS, lastSegment(pattern.normalized)) ?? "body";
+
+const emitMatches = matchEmitter("python", sourceKind); // see common.mjs
+
+const inChain = (ctx) => CHAIN_SLOTS.get(ctx.parentType) === ctx.field || ctx.parentType === "decorator";
+const isBinding = (ctx) => BINDING_PARENTS.has(ctx.parentType) || BINDING_SLOTS.get(ctx.parentType) === ctx.field;
+
+// onAttribute / onIdentifier receive the TreeCursor rather than a Node (see javascript.mjs). A
+// subscript is never a candidate: in `request.args["x"]` the attribute `request.args` is.
+function onAttribute(cursor, st, ctx) {
+  if (inChain(ctx) || ctx.parentType === "type") return;
+  const node = cursor.currentNode;
+  emitMatches(node, [{ category: "member", text: textOf(node) }], st, { sources: true, sinks: true });
+}
+
+function onIdentifier(cursor, st, ctx) {
+  if (inChain(ctx) || isBinding(ctx)) return;
+  emitMatches(cursor, [{ category: "identifier", text: cursor.nodeText }], st, { sources: true, sinks: true });
+}
+
+function onString(node, st, ctx) {
+  if (ctx.parentType === "pair" && ctx.field === "key") return; // a key, handled by onPair
+  const text = childrenOfType(node, "string_content").map((c) => c.text).join("");
+  emitMatches(node, [{ category: "literal", text: normalizeToken(text) }], st, { sinks: true });
+}
+
+function onPair(node, st) {
+  const key = stringValue(field(node, "key"));
+  if (key) emitMatches(field(node, "key"), [{ category: "key", text: normalizeToken(key) }], st, { sinks: true });
+}
+
+function decoratorInfo(decorator) {
+  const expr = namedOf(decorator)[0];
+  if (!expr) return { name: "", call: null };
+  if (expr.type === "call") return { name: textOf(field(expr, "function") ?? expr), call: expr };
+  return { name: textOf(expr), call: null };
+}
+
+function onDecorator(node, st) {
+  const { name } = decoratorInfo(node);
+  if (name) emitMatches(node, [{ category: "decorator", text: name }], st, { sources: true });
+}
+
+// ---- scopes and functions -------------------------------------------------------------------------
+
+// The identifier a parameter declares (`a`, `a: T`, `a=1`, `a: T = 1`, `*a`, `**a`, `*a: T`).
+function parameterName(param) {
+  switch (param?.type) {
+    case "identifier":
+      return param;
+    case "default_parameter":
+    case "typed_default_parameter":
+      return field(param, "name");
+    case "typed_parameter":
+      return parameterName(namedOf(param)[0]);
+    case "list_splat_pattern":
+    case "dictionary_splat_pattern":
+      return childrenOfType(param, "identifier")[0] ?? null;
+    default:
+      return null;
+  }
+}
+
+// A method's receiver parameter: its first parameter, unless that is a splat or a separator, or the
+// method is a `@staticmethod` (bare or called). A `@classmethod`'s first parameter (`cls`) counts.
+function receiverParameter(node) {
+  const decorators = node.parent?.type === "decorated_definition" ? childrenOfType(node.parent, "decorator") : [];
+  if (decorators.some((d) => lastSegment(decoratorInfo(d).name) === "staticmethod")) return null;
+  const first = namedOf(field(node, "parameters"))[0];
+  if (!first || !["identifier", "typed_parameter", "default_parameter", "typed_default_parameter"].includes(first.type)) return null;
+  const name = parameterName(first);
+  return name?.type === "identifier" ? name.text : null;
+}
+
+// Declared positional parameters (`param_count`) without a method's receiver parameter; null when
+// any parameter is a splat, keyword-only or has a default (Python has no overloads: this only
+// needs to be harmless).
+const UNCOUNTED_PARAMETERS = new Set(["list_splat_pattern", "dictionary_splat_pattern", "default_parameter", "typed_default_parameter", "keyword_separator"]);
+function parameterCount(node, receiver) {
+  const params = namedOf(field(node, "parameters")).filter((p) => p.type !== "positional_separator");
+  if (params.some((p) => UNCOUNTED_PARAMETERS.has(p.type))) return null;
+  return params.length - (receiver ? 1 : 0);
+}
+
+function addParameters(node, frame) {
+  for (const param of namedOf(field(node, "parameters"))) {
+    const name = parameterName(param);
+    if (name?.type === "identifier") addBinding(frame, name.text, typeName(field(param, "type")));
+  }
+}
+
+function functionName(node, ctx) {
+  if (node.type === "function_definition") return field(node, "name")?.text ?? null;
+  if (ctx.parentType === "assignment" && ctx.field === "right") {
+    const target = field(node.parent, "left");
+    if (target?.type === "identifier") return target.text;
+  }
+  return null;
+}
+
+function onFunction(node, st, ctx) {
+  const enclosing = innermostFrame(st);
+  const top = st.scopes.at(-1);
+  const cls = node.type === "function_definition" && top?.cls ? top.cls.name : null;
+  let name = functionName(node, ctx);
+  // a def, or a lambda named by the assignment initialising it, binds its name in the enclosing scope
+  // (resolve.mjs's nested definitions); an anonymous lambda binds nothing
+  const bindsName = node.type === "function_definition" || name !== null;
+  let qualifiedName;
+  if (!name) {
+    name = "<anon>";
+    qualifiedName = `${enclosing?.qualifiedName ?? st.moduleName}.${anonLabel(node)}`;
+  } else if (cls) {
+    qualifiedName = `${cls}.${name}`;
+  } else {
+    qualifiedName = enclosing ? `${enclosing.qualifiedName}.${name}` : name;
+  }
+  // a def is a definition, never a scope_name (a nested one is resolved through its container), but
+  // its name carries no class from here on
+  if (node.type === "function_definition") {
+    if (atModule(st)) st.topLevel.push([name, node.startIndex]);
+    defineName(st, name);
+  }
+  const selfName = cls ? receiverParameter(node) : null;
+  st.functions.push({
+    name,
+    qualified_name: qualifiedName,
+    line_start: lineOf(node),
+    line_end: node.endPosition.row + 1,
+    start_byte: node.startIndex,
+    end_byte: node.endIndex,
+    param_count: parameterCount(node, selfName),
+    kind: node.type === "lambda" ? "lambda" : cls ? "method" : "function",
+    exported: false,
+    class: cls,
+    ...(bindsName ? { binds_name: true } : {}),
+    // a lambda's lexical class body: resolve.mjs inherits a containing method's class only within it
+    ...(node.type === "lambda" ? { class_start_byte: st.scopes.findLast((s) => s.cls)?.cls.start ?? null } : {})
+  });
+  if (ctx.parentType === "decorated_definition") decoratorRoutes(childrenOfType(node.parent, "decorator"), node, qualifiedName, st);
+  const frame = newFrame(node.startIndex, qualifiedName);
+  addParameters(node, frame);
+  if (cls) Object.assign(frame, { selfName, fieldTypes: top.cls.fieldTypes });
+  st.scopes.push({ frame });
+  return () => st.scopes.pop();
+}
+
+function onAssignment(node, st) {
+  const left = field(node, "left");
+  const right = field(node, "right");
+  const cls = left?.type === "identifier" ? typeName(field(node, "type")) ?? constructedClass(right) : null;
+  // `x = lambda: ...` defines the function named x (onFunction): a definition, not a scope_name, and a
+  // name that carries no class before or after (`x = C()` either side of it)
+  if (left?.type === "identifier" && right?.type === "lambda") defineName(st, left.text);
+  else for (const name of patternNames(left)) bind(st, name, { cls, assignment: true });
+  if (!atModule(st) || left?.type !== "identifier") return;
+  if (left.text === "__all__" && (right?.type === "list" || right?.type === "tuple")) {
+    const names = namedOf(right).map(stringValue);
+    if (names.every((n) => n !== null)) st.allNames = names;
+  }
+  if (left.text === "urlpatterns") urlpatterns(right, st);
+}
+
+// `urlpatterns = [...]`, also as the operands of a `+` chain (`[...] + static(...) + [...]`): every
+// list operand's routes; any operand (or value) that is not a list literal is noted
+// "urlpatterns(non-literal)" — its routes are not extracted.
+function urlpatterns(value, st) {
+  if (value?.type === "list") return djangoRoutes(value, st);
+  if (value?.type === "binary_operator" && field(value, "operator")?.type === "+") {
+    urlpatterns(field(value, "left"), st);
+    return urlpatterns(field(value, "right"), st);
+  }
+  st.notExtracted.add("urlpatterns(non-literal)");
+}
+
+function onAugmentedAssignment(node, st) {
+  const left = field(node, "left");
+  for (const name of patternNames(left)) bind(st, name, { assignment: true });
+  const right = field(node, "right");
+  if (atModule(st) && left?.type === "identifier" && left.text === "urlpatterns") urlpatterns(right, st);
+}
+
+function onWalrus(node, st) {
+  const name = field(node, "name");
+  if (name) bind(st, name.text, { assignment: true });
+}
+
+// `for` / comprehension `for ... in` targets and `with ... as` / `except ... as` targets.
+function onLoopOrAsTarget(node, st) {
+  const target = node.type === "as_pattern_target" ? node : field(node, "left");
+  for (const name of patternNames(target)) bind(st, name);
+}
+
+// ---- classes --------------------------------------------------------------------------------------
+
+const definedFunction = (node) => (node.type === "decorated_definition" ? field(node, "definition") : node);
+
+// Declared class of each `self.<attr>` receiver, first source wins: (i) a class-level annotation
+// `attr: C`, (ii) an annotated assignment `self.attr: C = ...`, (iii) `self.attr = C(...)`, where
+// `self` is the receiver parameter (first parameter) of the method the assignment is in.
+function fieldTypes(body) {
+  const types = new Map();
+  const add = (attr, type) => attr && type && !types.has(attr) && types.set(attr, type);
+  for (const statement of childrenOfType(body, "expression_statement")) {
+    for (const assignment of childrenOfType(statement, "assignment")) {
+      const left = field(assignment, "left");
+      if (left?.type === "identifier") add(left.text, typeName(field(assignment, "type")));
+    }
+  }
+  const selfAssignments = namedOf(body).map(definedFunction).filter((d) => d?.type === "function_definition").flatMap((method) => {
+    const selfName = receiverParameter(method);
+    return field(method, "body").descendantsOfType("assignment").filter((a) => {
+      const left = field(a, "left");
+      return selfName && left?.type === "attribute" && field(left, "object")?.type === "identifier" && field(left, "object").text === selfName;
+    });
+  });
+  for (const a of selfAssignments) add(field(field(a, "left"), "attribute")?.text, typeName(field(a, "type")));
+  for (const a of selfAssignments) add(field(field(a, "left"), "attribute")?.text, constructedClass(field(a, "right")));
+  return types;
+}
+
+function onClass(node, st) {
+  const name = field(node, "name")?.text ?? null;
+  const body = field(node, "body");
+  const bases = namedOf(field(node, "superclasses"))
+    .filter((b) => !["keyword_argument", "list_splat", "dictionary_splat"].includes(b.type))
+    .map(textOf)
+    .filter((t) => t !== "object");
+  if (bases.length > 1) st.notExtracted.add("multiple inheritance");
+  if (name) {
+    const methods = namedOf(body).map(definedFunction).filter((d) => d?.type === "function_definition").map((d) => field(d, "name")?.text).filter(Boolean);
+    st.classes.push({ name, extends: bases.length ? lastSegment(bases[0]) : null, implements: [], methods, start_byte: node.startIndex });
+    if (!st.classBases.has(name)) st.classBases.set(name, bases);
+    if (atModule(st)) st.topLevel.push([name, node.startIndex]);
+    else bind(st, name);
+  }
+  st.scopes.push({ cls: { name, start: node.startIndex, fieldTypes: fieldTypes(body) } });
+  return () => st.scopes.pop();
+}
+
+// ---- routes ---------------------------------------------------------------------------------------
+
+function joinDjangoPath(pattern) {
+  return pattern.startsWith("/") ? pattern : `/${pattern}`;
+}
+
+// `Depends(x)` -> `Depends.<x>`; anything else contributes nothing.
+function dependsText(node) {
+  if (node?.type !== "call" || lastSegment(textOf(field(node, "function") ?? node)) !== "Depends") return [];
+  const target = positionalArgs(node)[0];
+  return target ? [`Depends.${textOf(target)}`] : [];
+}
+
+function routeMethod(info, verb) {
+  if (verb !== "route") return ROUTE_VERBS[verb];
+  const methods = field(keywordArg(info.call, "methods"), "value");
+  if (!methods) return "GET";
+  const listed = ["list", "tuple", "set"].includes(methods.type) ? namedOf(methods).map(stringValue) : [null];
+  return listed.length === 1 && listed[0] ? listed[0].toUpperCase() : "ANY";
+}
+
+function routeFramework(receiver, st) {
+  const cls = receiver?.type === "identifier" ? st.module.classOf.get(receiver.text) : null;
+  if (cls) return FASTAPI_CLASSES.has(cls) ? "fastapi" : "flask";
+  return st.importsFastapi ? "fastapi" : "flask";
+}
+
+// Flask / FastAPI decorator routes on one function: every `@<x>.route(...)` / `@<x>.<verb>(...)`
+// is a route; the function's other decorators are its middleware texts, in source order.
+function decoratorRoutes(decorators, fnNode, qualifiedName, st) {
+  const infos = decorators.map((d) => ({ node: d, ...decoratorInfo(d) }));
+  const isRoute = (info) => {
+    const verb = lastSegment(info.name);
+    return info.call && field(info.call, "function")?.type === "attribute" && (verb === "route" || lookup(ROUTE_VERBS, verb) !== null);
+  };
+  const routeInfos = infos.filter(isRoute);
+  if (!routeInfos.length) return;
+  const others = infos.filter((i) => !isRoute(i) && i.name).map((i) => i.name);
+  const paramDepends = namedOf(field(fnNode, "parameters")).flatMap((p) => dependsText(field(p, "value")));
+  for (const info of routeInfos) {
+    const pathArg = positionalArgs(info.call)[0];
+    if (!pathArg) continue;
+    const path = stringValue(pathArg);
+    if (path === null) {
+      st.notExtracted.add("route(non-literal path)");
+      continue;
+    }
+    const framework = routeFramework(field(field(info.call, "function"), "object"), st);
+    const dependencies = field(keywordArg(info.call, "dependencies"), "value");
+    st.routes.push({
+      line: lineOf(info.node),
+      start_byte: info.node.startIndex,
+      http_method: routeMethod(info, lastSegment(info.name)),
+      path_pattern: path,
+      handler_text: qualifiedName,
+      middleware_texts: framework === "fastapi" ? [...others, ...namedOf(dependencies).flatMap(dependsText), ...paramDepends] : others,
+      framework
+    });
+  }
+}
+
+// Django `urlpatterns` items: `path(pattern, view)` / `re_path(pattern, view)`. `include("a.urls")`
+// is a USE mount plus a namespace import of "a.urls" (build-graph resolves the mount through it);
+// `X.as_view()` of a same-file class takes the class's bases as middleware texts (auth mixins).
+function djangoRoutes(list, st) {
+  for (const item of namedOf(list)) {
+    if (item.type !== "call" || !DJANGO_ROUTE_FUNCTIONS.has(lastSegment(textOf(field(item, "function") ?? item)))) continue;
+    const [patternArg, view] = positionalArgs(item);
+    const pattern = stringValue(patternArg);
+    if (pattern === null || !view) {
+      st.notExtracted.add("urlpatterns(non-literal path)");
+      continue;
+    }
+    const route = { line: lineOf(item), start_byte: item.startIndex, http_method: "ANY", path_pattern: joinDjangoPath(pattern), handler_text: textOf(view), middleware_texts: [], framework: "django" };
+    const callee = view.type === "call" ? field(view, "function") : null;
+    if (callee && lastSegment(textOf(callee)) === "include") {
+      const module = stringValue(positionalArgs(view)[0]);
+      if (module === null) {
+        st.notExtracted.add("include(non-literal)");
+        continue;
+      }
+      st.imports.push({ line: lineOf(view), specifier: module, bindings: "namespace", local: module });
+      st.routes.push({ ...route, http_method: "USE", handler_text: module });
+      continue;
+    }
+    if (callee?.type === "attribute" && field(callee, "attribute")?.text === "as_view") {
+      st.notExtracted.add("class-based view dispatch");
+      route.middleware_texts = [...(st.classBases.get(textOf(field(callee, "object"))) ?? [])];
+    }
+    st.routes.push(route);
+  }
+}
+
+// ---- calls ----------------------------------------------------------------------------------------
+
+// Position of a call: the callee's final identifier (the attribute of an attribute callee), so
+// chained calls (`a.b().c()`) and their sinks get distinct offsets; any other callee shape falls
+// back to the argument list, or to the call itself.
+function calleeAnchor(callee, call) {
+  if (callee.type === "identifier") return callee;
+  if (callee.type === "attribute") return field(callee, "attribute") ?? callee;
+  return field(call, "arguments") ?? call;
+}
+
+
+// The receiver of an attribute callee, decided when the walk ends (finishCall): `x.m()` -> { name: x,
+// attribute: null }; `x.a.m()` -> { name: x, attribute: a }. Deeper chains carry no hint.
+function receiverOf(fn) {
+  const object = fn.type === "attribute" ? field(fn, "object") : null;
+  if (object?.type === "identifier") return { receiverName: object.text, receiverAttribute: null };
+  const inner = object?.type === "attribute" ? field(object, "object") : null;
+  if (inner?.type === "identifier") return { receiverName: inner.text, receiverAttribute: field(object, "attribute")?.text ?? null };
+  return { receiverName: null, receiverAttribute: null };
+}
+
+function onCall(node, st, ctx) {
+  if (ctx.parentType === "decorator") return; // decorator metadata, modelled by routes / sources
+  const fn = field(node, "function");
+  if (!fn) return;
+  const calleeText = textOf(fn);
+  const anchor = calleeAnchor(fn, node);
+  // arguments at the call site (`arg_count`): null with a `*args` / `**kwargs` argument
+  const args = field(node, "arguments");
+  const listed = args?.type === "argument_list" ? namedOf(args) : [args].filter(Boolean);
+  const argCount = listed.some((a) => a.type === "list_splat" || a.type === "dictionary_splat") ? null : listed.length;
+  st.calls.push({ anchor, calleeText, argCount, ...receiverOf(fn), frames: functionFrames(st) });
+  emitMatches(node, [{ category: "call", text: calleeText }], st, { sources: true, sinks: true, sinkAt: anchor });
+}
+
+// ---- imports --------------------------------------------------------------------------------------
+
+const noteFastapi = (specifier, st) => {
+  if (specifier === "fastapi" || specifier.startsWith("fastapi.")) st.importsFastapi = true;
+};
+
+function onImport(node, st) {
+  for (const part of node.childrenForFieldName("name")) {
+    const dotted = part.type === "aliased_import" ? field(part, "name") : part;
+    const specifier = dottedText(dotted);
+    noteFastapi(specifier, st);
+    st.imports.push({ line: lineOf(node), specifier, bindings: "namespace", local: part.type === "aliased_import" ? field(part, "alias")?.text ?? specifier : specifier });
+  }
+}
+
+function onImportFrom(node, st) {
+  const module = field(node, "module_name");
+  const specifier = module?.type === "relative_import"
+    ? childrenOfType(module, "import_prefix")[0].text.replace(/\s+/g, "") + dottedText(childrenOfType(module, "dotted_name")[0])
+    : dottedText(module);
+  noteFastapi(specifier, st);
+  const bindings = node.childrenForFieldName("name").map((part) => {
+    const imported = dottedText(part.type === "aliased_import" ? field(part, "name") : part);
+    return { imported, local: part.type === "aliased_import" ? field(part, "alias")?.text ?? imported : imported };
+  });
+  if (childrenOfType(node, "wildcard_import").length) st.notExtracted.add("star import");
+  st.imports.push({ line: lineOf(node), specifier, bindings, local: null });
+}
+
+// ---- walk -----------------------------------------------------------------------------------------
+
+const HANDLERS = new Map([
+  ["function_definition", onFunction],
+  ["lambda", onFunction],
+  ["class_definition", onClass],
+  ["assignment", onAssignment],
+  ["augmented_assignment", onAugmentedAssignment],
+  ["named_expression", onWalrus],
+  ["for_statement", onLoopOrAsTarget],
+  ["for_in_clause", onLoopOrAsTarget],
+  ["as_pattern_target", onLoopOrAsTarget],
+  ["call", onCall],
+  ["string", onString],
+  ["pair", onPair],
+  ["decorator", onDecorator],
+  ["import_statement", onImport],
+  ["import_from_statement", onImportFrom]
+]);
+const CURSOR_HANDLERS = new Map([
+  ["attribute", onAttribute],
+  ["identifier", onIdentifier]
+]);
+
+// ---- finish ---------------------------------------------------------------------------------------
+
+// The method frame whose receiver parameter `name` is, as seen from the call: the innermost frame
+// binding `name` must be a method whose first parameter it is, never rebound there. null otherwise
+// (a loop variable or local spelled `self` / `cls`, a plain function's parameter `self`).
+function receiverFrame(name, frames) {
+  const frame = [...frames].reverse().find((f) => f.bindings.has(name));
+  return frame && frame.selfName === name && !frame.selfRebound ? frame : null;
+}
+
+// Receiver hints (spec §1.4 rules 1b and 3): `self.m()` -> receiver "this"; `self.a.m()` -> the
+// declared class of attribute a on the method's class; `x.m()` -> the class x is bound to.
+function finishCall({ anchor, calleeText, argCount, receiverName, receiverAttribute, frames }, st) {
+  const names = new Set(st.module.bindings);
+  for (const frame of frames) for (const name of frame.bindings) names.add(name);
+  const self = receiverName ? receiverFrame(receiverName, frames) : null;
+  let receiverClassName = null;
+  if (receiverAttribute !== null) receiverClassName = self?.fieldTypes.get(receiverAttribute) ?? null;
+  else if (receiverName && !self) receiverClassName = receiverClass(receiverName, frames, st.module);
+  return {
+    line: lineOf(anchor),
+    start_byte: anchor.startIndex,
+    callee_text: calleeText,
+    arg_count: argCount,
+    enclosing_start_byte: frames.at(-1)?.startIndex ?? null,
+    receiver: self && receiverAttribute === null ? "this" : null,
+    receiver_class: receiverClassName,
+    scope_names: [...names].sort()
+  };
+}
+
+// One export per top-level def / class name (its first definition), filtered by `__all__` when set.
+function moduleExports(st) {
+  const listed = st.allNames ? new Set(st.allNames) : null;
+  const exports = new Map();
+  for (const [name, start] of st.topLevel) {
+    if (exports.has(name) || (listed ? !listed.has(name) : name.startsWith("_"))) continue;
+    exports.set(name, { name, start_byte: start });
+  }
+  return [...exports.values()];
+}
+
+function finish(st) {
+  const exports = moduleExports(st);
+  const exported = new Set(exports.map((e) => e.name));
+  for (const fn of st.functions) fn.exported = fn.class ? exported.has(fn.class) : fn.qualified_name === fn.name && exported.has(fn.name);
+  return {
+    functions: st.functions.sort(byStart),
+    calls: st.calls.map((c) => finishCall(c, st)).sort(byStart),
+    imports: st.imports,
+    exports: exports.sort(byStart),
+    classes: st.classes.sort(byStart),
+    namespace: null,
+    routes: st.routes.sort(byStart),
+    sources: st.sources.sort(byStart),
+    sinks: st.sinks.sort(byStart),
+    not_extracted: [...st.notExtracted].sort()
+  };
+}
+
+export function extractFile({ tree, path, surface }) {
+  const st = newState(path, surface);
+  walk(tree, st, HANDLERS, CURSOR_HANDLERS);
+  return finish(st);
+}
+
+// ---- import resolution ----------------------------------------------------------------------------
+
+// A module `base` is `base.py` or the package `base/__init__.py`; a bare package reference
+// (`from . import x`) is only the package.
+function probe(base, filePaths, packageOnly) {
+  if (base === null) return null;
+  const candidates = [...(packageOnly ? [] : [`${base}.py`]), posix.join(base, "__init__.py")];
+  return candidates.find((c) => filePaths.has(c)) ?? null;
+}
+
+// Ancestor directories of `fromPath` that are packages (contain `__init__.py`), nearest first.
+function packageAncestors(fromPath, filePaths) {
+  const out = [];
+  for (let dir = posix.dirname(fromPath); dir !== "." && dir !== "/" && dir !== ""; dir = posix.dirname(dir)) {
+    if (filePaths.has(`${dir}/__init__.py`)) out.push(dir);
+  }
+  return out;
+}
+
+// A relative specifier (leading dots) resolves from the importing file's directory, one level up
+// per extra dot; a dotted specifier from the scope root, then from `src/` (the src layout), then
+// from each package ancestor of the importing file. `configs` / `namespaces` are part of the shared contract; Python ignores them.
+// resolve.mjs memoises resolveImportSpecifier per run on this key: relative specifiers resolve from the
+// importing file's directory and dotted ones from its package ancestors, so the directory is part of it.
+export const importCacheKey = ({ specifier, fromPath }) => `${posix.dirname(fromPath)}\u0000${specifier}`;
+
+export function resolveImportSpecifier({ specifier, fromPath, filePaths }) {
+  if (typeof specifier !== "string" || specifier === "") return null;
+  const dots = /^\.*/.exec(specifier)[0].length;
+  const rest = specifier.slice(dots);
+  if (rest !== "" && rest.split(".").some((segment) => segment === "")) return null;
+  const modulePath = rest.split(".").join("/");
+  const roots = dots ? [[posix.dirname(fromPath), ...Array(dots - 1).fill("..")].join("/")] : ["", "src", ...packageAncestors(fromPath, filePaths)];
+  for (const root of roots) {
+    const hit = probe(repoPath(posix.join(root, modulePath)), filePaths, rest === "");
+    if (hit) return { path: hit, confidence: "exact" };
+  }
+  return null;
+}

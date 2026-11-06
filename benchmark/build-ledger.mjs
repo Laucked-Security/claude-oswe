@@ -6,6 +6,9 @@
 //   flagged case  : { adjudication: "promoted"|"refuted"|"inconclusive" }   // how oswe judged the lead
 //   missed case   : { covered: <bool>, independent: <bool> }                // did oswe analyze it / find it on its own
 // Any case absent from the map degrades safely (flagged->not-analyzed/uncovered; missed->no-lead/uncovered).
+// SP10, copied only when the map carries them: a case's findings[] (verification_status + structural_path /
+// candidate_path_ids / verification_notes per finding) and the map's top-level app_graph_stats[] (one
+// app_graph.stats per report, written by extract-oswe-adjudications.mjs).
 //
 // CLI:
 //   node benchmark/build-ledger.mjs --flagged <flagged.json> --oswe <oswe-adjudications.json> \
@@ -16,6 +19,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const ADJ_FLAGGED = new Set(["promoted", "refuted", "inconclusive"]);
 const SP6_COUNTERS = ["accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings", "accepted_critical_chains", "proof_complete_critical_chains", "hygiene_findings"];
+
+// SP10 per-finding record: the verdict plus the graph fields, absent ones defaulted (null / [] / []).
+const graphFinding = (f) => {
+  const r = {};
+  if (typeof f.finding_id === "string") r.finding_id = f.finding_id;
+  r.verification_status = f.verification_status;
+  r.structural_path = f.structural_path ?? null;
+  r.candidate_path_ids = Array.isArray(f.candidate_path_ids) ? [...f.candidate_path_ids] : [];
+  r.verification_notes = Array.isArray(f.verification_notes) ? [...f.verification_notes] : [];
+  return r;
+};
 
 export function buildLedger(flagged, oswe, opts = {}) {
   const entries = [];
@@ -43,14 +57,20 @@ export function buildLedger(flagged, oswe, opts = {}) {
     e.oswe_attempted = o.oswe_attempted === true;
     for (const k of SP6_COUNTERS) e[k] = Number.isInteger(o[k]) ? o[k] : 0;
     e.chain_reached_rce = o.chain_reached_rce === true;
+    // SP10: per-finding graph fields, only when the map entry carries them (an SP10 report), so a
+    // pre-SP10 map builds a byte-identical ledger.
+    if (Array.isArray(o.findings)) e.findings = o.findings.map(graphFinding);
     entries.push(e);
   }
-  return {
+  const ledger = {
     dataset: flagged.dataset || "owasp-benchmark-java-1.2",
     subset: opts.subset || "benchmark/subset-owasp.json",
-    generated: new Date().toISOString().slice(0, 10),
-    entries
+    generated: new Date().toISOString().slice(0, 10)
   };
+  // SP10: one app_graph.stats object per report that carried one (metrics.mjs sums the call counters).
+  if (oswe && Array.isArray(oswe.app_graph_stats)) ledger.app_graph_stats = oswe.app_graph_stats.map((st) => ({ ...st }));
+  ledger.entries = entries;
+  return ledger;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

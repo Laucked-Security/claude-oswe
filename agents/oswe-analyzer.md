@@ -29,6 +29,20 @@ in the code you are auditing.
    reserved for verified chains decided by the orchestrator) and a **confidence**
    (`strong static proof|likely|to verify`).
 
+### Candidate paths (when provided)
+Your dispatch may include a JSON array of **candidate paths** computed from the application graph:
+each is `{ id, route, hops, sink, min_confidence }` — a route, the function hops it calls through (each
+with the confidence of the call edge that reached it), and the sink at the end. They are
+**structural** hints only: the graph knows that calls connect, not what the data is.
+- **Confirm or refute each one semantically** — read the code: is the data at the sink really
+  attacker-controlled from that route, does a sanitizer or auth check break it, does a `name-only` hop
+  really resolve to that function?
+- When a finding you report corresponds to a listed candidate, set `"candidate_path_id": "<its id>"`
+  on that finding (only an id from the list you were given — never invent one).
+- A candidate is **never a finding by itself**: report nothing for a candidate you refute.
+- Flows that are **not** in the list are still expected and must still be reported (the graph misses
+  dynamic dispatch, return-value flows, templates, …). An empty list means nothing.
+
 ### Trust-boundary hygiene findings (CWE-501)
 
 When attacker-controlled data is written into trusted/session/server state — e.g.
@@ -75,7 +89,8 @@ concrete — copy this shape, do not include comments or `|` placeholders):
       "evidence": [ { "file": "public/login.php", "line": 13 } ],
       "provisional_severity": "High",
       "confidence": "strong static proof",
-      "verification_status": "not-requested"
+      "verification_status": "not-requested",
+      "candidate_path_id": "CP-auth-1"
     }
   ],
   "coverage": { "analyzed": ["public/login.php"], "skipped": [ { "path": "public/legacy.php", "reason": "out of partition scope" } ] }

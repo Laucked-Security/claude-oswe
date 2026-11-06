@@ -35,8 +35,13 @@ jobs:
         working-directory: benchmark
         run: node --test
 
-      - name: Structure & consistency gate (stacks / references / fixtures markers)
+      - name: Structure & consistency gate (stacks / references / fixtures markers / graph extractors + goldens)
         run: node .github/scripts/check-structure.mjs
+
+      # The vendored tree-sitter parser (skills/audit/vendor/tree-sitter/) is hashed against its
+      # MANIFEST.json, with no unlisted files and a 10 MiB budget.
+      - name: Vendor gate (tree-sitter MANIFEST.json hashes + size budget)
+        run: node .github/scripts/check-vendor.mjs
 
   regen-check:
     name: validators.mjs is in sync with schemas
@@ -50,9 +55,15 @@ jobs:
       # AJV is a dev-only dependency used only to (re)generate the committed validators.mjs.
       # Regenerate and fail if the working tree differs — guarantees the committed, zero-dep
       # validators.mjs actually matches the schemas under skills/audit/schemas/.
-      - name: Install dev toolchain (AJV)
+      - name: Install dev toolchain (AJV, web-tree-sitter, tree-sitter-wasms)
         working-directory: skills/audit/scripts
         run: npm ci || npm install
+
+      # Content-based, not a byte diff of a rebuild: gzip bytes may differ across zlib builds, so each
+      # committed grammar is gunzipped and hashed against the pinned tree-sitter-wasms file, and the
+      # loader/runtime are compared with the web-tree-sitter files build-grammars.mjs copies.
+      - name: Vendored tree-sitter matches the pinned npm packages
+        run: node .github/scripts/check-vendor-upstream.mjs
 
       - name: Regenerate validators.mjs and verify it is unchanged
         working-directory: skills/audit/scripts

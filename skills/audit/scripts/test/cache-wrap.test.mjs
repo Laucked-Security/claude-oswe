@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, cpSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { canonicalize, sha256Hex, helperVersionDigest, cacheLookup, cacheStore } from "../cache-wrap.mjs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { canonicalize, sha256Hex, helperVersionDigest, dirVersionDigest, cacheLookup, cacheStore } from "../cache-wrap.mjs";
 
 function tmp() {
   return realpathSync(mkdtempSync(join(tmpdir(), "oswe-cache-wrap-")));
@@ -106,4 +107,51 @@ test("cacheStore is atomic (writes via .tmp-<pid> then rename — no partial fil
   assert.deepEqual(w.output, { x: 1 });
   const tmpPath = `${p}.tmp-${process.pid}`;
   assert.equal(existsSync(tmpPath), false);
+});
+
+// ---- dirVersionDigest (SP10: build-graph's version digest covers every graph/**/*.mjs) ----------
+
+test("dirVersionDigest is a stable 64-hex digest over the *.mjs files of a tree, recursively", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, "sub"), { recursive: true });
+  writeFileSync(join(dir, "a.mjs"), "export const a = 1;\n");
+  writeFileSync(join(dir, "sub", "b.mjs"), "export const b = 1;\n");
+  const d1 = dirVersionDigest(dir);
+  assert.match(d1, /^[0-9a-f]{64}$/);
+  assert.equal(dirVersionDigest(dir), d1);
+  writeFileSync(join(dir, "notes.txt"), "not code"); // other extensions are ignored
+  assert.equal(dirVersionDigest(dir), d1);
+  writeFileSync(join(dir, "sub", "b.mjs"), "export const b = 2;\n"); // a nested byte change
+  assert.notEqual(dirVersionDigest(dir), d1);
+});
+
+test("dirVersionDigest covers relative paths, not just bytes (a rename changes it)", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "a.mjs"), "x");
+  const d1 = dirVersionDigest(dir);
+  rmSync(join(dir, "a.mjs"));
+  writeFileSync(join(dir, "b.mjs"), "x");
+  assert.notEqual(dirVersionDigest(dir), d1);
+});
+
+test("dirVersionDigest honours a custom ext", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "a.mjs"), "x");
+  writeFileSync(join(dir, "a.json"), "{}");
+  const d1 = dirVersionDigest(dir, { ext: ".json" });
+  writeFileSync(join(dir, "a.mjs"), "y");
+  assert.equal(dirVersionDigest(dir, { ext: ".json" }), d1);
+  writeFileSync(join(dir, "a.json"), "[]");
+  assert.notEqual(dirVersionDigest(dir, { ext: ".json" }), d1);
+});
+
+test("(8) dirVersionDigest of a copy of scripts/graph changes when one lang/*.mjs byte changes", () => {
+  const graphDir = join(dirname(fileURLToPath(import.meta.url)), "..", "graph");
+  const copy = join(tmp(), "graph");
+  cpSync(graphDir, copy, { recursive: true });
+  const d1 = dirVersionDigest(copy);
+  assert.equal(d1, dirVersionDigest(graphDir));
+  const js = join(copy, "lang", "javascript.mjs");
+  writeFileSync(js, readFileSync(js, "utf8") + " ");
+  assert.notEqual(dirVersionDigest(copy), d1);
 });

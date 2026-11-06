@@ -213,3 +213,67 @@ test("SP7: quality.hygiene_findings sums hygiene_findings across ledger entries"
   assert.equal(r.ok, true, r.error);
   assert.equal(r.quality.hygiene_findings, 4, "sum of hygiene_findings across all entries");
 });
+
+// --- SP10: graph metrics (spec §3.3 / §4.2). Emitted only when the ledger carries SP10 data. ---
+const SP9_QUALITY_KEYS = ["finding_proof_complete_rate", "chain_proof_complete_rate", "ce_resolved_rate", "independent_discovery_rate",
+  "attempted_real_share", "real_not_found", "covered_fn", "structural_fn", "structural_fn_share", "attempted_per_category",
+  "min_attempted_per_category", "hygiene_findings"];
+const fr = (id, verification_status, structural_path, candidate_path_ids) =>
+  ({ finding_id: id, verification_status, structural_path, candidate_path_ids, verification_notes: [] });
+const sp10Ledger = (findingsT1, findingsT4, extra = {}) => ({
+  dataset: "d", subset: "s", generated: "2026-11-05", ...extra,
+  entries: [
+    { test_id: "BenchmarkTest00001", semgrep_flagged: true, oswe_covered: true, oswe_adjudication: "promoted", oswe_independent: false, cwe: 89, findings: findingsT1 },
+    { test_id: "BenchmarkTest00004", semgrep_flagged: false, oswe_covered: true, oswe_adjudication: "no-lead", oswe_independent: true, cwe: 22, findings: findingsT4 }
+  ]
+});
+
+test("SP10: 4 accepted findings, 3 proven, 2 with candidate ids -> structural_proof_rate 0.75, candidate_path_hit_rate 0.5", () => {
+  const l = sp10Ledger(
+    [fr("OSWE-1", "accepted", "proven", ["CP-p01-1"]), fr("OSWE-2", "accepted", "proven", ["CP-p01-2", "CP-p01-3"]),
+     fr("OSWE-9", "rejected", "proven", ["CP-p01-4"])], // rejected: in neither numerator nor denominator
+    [fr("OSWE-3", "accepted", "proven", []), fr("OSWE-4", "accepted", null, [])],
+    { app_graph_stats: [{ calls_total: 8, calls_exact: 6 }, { calls_total: 2, calls_exact: 0 }] }
+  );
+  const r = computeMetrics(l, truth);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.quality.structural_proof_rate, 0.75);
+  assert.equal(r.quality.candidate_path_hit_rate, 0.5);
+  assert.equal(r.quality.call_resolution_ratio, 0.6); // (6 + 0) / (8 + 2), summed over the run's reports
+});
+
+test("SP10: downgraded findings count in both denominators; findings the graph could not see count against the hit rate", () => {
+  const r = computeMetrics(sp10Ledger([fr("OSWE-1", "downgraded", "absent", [])], [fr("OSWE-2", "accepted", "proven", ["CP-p02-1"])]), truth);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.quality.structural_proof_rate, 0.5);
+  assert.equal(r.quality.candidate_path_hit_rate, 0.5);
+});
+
+test("SP10: rates are null (not 0) when no finding is accepted or downgraded; call_resolution_ratio null without stats or calls", () => {
+  const r = computeMetrics(sp10Ledger([fr("OSWE-1", "rejected", "proven", ["CP-p01-1"])], []), truth);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.quality.structural_proof_rate, null);
+  assert.equal(r.quality.candidate_path_hit_rate, null);
+  assert.equal(r.quality.call_resolution_ratio, null);
+  const z = computeMetrics(sp10Ledger([], [], { app_graph_stats: [{ calls_total: 0, calls_exact: 0 }] }), truth);
+  assert.equal(z.ok, true, z.error);
+  assert.equal(z.quality.call_resolution_ratio, null);
+});
+
+test("SP10: a ledger without SP10 data (the committed sample) yields exactly the pre-SP10 quality keys", () => {
+  const sample = JSON.parse(readFileSync(join(HERE, "fixtures/sample-ledger.json"), "utf8"));
+  const sampleTruth = parseTruthCsv(readFileSync(join(HERE, "fixtures/sample-truth.csv"), "utf8"));
+  const r = computeMetrics(sample, sampleTruth);
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(Object.keys(r.quality), SP9_QUALITY_KEYS);
+  assert.deepEqual(Object.keys(computeMetrics(ledger, truth).quality), SP9_QUALITY_KEYS);
+});
+
+test("SP10: malformed per-finding records and graph stats are rejected", () => {
+  assert.equal(computeMetrics(sp10Ledger([fr("OSWE-1", "accepted", "bogus", [])], []), truth).ok, false);
+  assert.equal(computeMetrics(sp10Ledger([fr("OSWE-1", "accepted", "proven", "CP-p01-1")], []), truth).ok, false);
+  assert.equal(computeMetrics(sp10Ledger([{ ...fr("OSWE-1", "accepted", "proven", []), extra: 1 }], []), truth).ok, false);
+  assert.equal(computeMetrics(sp10Ledger("x", []), truth).ok, false);
+  assert.equal(computeMetrics(sp10Ledger([], [], { app_graph_stats: [{ calls_total: 1 }] }), truth).ok, false);
+  assert.equal(computeMetrics(sp10Ledger([], [], { app_graph_stats: [{ calls_total: 1, calls_exact: 2 }] }), truth).ok, false);
+});

@@ -112,3 +112,37 @@ test("SP7: hygiene_findings carried from map entry; absent case defaults to 0", 
   const e2 = ledger.entries.find((e) => e.test_id === "BenchmarkTest00002");
   assert.equal(e2.hygiene_findings, 0, "absent map entry must default hygiene_findings to 0");
 });
+
+// --- SP10: per-finding graph fields + per-report graph stats, copied only when the map carries them. ---
+const SP9_ENTRY_KEYS = ["test_id", "semgrep_flagged", "cwe", "oswe_adjudication", "oswe_covered", "oswe_independent", "oswe_attempted",
+  "accepted_high_findings", "proof_complete_high_findings", "ce_resolved_high_findings", "accepted_critical_chains",
+  "proof_complete_critical_chains", "hygiene_findings", "chain_reached_rce"];
+
+test("SP10: per-finding structural_path / candidate_path_ids / verification_notes are copied, absent ones defaulted", () => {
+  const m = {
+    "BenchmarkTest00001": { adjudication: "promoted", oswe_attempted: true, findings: [
+      { finding_id: "OSWE-1", verification_status: "accepted", structural_path: "proven", candidate_path_ids: ["CP-p01-1"], verification_notes: ["n"] },
+      { finding_id: "OSWE-2", verification_status: "downgraded" }
+    ] },
+    app_graph_stats: [{ calls_total: 4, calls_exact: 3, calls_name_only: 1, calls_unresolved: 0 }]
+  };
+  const ledger = buildLedger(flagged, m, {});
+  const e1 = ledger.entries.find((e) => e.test_id === "BenchmarkTest00001");
+  assert.deepEqual(e1.findings, [
+    { finding_id: "OSWE-1", verification_status: "accepted", structural_path: "proven", candidate_path_ids: ["CP-p01-1"], verification_notes: ["n"] },
+    { finding_id: "OSWE-2", verification_status: "downgraded", structural_path: null, candidate_path_ids: [], verification_notes: [] }
+  ]);
+  assert.equal("findings" in ledger.entries.find((e) => e.test_id === "BenchmarkTest00002"), false);
+  assert.deepEqual(ledger.app_graph_stats, [{ calls_total: 4, calls_exact: 3, calls_name_only: 1, calls_unresolved: 0 }]);
+  const r = computeMetrics(ledger, truth);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.quality.structural_proof_rate, 0.5);
+  assert.equal(r.quality.candidate_path_hit_rate, 0.5);
+  assert.equal(r.quality.call_resolution_ratio, 0.75);
+});
+
+test("SP10: a map without SP10 data builds a ledger with exactly the pre-SP10 shape", () => {
+  const ledger = buildLedger(flagged, oswe, { subset: "benchmark/subset-owasp.json" });
+  assert.deepEqual(Object.keys(ledger), ["dataset", "subset", "generated", "entries"]);
+  for (const e of ledger.entries) assert.deepEqual(Object.keys(e), SP9_ENTRY_KEYS);
+});

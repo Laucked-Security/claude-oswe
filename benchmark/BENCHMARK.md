@@ -237,3 +237,53 @@ node benchmark/score-nodegoat.mjs --report .oswe/reports/oswe-report-2026-06-23-
 ```
 
 The checked-in score artifacts contain no source code, secrets, or exploit payloads.
+
+### SP10 — App graph
+
+SP10 adds a deterministic application graph (vendored tree-sitter): partitions cut by route
+reachability, candidate route → sink paths handed to the analyzer, and a structural check
+(`structural_path`: `proven` / `absent` / `n/a`) feeding the verifier and `apply-verdicts`. The gates
+below were fixed in the design spec (§4.2) **before** any SP10 campaign run, and are read once at the
+end, never revised after observation.
+
+| gate | target | status |
+|---|---|---|
+| NodeGoat — declared-set recall | stays **7/7** | pending — campaign in Task 20 (user-run) |
+| NodeGoat — accepted multi-file chains | **≥ 1** with `structural_path: proven` | pending — campaign in Task 20 (user-run) |
+| NodeGoat — `candidate_path_hit_rate` | **≥ 0.60** | pending — campaign in Task 20 (user-run) |
+| OWASP BenchmarkJava (88-case stratified sample) | precision stays **1.000**, recall **≥ 0.98** | pending — campaign in Task 20 (user-run) |
+| WebGoat (Spring, second public app) | **≥ 3** accepted High findings with `proven`, **0** noisy | pending — campaign in Task 20 (user-run) |
+| Flask `flaskr` (negative control) | **0** exploitable findings | pending — campaign in Task 20 (user-run) |
+
+New metrics (computed by [`metrics.mjs`](metrics.mjs) on a ledger and by
+[`score-nodegoat.mjs`](score-nodegoat.mjs) on a single report; "active" = `verification_status`
+`accepted` or `downgraded`):
+
+- `structural_proof_rate` = active findings with `structural_path: "proven"` / active findings.
+- `candidate_path_hit_rate` = active findings with a non-empty `candidate_path_ids` / active findings.
+  Findings the graph could not see count against it on purpose: that is a graph failure, not an excuse.
+- `call_resolution_ratio` = `calls_exact / calls_total` from the report's `app_graph.stats` (summed over
+  the reports behind a ledger).
+- `multi_file_chains` (scorer, unchanged since SP9): accepted chains whose transition evidence spans
+  ≥ 2 files.
+
+Each rate is `null`, not 0, when its denominator is 0 (no active finding; no graph stats or no calls).
+The three new keys are emitted only for inputs that carry SP10 data (an `app_graph` key, or a finding
+with `structural_path` / `candidate_path_ids`; for a ledger, per-case `findings[]` or `app_graph_stats[]`
+from `extract-oswe-adjudications.mjs` → `build-ledger.mjs`): an SP9 report or ledger scores exactly as
+before SP10 (tests assert no new key appears), so the checked-in SP6–SP9 artifacts stay reproducible.
+
+Reproduction (maintainer-only, from saved local reports under the gitignored `.oswe/reports/`; the
+WebGoat truth manifest and the `*-sp10.json` results are added by the campaign):
+
+```bash
+node benchmark/score-nodegoat.mjs --report <nodegoat-report.json> --truth benchmark/nodegoat-truth.json \
+  --out benchmark/results/nodegoat-sp10.json
+node benchmark/score-nodegoat.mjs --report <webgoat-report.json> --truth benchmark/webgoat-truth.json \
+  --out benchmark/results/webgoat-sp10.json
+node benchmark/extract-oswe-adjudications.mjs --dir <benchmarkjava-reports-dir> --out external/oswe-adjudications-sp10.json
+node benchmark/build-ledger.mjs --flagged <flagged.json> --oswe external/oswe-adjudications-sp10.json \
+  --out external/ledger-sp10.json
+node benchmark/metrics.mjs --ledger external/ledger-sp10.json \
+  --truth external/BenchmarkJava/expectedresults-1.2.csv --out benchmark/results/benchmarkjava-sp10.json
+```

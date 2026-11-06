@@ -8,7 +8,7 @@
 
 [![ci](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml/badge.svg)](https://github.com/Laucked-Security/claude-oswe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Tests: 383 passing](https://img.shields.io/badge/tests-383%20passing-brightgreen)
+![Tests: 978 passing, 4 environment skips](https://img.shields.io/badge/tests-978%20passing%2C%204%20env%20skips-brightgreen)
 ![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![Stacks: PHP · Node · Python · Java · .NET](https://img.shields.io/badge/stacks-PHP%20%C2%B7%20Node%20%C2%B7%20Python%20%C2%B7%20Java%20%C2%B7%20.NET-blue)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
@@ -30,10 +30,11 @@ positives on safe code, no exploit chain, no proof, no reproducibility. That's n
 `oswe` is built to **not do that**:
 
 - **Determinism where it matters.** Severity, dedup, and the "is this a Critical unauth-RCE?" decision
-  are **not** left to the model — they run in tested, dependency-free Node helpers with **383 unit
-  tests** (320 pipeline + 63 benchmark, including two end-to-end replay tests that drive the full
+  are **not** left to the model — they run in tested, dependency-free Node helpers with **982 unit
+  tests** (907 pipeline + 75 benchmark, including two end-to-end replay tests that drive the full
   helper chain via real CLIs with pre-baked responses — one for the no-cache path, one for the
-  kill-then-resume cache path). The model *finds*; the helpers *decide*.
+  kill-then-resume cache path; 4 pipeline symlink tests skip where the OS denies symlink creation,
+  e.g. unprivileged Windows). The model *finds*; the helpers *decide*.
 - **A verifier that pushes back — by refutation.** Every candidate chain and high-severity finding is
   re-checked by an independent verifier that can **downgrade or reject**. Since SP6, an accepted finding
   must **survive a counterexample checklist** (auth blocks? real sanitizer? source attacker-controlled?
@@ -60,7 +61,10 @@ claude --plugin-dir ./claude-oswe
 ```
 
 That's it — no `npm install` needed to *use* it. The runtime validators are committed as a
-self-contained, zero-dependency file (AJV is a **dev-only** tool used to regenerate them).
+self-contained, zero-dependency file (AJV is a **dev-only** tool used to regenerate them), and the
+tree-sitter parser behind the application graph is vendored too: 1.3 MiB in total (the web-tree-sitter
+loader + runtime and gzipped grammars) under [`skills/audit/vendor/tree-sitter/`](skills/audit/vendor/tree-sitter/),
+hash-checked in CI.
 
 ## Usage
 
@@ -190,14 +194,25 @@ breakdown, and honest caveats: [`benchmark/BENCHMARK.md`](benchmark/BENCHMARK.md
 ## How it works
 
 ```text
-parse-args → recon → partition (by module / framework / auth boundary)
-           → analyze   (parallel read-only oswe-analyzer subagents, max <concurrency>, default 4)
+parse-args → recon → build graph   (tree-sitter, vendored, zero-install)
+           → partition by reachability (route → handler → callees; directory partitions as fallback)
+           → analyze   (parallel read-only oswe-analyzer subagents, max <concurrency>, default 4,
+                        each handed its partition's candidate route → sink paths)
            → aggregate/dedupe   (deterministic Node helper, stable OSWE-N ids)
-           → build chains  → verify  (independent oswe-verifier, bound batches)
-           → apply verdicts (deterministic Critical gating) → report (.md + .html)
+           → build chains  → structural check (graph path per finding / chain transition)
+           → verify  (independent oswe-verifier, bound batches, structural check as context)
+           → apply verdicts (deterministic Critical gating + structural ceiling) → report (.md + .html)
            → finalize checkpoint (clean exit) — or leave it on kill, for the next run to resume
 ```
 
+- **Application graph (SP10).** A deterministic helper parses the code with a vendored tree-sitter
+  (no install, identifiers and line numbers only, never source text) into files, functions, calls,
+  closures, routes and sinks. Partitions are cut by what each route reaches; the analyzer gets the
+  candidate route → sink paths as *hints* to confirm or refute (flows outside the list are still expected); a
+  structural check marks each finding's source → sink `proven`, `absent` or `n/a`, which feeds the
+  verifier and `apply-verdicts`: a "strong static proof" finding with `absent` is capped to "to
+  verify", so its chain can no longer be Critical. If the graph cannot be built, every phase falls
+  back to the pre-graph behaviour and the report says so.
 - **Read-only agents.** The analyzer/verifier subagents cannot modify your code.
 - **Confined scope.** The path argument is normalized by a tested confinement helper that rejects
   anything escaping the project root (`../`, symlinks, sibling-prefix tricks).
@@ -214,7 +229,7 @@ parse-args → recon → partition (by module / framework / auth boundary)
   Intermediate `.oswe/tmp/` files are purged at start, end, and on any abort.
   `.oswe/checkpoints/` is gitignored and purged at clean exit (same trust model).
 
-The ten JSON Schemas live in [`skills/audit/schemas/`](skills/audit/schemas/); the deterministic
+The twelve JSON Schemas live in [`skills/audit/schemas/`](skills/audit/schemas/); the deterministic
 helpers and their tests in [`skills/audit/scripts/`](skills/audit/scripts/).
 
 ---
@@ -259,6 +274,14 @@ chains on real vulnerable code; stays quiet on clean code.
 - **Scope/scale bounded.** Up to 12 partitions per audit; very large monorepos will hit coverage gaps
   (reported, never hidden). Dependency/gadget analysis is read-on-demand, not exhaustive.
 - **Five stacks**, one curated reference page each — broad sink coverage, not an exhaustive SAST ruleset.
+- **The graph resolves calls conservatively, not completely.** No type inference; no virtual dispatch
+  beyond a conservative override check (a `this.x()` that a subclass overrides is only a candidate);
+  a callback or closure is reached from the function that *defines* it (a `nests` edge), but a function
+  value passed around by name, dynamic dispatch, reflection and dynamic requires stay unresolved. A
+  call resolved by name alone (`name-only`) is a hint, **never** proof — `proven` needs exact edges.
+  Known gaps of the vendored grammars: C# 12 primary constructors and raw string literals (`"""…"""`)
+  do not parse; PHP 8.4's `new C()->m()` (no parentheses) is mis-parsed. What the graph cannot decide
+  is `n/a`, not `absent`.
 
 Treat the output as **high-quality leads with evidence**, to be confirmed and fixed by an engineer.
 
@@ -271,9 +294,10 @@ The runtime validator [`skills/audit/scripts/validators.mjs`](skills/audit/scrip
 helper inlined). Run the suites (Node ≥ 20 only, no install):
 
 ```bash
-( cd skills/audit/scripts && node --test )          # 320 pipeline tests
-( cd benchmark && node --test )                     # 63 benchmark-engine tests
-node .github/scripts/check-structure.mjs            # stacks / references / fixtures-markers gate
+( cd skills/audit/scripts && node --test )          # 907 pipeline tests (4 symlink tests skip without symlink privileges)
+( cd benchmark && node --test )                     # 75 benchmark-engine tests
+node .github/scripts/check-structure.mjs            # stacks / references / fixtures / graph extractors + goldens gate
+node .github/scripts/check-vendor.mjs               # vendored tree-sitter: MANIFEST.json hashes + 10 MiB budget
 ```
 
 Regenerate `validators.mjs` after changing any schema (AJV is dev-only, used only to generate):
@@ -282,10 +306,18 @@ Regenerate `validators.mjs` after changing any schema (AJV is dev-only, used onl
 ( cd skills/audit/scripts && npm install && npm run build && node --test )
 ```
 
+Regenerate the vendored tree-sitter parser (dev-only; `npm ci` keeps the pinned versions), then check
+it against the installed packages:
+
+```bash
+( cd skills/audit/scripts && npm ci && npm run build:grammars )
+node .github/scripts/check-vendor.mjs && node .github/scripts/check-vendor-upstream.mjs
+```
+
 **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the unit tests on Node 20 & 22,
-runs the structure gate, and verifies the committed `validators.mjs` is in sync with the schemas.
-`claude plugin validate . --strict` is run as a **local gate** before release (it needs the Claude
-Code CLI, which isn't available on the CI runner).
+runs the structure and vendor gates, verifies the committed `validators.mjs` is in sync with the
+schemas and the vendored tree-sitter content matches the pinned npm packages, and runs
+`claude plugin validate . --strict`.
 
 ---
 

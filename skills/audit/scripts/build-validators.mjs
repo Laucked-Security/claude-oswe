@@ -26,7 +26,9 @@ const EXPORT_NAME = {
   "report-summary.schema.json": "reportSummary",
   "report.schema.json": "report",
   "sarif-lead.schema.json": "sarifLead",
-  "checkpoint-manifest.schema.json": "checkpointManifest"
+  "checkpoint-manifest.schema.json": "checkpointManifest",
+  "graph.schema.json": "graph",
+  "structural-check.schema.json": "structuralCheck"
 };
 
 const ajv = new Ajv({ code: { source: true, esm: true }, allErrors: true, strict: false });

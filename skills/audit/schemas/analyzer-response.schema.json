@@ -21,7 +21,10 @@
                 { "required": ["final_severity"] },
                 { "required": ["final_confidence"] },
                 { "required": ["source_finding_ids"] },
-                { "required": ["partitions"] }
+                { "required": ["partitions"] },
+                { "required": ["candidate_path_ids"] },
+                { "required": ["structural_path"] },
+                { "required": ["verification_notes"] }
               ]
             }
           },

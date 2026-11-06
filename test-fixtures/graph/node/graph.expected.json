@@ -1,0 +1,330 @@
+{
+  "version": 1,
+  "generated_by": "oswe-build-graph/1",
+  "stats": {
+    "files_total": 4,
+    "files_parsed": 4,
+    "files_error": 0,
+    "files_skipped": 0,
+    "functions": 9,
+    "calls_total": 8,
+    "calls_exact": 1,
+    "calls_name_only": 1,
+    "calls_unresolved": 6,
+    "routes_by_auth": {
+      "unauthenticated": 1,
+      "authenticated": 1,
+      "unknown": 0
+    },
+    "coverage_matrix": {
+      "node": {
+        "frameworks_detected": [
+          "express"
+        ],
+        "extractors_applied": [
+          "express",
+          "nest"
+        ],
+        "not_extracted": [],
+        "patterns_unmatched": []
+      }
+    },
+    "config_errors": []
+  },
+  "nodes": [
+    {
+      "type": "file",
+      "id": "36fb96578a58",
+      "path": "services/userService.js",
+      "stack": "node",
+      "lang": "javascript",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "3878fed80810",
+      "path": "dao/userDao.js",
+      "stack": "node",
+      "lang": "javascript",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "d3d05ba65a98",
+      "path": "routes/users.js",
+      "stack": "node",
+      "lang": "javascript",
+      "parse_status": "ok"
+    },
+    {
+      "type": "file",
+      "id": "e1d651f09e02",
+      "path": "server.js",
+      "stack": "node",
+      "lang": "javascript",
+      "parse_status": "ok"
+    },
+    {
+      "type": "function",
+      "id": "11619668e356",
+      "file": "services/userService.js",
+      "name": "exec",
+      "qualified_name": "UserService.exec",
+      "line_start": 9,
+      "line_end": 11,
+      "kind": "method",
+      "exported": true,
+      "class": "UserService"
+    },
+    {
+      "type": "function",
+      "id": "1225f701d5b3",
+      "file": "server.js",
+      "name": "<anon>",
+      "qualified_name": "<anon>@9:20",
+      "line_start": 9,
+      "line_end": 9,
+      "kind": "arrow",
+      "exported": false
+    },
+    {
+      "type": "function",
+      "id": "1a51a9c0fc5e",
+      "file": "server.js",
+      "name": "ensureAuthenticated",
+      "qualified_name": "ensureAuthenticated",
+      "line_start": 4,
+      "line_end": 6,
+      "kind": "function",
+      "exported": false
+    },
+    {
+      "type": "function",
+      "id": "4dea33c824dc",
+      "file": "services/userService.js",
+      "name": "run",
+      "qualified_name": "UserService.run",
+      "line_start": 5,
+      "line_end": 7,
+      "kind": "method",
+      "exported": true,
+      "class": "UserService"
+    },
+    {
+      "type": "function",
+      "id": "50471b2b5fb6",
+      "file": "services/userService.js",
+      "name": "exec",
+      "qualified_name": "AdminService.exec",
+      "line_start": 15,
+      "line_end": 15,
+      "kind": "method",
+      "exported": true,
+      "class": "AdminService"
+    },
+    {
+      "type": "function",
+      "id": "a78ec77c42ce",
+      "file": "routes/users.js",
+      "name": "run",
+      "qualified_name": "run",
+      "line_start": 6,
+      "line_end": 8,
+      "kind": "function",
+      "exported": false
+    },
+    {
+      "type": "function",
+      "id": "c6d3494cc4bf",
+      "file": "routes/users.js",
+      "name": "cb",
+      "qualified_name": "cb",
+      "line_start": 12,
+      "line_end": 12,
+      "kind": "function",
+      "exported": false
+    },
+    {
+      "type": "function",
+      "id": "d0210fbc236e",
+      "file": "dao/userDao.js",
+      "name": "find",
+      "qualified_name": "find",
+      "line_start": 2,
+      "line_end": 4,
+      "kind": "function",
+      "exported": true
+    },
+    {
+      "type": "function",
+      "id": "ed483226f49b",
+      "file": "routes/users.js",
+      "name": "helper",
+      "qualified_name": "helper",
+      "line_start": 15,
+      "line_end": 17,
+      "kind": "function",
+      "exported": false
+    },
+    {
+      "type": "route",
+      "id": "48b242fd5c17",
+      "file": "routes/users.js",
+      "line": 10,
+      "http_method": "POST",
+      "path_pattern": "/users/:id/run",
+      "handler": "a78ec77c42ce",
+      "middlewares": [
+        "1a51a9c0fc5e"
+      ],
+      "framework": "express",
+      "auth": "authenticated"
+    },
+    {
+      "type": "route",
+      "id": "63798a91f096",
+      "file": "server.js",
+      "line": 9,
+      "http_method": "GET",
+      "path_pattern": "/health",
+      "handler": "1225f701d5b3",
+      "middlewares": [],
+      "framework": "express",
+      "auth": "unauthenticated"
+    },
+    {
+      "type": "sink",
+      "id": "19aa5230a3a1",
+      "file": "dao/userDao.js",
+      "line": 3,
+      "enclosing_fn": "d0210fbc236e",
+      "class": "nosql",
+      "callee": "$ne",
+      "pattern": "$ne"
+    },
+    {
+      "type": "sink",
+      "id": "65656c3eac94",
+      "file": "services/userService.js",
+      "line": 10,
+      "enclosing_fn": "11619668e356",
+      "class": "cmd-exec",
+      "callee": "child_process.exec",
+      "pattern": "child_process.exec"
+    },
+    {
+      "type": "source",
+      "id": "498973a10260",
+      "file": "routes/users.js",
+      "line": 7,
+      "enclosing_fn": "a78ec77c42ce",
+      "kind": "body",
+      "pattern": "req.body"
+    },
+    {
+      "type": "source",
+      "id": "980a8aeefd04",
+      "file": "routes/users.js",
+      "line": 7,
+      "enclosing_fn": "a78ec77c42ce",
+      "kind": "params",
+      "pattern": "req.params"
+    }
+  ],
+  "edges": [
+    {
+      "type": "calls",
+      "from": "11619668e356",
+      "to": null,
+      "line": 10,
+      "callee_text": "child_process.exec",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "1225f701d5b3",
+      "to": null,
+      "line": 9,
+      "callee_text": "res.send",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "1a51a9c0fc5e",
+      "to": null,
+      "line": 5,
+      "callee_text": "next",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "4dea33c824dc",
+      "to": "11619668e356",
+      "line": 6,
+      "callee_text": "this.exec",
+      "confidence": "name-only"
+    },
+    {
+      "type": "calls",
+      "from": "a78ec77c42ce",
+      "to": "4dea33c824dc",
+      "line": 7,
+      "callee_text": "svc.run",
+      "confidence": "exact"
+    },
+    {
+      "type": "calls",
+      "from": "d0210fbc236e",
+      "to": null,
+      "line": 3,
+      "callee_text": "db.collection",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "d0210fbc236e",
+      "to": null,
+      "line": 3,
+      "callee_text": "db.collection.find",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "calls",
+      "from": "ed483226f49b",
+      "to": null,
+      "line": 16,
+      "callee_text": "cb",
+      "confidence": "unresolved"
+    },
+    {
+      "type": "handles",
+      "from": "48b242fd5c17",
+      "to": "a78ec77c42ce"
+    },
+    {
+      "type": "handles",
+      "from": "63798a91f096",
+      "to": "1225f701d5b3"
+    },
+    {
+      "type": "imports",
+      "from": "d3d05ba65a98",
+      "to": "36fb96578a58",
+      "confidence": "exact",
+      "specifier": "../services/userService"
+    },
+    {
+      "type": "imports",
+      "from": "e1d651f09e02",
+      "to": "d3d05ba65a98",
+      "confidence": "exact",
+      "specifier": "./routes/users"
+    },
+    {
+      "type": "uses_middleware",
+      "from": "48b242fd5c17",
+      "to": "1a51a9c0fc5e",
+      "order": 0
+    }
+  ]
+}

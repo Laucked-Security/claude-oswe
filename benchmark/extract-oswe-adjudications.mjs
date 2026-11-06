@@ -8,6 +8,9 @@
 //   independent         : a finding with origin "llm-discovered" resolved to this case
 //   accepted_high_findings / proof_complete_high_findings / ce_resolved_high_findings
 //   accepted_critical_chains / proof_complete_critical_chains / chain_reached_rce
+//   findings (SP10)     : per resolved finding { finding_id, verification_status, structural_path|null,
+//                         candidate_path_ids[], verification_notes[] } — only from a report carrying graph data
+// Top-level app_graph_stats (SP10): the app_graph.stats of each report that has one (absent otherwise).
 //
 // Test-id resolution: BenchmarkTestNNNNN parsed from a finding/chain/lead file path (or an explicit
 // lead.test_id), with an optional run.path_map override.
@@ -17,6 +20,7 @@
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { carriesGraphData } from "./metrics.mjs";
 
 const TID_RE = /BenchmarkTest(\d{5})/;
 // Lattice: a case is "refuted" only if EVERY lead was refuted; any inconclusive lead keeps it
@@ -71,11 +75,29 @@ export function extractAdjudications(reports) {
       (report.verdicts || []).filter((v) => v.target_type === "finding").map((v) => [v.target_id, v])
     );
 
+    // SP10 (only for a report that carries graph data, so pre-SP10 reports extract byte-identically):
+    // every analyzed case gets a findings[] record list, and the report's app_graph.stats is kept.
+    const graphData = carriesGraphData(report);
+    if (graphData) {
+      for (const bc of (report.coverage && report.coverage.benchmark_cases) || []) {
+        if (bc.status === "analyzed") ensure(bc.test_id).findings ??= [];
+      }
+      if (report.app_graph && report.app_graph.stats) (map.app_graph_stats ??= []).push(report.app_graph.stats);
+    }
+
     // 2. Findings: counters + independent discovery.
     for (const f of report.findings || []) {
       const tid = resolveTid(f.source && f.source.file, report);
       if (!tid) continue;
       const e = ensure(tid);
+      if (graphData) {
+        (e.findings ??= []).push({
+          finding_id: f.finding_id, verification_status: f.verification_status,
+          structural_path: f.structural_path ?? null,
+          candidate_path_ids: Array.isArray(f.candidate_path_ids) ? [...f.candidate_path_ids] : [],
+          verification_notes: Array.isArray(f.verification_notes) ? [...f.verification_notes] : []
+        });
+      }
       if (f.origin === "llm-discovered") e.independent = true;
       if (f.verification_status === "accepted" && f.final_severity === "High") {
         e.accepted_high_findings++;
@@ -144,6 +166,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const map = extractAdjudications(reports);
   try { writeFileSync(outPath, JSON.stringify(map, null, 2) + "\n"); }
   catch (e) { process.stderr.write("cannot write --out: " + e.message + "\n"); process.exit(2); }
-  process.stdout.write(`wrote ${outPath}: ${Object.keys(map).length} cases\n`);
+  process.stdout.write(`wrote ${outPath}: ${Object.keys(map).filter((k) => TID_RE.test(k)).length} cases\n`);
   process.exit(0);
 }

@@ -6,9 +6,12 @@
   "description": "Dev-only toolchain to regenerate the self-contained validators.mjs from schemas/",
   "scripts": {
     "build": "node build-validators.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "build:grammars": "node build-grammars.mjs"
   },
   "devDependencies": {
-    "ajv": "^8.17.1"
+    "ajv": "^8.17.1",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.25.10"
   }
 }
