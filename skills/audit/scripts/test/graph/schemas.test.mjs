@@ -130,6 +130,14 @@ test("graph: enum fields reject out-of-vocabulary values", () => {
   }
 });
 
+test("graph: every route framework id is accepted, servlet included", () => {
+  for (const framework of ["express", "nest", "flask", "django", "fastapi", "spring", "servlet", "laravel", "symfony", "aspnet"]) {
+    const g = fullGraph();
+    g.nodes[4].framework = framework;
+    assert.equal(validate("graph", g).valid, true, framework);
+  }
+});
+
 test("graph: version must be 1 and stats counters must be non-negative integers", () => {
   const v = minimalGraph();
   v.version = 2;

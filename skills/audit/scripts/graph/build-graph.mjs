@@ -39,6 +39,27 @@
 // methodOverride, favicon, serveStatic; whole text or first segment) is ignored entirely, and never
 // counts as an unresolved middleware on any route.
 //
+// Spring Security: java.mjs emits each SecurityFilterChain / configure(HttpSecurity) method's
+// request rules (`security_chains`: scope + rules in source order; `web.ignoring()` paths are a
+// chain scoped to them that permits all). Every java route that no marker authenticates takes the
+// auth of the first rule matching its path (AntPathMatcher: `?`, `*`, `**`, `{var}`, `{*rest}`; a
+// route's own `{var}` is one segment; a pattern outside that subset reads as matching anything with
+// auth unknown) and verb — Spring's first-match semantics: permitAll / anonymous "unauthenticated",
+// the authorization rules "authenticated", `access(...)` / an unreadable rule or matcher "unknown",
+// no matching rule "unknown" (a chain without any readable rule votes unknown for everything it
+// covers). A route serving ANY verb against verb-specific rules is "unknown" unless every rule it
+// may hit, up to and including the first verb-agnostic match, agrees. With several chains (noted
+// "security(multiple chains)") the chains whose scope (path and verb) covers the route vote, else
+// the unscoped ones (Spring orders scoped chains first), a chain whose scope could not be read
+// votes in both cases, and a route no chain covers for sure gets an "unknown" vote; the route takes
+// their verdict only when they all agree, else "unknown" — one source tree may host two contexts
+// (WebGoat + WebWolf) and the graph cannot tell which serves a route. Hints turn an
+// `unauthenticated` verdict into `unknown`: spec §2.4's "SecurityFilterChain matchers" (a security
+// type named in a file that yields no chain), "servlet(security-constraint)" (a web.xml at its
+// conventional location declares an auth constraint), "security(dependency)" (the build file names
+// Spring Security and no chain was read: Boot's default chain), "servlet(filter)" (a `@WebFilter` /
+// Filter class; servlet routes, or every route when no chain exists).
+//
 // Language modules are discovered, not registered: a file whose module (LANG_MODULE_FILE) does not
 // exist yet is a `file` node with parse_status "skipped", skip_reason "no extractor".
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -60,7 +81,7 @@ const GRAPH_DIR = dirname(fileURLToPath(import.meta.url));
 
 export const LANG_MODULE_FILE = { javascript: "javascript", typescript: "javascript", tsx: "javascript", python: "python", java: "java", php: "php", c_sharp: "csharp" };
 export const LANG_STACK = { javascript: "node", typescript: "node", tsx: "node", python: "python", java: "java", php: "php", c_sharp: "dotnet" };
-export const FRAMEWORK_STACK = { express: "node", nest: "node", flask: "python", django: "python", fastapi: "python", spring: "java", laravel: "php", symfony: "php", aspnet: "dotnet" };
+export const FRAMEWORK_STACK = { express: "node", nest: "node", flask: "python", django: "python", fastapi: "python", spring: "java", servlet: "java", laravel: "php", symfony: "php", aspnet: "dotnet" };
 
 export class InputError extends Error {}
 
@@ -425,17 +446,156 @@ function routeAuth(mws, surfaceOfPath) {
   return mws.some((m) => !m.ref && !isBenignMiddleware(m.text)) ? "unknown" : "unauthenticated";
 }
 
-// Spec §2.4: SecurityFilterChain matchers are recorded file-level as `unknown` auth hints — a parsed
-// Java file declaring a SecurityFilterChain (java.mjs notes "SecurityFilterChain matchers") can guard
-// any Spring route, so a Spring route the auth rules would call `unauthenticated` is `unknown`;
-// marker routes stay `authenticated`.
+// Spring Security (see the header). "SecurityFilterChain matchers" (spec §2.4): a security type
+// named in a java file that yields no chain — a config the extractor could not read can guard any
+// java route, so an `unauthenticated` verdict becomes `unknown`; marker routes stay `authenticated`.
 const SPRING_SECURITY_NOTE = "SecurityFilterChain matchers";
-const springSecurityConfigured = (parsed) => parsed.some((f) => f.stack === "java" && (f.extract.not_extracted ?? []).includes(SPRING_SECURITY_NOTE));
+const SERVLET_FILTER_NOTE = "servlet(filter)";
+const MULTIPLE_CHAINS_NOTE = "security(multiple chains)";
+const DEPENDENCY_NOTE = "security(dependency)"; // Spring Security on the build path, no chain read: Boot's default chain
+const CONSTRAINT_NOTE = "servlet(security-constraint)"; // web.xml declares an auth constraint
+const SECURITY_DEPENDENCY = /spring-boot-starter-security|spring-security-web|spring-security-config/;
+const SECURITY_CONSTRAINT = /<security-constraint>[\s\S]*?<auth-constraint>/;
+
+// Spring's AntPathMatcher as a RegExp: `?` one character, `*` any run within a segment, a whole
+// segment `**` any run of segments (a trailing `/**` also matches the bare prefix), `{var}` one
+// segment, `{*rest}` the rest of the path. Null for a pattern outside that subset — no leading `/`
+// (MvcRequestMatcher would prepend one, AntPathMatcher would not), a `{var:regex}` constraint —
+// which the callers read as "may match anything, auth unknown".
+export function antPathRegex(pattern) {
+  if (!pattern.startsWith("/")) return null;
+  if (pattern.endsWith("/**/")) pattern = pattern.slice(0, -1); // AntPathMatcher drops the empty trailing token
+  let re = "^";
+  for (let i = 0; i < pattern.length; ) {
+    const wholeSegment = pattern[i - 1] === "/" && (pattern[i + 2] === "/" || i + 2 === pattern.length);
+    if (pattern.startsWith("**", i) && wholeSegment) {
+      if (i + 2 === pattern.length) { re = re.slice(0, -1) + "(?:/.*)?"; i += 2; }
+      else { re += "(?:.*/)?"; i += 3; }
+      continue;
+    }
+    const c = pattern[i];
+    if (c === "{") {
+      let depth = 1;
+      let j = i + 1;
+      for (; j < pattern.length && depth > 0; j++) depth += pattern[j] === "{" ? 1 : pattern[j] === "}" ? -1 : 0;
+      if (depth === 0) {
+        // `{var:regex}` constrains the segment: not reproduced here, so the pattern is unreadable
+        if (pattern.slice(i, j).includes(":")) return null;
+        // `{*rest}` is the rest of the path; at the end, after a `/`, it also matches the bare prefix
+        if (pattern[i + 1] === "*") re = j === pattern.length && re.endsWith("/") ? re.slice(0, -1) + "(?:/.*)?" : re + ".*";
+        else re += "[^/]+";
+        i = j;
+        continue;
+      }
+    }
+    if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else re += c.replace(/[.+^$()|[\]{}\\]/g, "\\$&");
+    i++;
+  }
+  return new RegExp(re + "$");
+}
+
+// Every pattern as a RegExp, or null when any pattern is unreadable (non-literal or unsupported).
+const patternRegexes = (patterns) => {
+  if (patterns === null) return null;
+  const regexes = patterns.map(antPathRegex);
+  return regexes.includes(null) ? null : regexes;
+};
+
+// The project's Spring Security state: `chains` (scope matchers and rule regexes, in (file,
+// start_byte) order; a chain without readable rules still votes unknown; `scopeUnknown` when its
+// scope could not be read — it then votes on every route), and the hints — `hinted` (the §2.4
+// note), `filtered` (a servlet filter class exists), `dependency` (the build file names Spring
+// Security: with no chain read, Boot installs its default authenticate-everything chain),
+// `constrained` (web.xml declares a `<security-constraint>` with an `<auth-constraint>`).
+function springSecurity(parsed, notExtracted, configs) {
+  const javaFiles = parsed.filter((f) => f.stack === "java");
+  const noted = (note) => javaFiles.some((f) => (f.extract.not_extracted ?? []).includes(note));
+  const chains = javaFiles
+    .flatMap((f) => (f.extract.security_chains ?? []).map((c) => ({ ...c, file: f.path })))
+    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.start_byte - b.start_byte))
+    .map((c) => {
+      const scope = c.scope === null ? null : c.scope.map((m) => ({ http_method: m.http_method, regexes: patternRegexes(m.patterns) }));
+      const scopeUnknown = c.scope_unknown === true || (scope !== null && scope.some((m) => m.regexes === null));
+      return { scope: scopeUnknown ? null : scope, scopeUnknown, rules: c.rules.map((r) => ({ ...r, regexes: patternRegexes(r.patterns) })) };
+    });
+  const text = (value) => (typeof value === "string" ? value : "");
+  const dependency = SECURITY_DEPENDENCY.test(text(configs?.pomXml) + text(configs?.buildGradle) + text(configs?.buildGradleKts));
+  const constrained = SECURITY_CONSTRAINT.test(text(configs?.webXml));
+  if (javaFiles.length) {
+    if (chains.length > 1) notExtracted("java").add(MULTIPLE_CHAINS_NOTE);
+    if (dependency && chains.length === 0) notExtracted("java").add(DEPENDENCY_NOTE);
+    if (constrained) notExtracted("java").add(CONSTRAINT_NOTE);
+  }
+  return { chains, hinted: noted(SPRING_SECURITY_NOTE), filtered: noted(SERVLET_FILTER_NOTE), dependency, constrained };
+}
+
+// How a scoped chain covers a route: "full" when a scope matcher matches the path and the verb,
+// "verb" when only verb-specific matchers match the path of a route serving ANY verb, null otherwise.
+function coverage(chain, route, path) {
+  if (chain.scope === null) return null;
+  let verbOnly = false;
+  for (const m of chain.scope) {
+    if (!m.regexes.some((re) => re.test(path))) continue;
+    if (m.http_method === null || m.http_method === route.http_method) return "full";
+    if (route.http_method === "ANY") verbOnly = true;
+  }
+  return verbOnly ? "verb" : null;
+}
+
+// First-match over one chain's rules for a route (header): the outcomes the route's verbs may hit —
+// one when a verb-agnostic (or its own verb's) rule settles it, plus "unknown" for verbs no rule covers.
+function securityRuleAuth(route, path, rules) {
+  const outcomes = [];
+  let settled = false;
+  for (const r of rules) {
+    if (r.regexes !== null && !r.regexes.some((re) => re.test(path))) continue;
+    const auth = r.regexes === null ? "unknown" : r.auth;
+    if (r.http_method === null || r.http_method === route.http_method) {
+      outcomes.push(auth);
+      settled = true;
+      break;
+    }
+    if (route.http_method === "ANY") outcomes.push(auth);
+  }
+  if (!settled) outcomes.push("unknown");
+  return agreed(outcomes);
+}
+
+const agreed = (votes) => (votes.length && votes.every((v) => v === votes[0]) ? votes[0] : "unknown");
+
+// A java route: a marker's `authenticated` stands; else the chains vote — the chains whose scope
+// fully covers the route, else the unscoped ones (plus, for a route serving ANY verb, the chains
+// whose scope covers only some of its verbs); a chain whose scope could not be read always votes;
+// when no chain covers the route for sure and no unscoped chain exists, some request meets no chain
+// at all, which is an "unknown" vote. Then the hints turn an `unauthenticated` verdict into
+// `unknown`: an unread security config (§2.4), a web.xml auth constraint, Spring Security on the
+// build path with no chain read, a servlet filter class (for servlet routes, or for every route
+// when no chain exists).
+function javaRouteAuth(stack, auth, route, security) {
+  if (stack !== "java" || auth === "authenticated") return auth;
+  let verdict = auth;
+  if (security.chains.length > 0) {
+    const path = route.path_pattern.replace(/\{[^}]*\}/g, "_");
+    const unread = security.chains.filter((c) => c.scopeUnknown);
+    const unscoped = security.chains.filter((c) => c.scope === null && !c.scopeUnknown);
+    const full = security.chains.filter((c) => coverage(c, route, path) === "full");
+    const partial = security.chains.filter((c) => coverage(c, route, path) === "verb");
+    const voters = full.length ? [...full, ...unread] : [...partial, ...unscoped, ...unread];
+    const votes = voters.map((c) => securityRuleAuth(route, path, c.rules));
+    if (!full.length && !unscoped.length) votes.push("unknown");
+    verdict = agreed(votes);
+  }
+  const noChain = security.chains.length === 0;
+  const hinted = security.hinted || security.constrained || (security.dependency && noChain) || (security.filtered && (route.framework === "servlet" || noChain));
+  return hinted && verdict === "unauthenticated" ? "unknown" : verdict;
+}
 
 // -> [{ node, handlerRef, mws: [{ file, text, ref }] }] for every non-USE route.
-function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
+function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted, configs) {
   const uses = classifyUses(parsed, resolved, importMap, notExtracted);
-  const springSecured = springSecurityConfigured(parsed);
+  const security = springSecurity(parsed, notExtracted, configs);
   const memo = new Map();
   const routes = [];
   for (const file of parsed) {
@@ -465,7 +625,7 @@ function buildRoutes(parsed, resolved, importMap, surfaceOfPath, notExtracted) {
           handler: handlerRef && fnRefId(handlerRef),
           middlewares: mws.map((m) => (m.ref ? fnRefId(m.ref) : m.text)),
           framework: route.framework,
-          auth: springSecured && route.framework === "spring" && auth === "unauthenticated" ? "unknown" : auth
+          auth: javaRouteAuth(file.stack, auth, route, security)
         }
       });
     }
@@ -641,7 +801,7 @@ async function assemble(prep) {
   const notExtractedOf = (stack) => (notExtracted.has(stack) ? notExtracted.get(stack) : notExtracted.set(stack, new Set()).get(stack));
 
   const { importMap, calls, routeTexts } = resolveAll(parsed, langModules, configs, new Set(files.map((f) => f.path)));
-  const routes = buildRoutes(parsed, routeTexts, importMap, (path) => surfaceOf(stackOfPath.get(path)), notExtractedOf);
+  const routes = buildRoutes(parsed, routeTexts, importMap, (path) => surfaceOf(stackOfPath.get(path)), notExtractedOf, configs);
 
   const nodes = sortNodes([...files.map(fileNode), ...parsed.flatMap(extractNodes), ...routes.map((r) => r.node)]);
   const edges = sortEdges([...importEdges(parsed, importMap), ...callEdges(calls, parsed), ...nestEdges(parsed), ...routeEdges(routes)]);

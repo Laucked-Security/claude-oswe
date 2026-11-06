@@ -81,7 +81,7 @@
         "path_pattern": { "type": "string" },
         "handler": { "$ref": "#/$defs/nodeIdOrNull" },
         "middlewares": { "type": "array", "items": { "type": "string" } },
-        "framework": { "enum": ["express", "nest", "flask", "django", "fastapi", "spring", "laravel", "symfony", "aspnet"] },
+        "framework": { "enum": ["express", "nest", "flask", "django", "fastapi", "spring", "servlet", "laravel", "symfony", "aspnet"] },
         "auth": { "enum": ["unauthenticated", "authenticated", "unknown"] }
       }
     },
