@@ -1,0 +1,78 @@
+{
+  "app": "WebGoat",
+  "source": "https://github.com/WebGoat/WebGoat (lesson sources under src/main/java/org/owasp/webgoat/lessons), anchored to the checkout at commit be2c186 (2026-10-29); audit project root = the WebGoat checkout",
+  "note": "Documented, code-anchored vulnerability set oswe (a source->sink + exploit-chain auditor) is designed to find on WebGoat. Each entry is anchored to the file where the dangerous SINK lives; route_file is the Spring controller that registers the route (two entries, path traversal and XXE, sink in a different file from their route and exercise cross-file reachability). Every lesson endpoint sits behind Spring Security's anyRequest().authenticated() (container/WebSecurityConfig.java), so auth is 'authenticated' throughout. Scope is honest: WebGoat's SSRF lesson (SSRFTask1/2) only accepts fixed URLs through an exact-match regex and is NOT exploitable as written, so the SSRF entry is the JKU-header JWT lesson, whose server-side JWKS fetch follows an attacker-supplied URL. Lessons that are client-side, configuration or educational-only (XSS DOM lessons, CSRF, vulnerable components, security misconfiguration, password storage, crypto, challenges) are intentionally EXCLUDED from this recall denominator. The recall claim is 'on this documented source->sink set'.",
+  "excluded_classes": ["csrf", "vulnerable-components", "security-misconfiguration", "cryptography", "password-storage", "xss"],
+  "vulns": [
+    {
+      "id": "wg-sqli-assignment5a",
+      "owasp": "A03",
+      "vuln_class": "sql-injection",
+      "file": "src/main/java/org/owasp/webgoat/lessons/sqlinjection/introduction/SqlInjectionLesson5a.java",
+      "route_file": "src/main/java/org/owasp/webgoat/lessons/sqlinjection/introduction/SqlInjectionLesson5a.java",
+      "route": "POST /SqlInjection/assignment5a",
+      "auth": "authenticated",
+      "note": "@RequestParam account/operator/injection concatenated into the SELECT (line ~49) -> Statement.executeQuery(query) (line ~52). The canonical string-built JDBC query."
+    },
+    {
+      "id": "wg-path-traversal-profile-upload",
+      "owasp": "A01",
+      "vuln_class": "path-traversal",
+      "file": "src/main/java/org/owasp/webgoat/lessons/pathtraversal/ProfileUploadBase.java",
+      "route_file": "src/main/java/org/owasp/webgoat/lessons/pathtraversal/ProfileUpload.java",
+      "route": "POST /PathTraversal/profile-upload",
+      "auth": "authenticated",
+      "note": "fullName @RequestParam -> ProfileUploadBase.execute -> new File(uploadDirectory, fullName) + createNewFile + FileCopyUtils.copy (lines ~51-53): the upload lands wherever '../' in fullName points. Cross-file: route in ProfileUpload.java, sink in ProfileUploadBase.java."
+    },
+    {
+      "id": "wg-xxe-simple",
+      "owasp": "A05",
+      "vuln_class": "xxe",
+      "file": "src/main/java/org/owasp/webgoat/lessons/xxe/CommentsCache.java",
+      "route_file": "src/main/java/org/owasp/webgoat/lessons/xxe/SimpleXXE.java",
+      "route": "POST /xxe/simple",
+      "auth": "authenticated",
+      "note": "@RequestBody XML -> CommentsCache.parseXml(xml, securityEnabled=false): XMLInputFactory without ACCESS_EXTERNAL_DTD/SCHEMA restrictions (lines ~71-80) feeds a JAXB unmarshal -> external entities resolve. Cross-file: route in SimpleXXE.java, sink in CommentsCache.java."
+    },
+    {
+      "id": "wg-insecure-deserialization-task",
+      "owasp": "A08",
+      "vuln_class": "insecure-deserialization",
+      "file": "src/main/java/org/owasp/webgoat/lessons/deserialization/InsecureDeserializationTask.java",
+      "route_file": "src/main/java/org/owasp/webgoat/lessons/deserialization/InsecureDeserializationTask.java",
+      "route": "POST /InsecureDeserialization/task",
+      "auth": "authenticated",
+      "note": "@RequestParam token (base64) -> new ObjectInputStream(...).readObject() (line ~45) on attacker bytes; VulnerableTaskHolder on the classpath is the gadget."
+    },
+    {
+      "id": "wg-ssrf-jwt-jku",
+      "owasp": "A10",
+      "vuln_class": "ssrf",
+      "file": "src/main/java/org/owasp/webgoat/lessons/jwt/claimmisuse/JWTHeaderJKUEndpoint.java",
+      "route_file": "src/main/java/org/owasp/webgoat/lessons/jwt/claimmisuse/JWTHeaderJKUEndpoint.java",
+      "route": "POST /JWT/jku/delete",
+      "auth": "authenticated",
+      "note": "token @RequestParam -> JWT.decode(token).getHeaderClaim('jku') -> new JwkProviderBuilder(new URL(jku)).build().get(kid) (lines ~55-58): the server fetches a JWKS from any attacker-supplied URL, then verifies the token with the attacker's key (auth bypass on top of the SSRF). Graph-blind sink, declared up front: no Java surface token names JwkProviderBuilder, so this entry gets no candidate path and its structural proof rests on the line mapping (source and sink in the handler)."
+    },
+    {
+      "id": "wg-jwt-kid-sqli",
+      "owasp": "A03",
+      "vuln_class": "sql-injection",
+      "file": "src/main/java/org/owasp/webgoat/lessons/jwt/claimmisuse/JWTHeaderKIDEndpoint.java",
+      "route_file": "src/main/java/org/owasp/webgoat/lessons/jwt/claimmisuse/JWTHeaderKIDEndpoint.java",
+      "route": "POST /JWT/kid/delete",
+      "auth": "authenticated",
+      "note": "token @RequestParam -> Jwts.parser() SigningKeyResolverAdapter reads header 'kid' and concatenates it into \"SELECT key FROM jwt_keys WHERE id = '\" + kid + \"'\" -> createStatement().executeQuery (lines ~72-76). The JWT lesson's documented kid-header injection: an attacker picks the signing key through SQL."
+    },
+    {
+      "id": "wg-idor-view-other-profile",
+      "owasp": "A01",
+      "vuln_class": "idor",
+      "file": "src/main/java/org/owasp/webgoat/lessons/idor/IDORViewOtherProfile.java",
+      "route_file": "src/main/java/org/owasp/webgoat/lessons/idor/IDORViewOtherProfile.java",
+      "route": "GET /IDOR/profile/{userId}",
+      "auth": "authenticated",
+      "note": "@PathVariable userId -> new UserProfile(userId).profileToMap() returned to any authenticated user with no horizontal access-control check (lines ~44-57): the IDOR lesson's 'view another user's profile'."
+    }
+  ]
+}

@@ -26,8 +26,9 @@
 //              step. Receivers: `this.m()` -> "this"; `x.m()` -> the declared type of x (the
 //              innermost local / parameter / loop / catch / resource / lambda variable, else a field
 //              of an enclosing class, else x itself when it is capitalised: a static call);
-//              `this.f.m()` -> the declared type of field f; `new C().m()` -> C; generics and
-//              qualifiers reduce to the base name. Annotation arguments are never calls. A nested
+//              `this.f.m()` -> the declared type of field f; `new C().m()` -> C; `super.m()` -> the
+//              enclosing class's superclass; generics and qualifiers reduce to the base name.
+//              Annotation arguments are never calls. A nested
 //              class body is a barrier: code in a local / anonymous class's field initializer or
 //              initializer block has no enclosing function (`enclosing_start_byte: null`).
 //   sinks      Java's surface tokens are written against declared types (`Statement.execute`), so a
@@ -38,7 +39,39 @@
 //              `@RequestMapping`; `@PreAuthorize / @Secured / @RolesAllowed` on the class, then on
 //              the method, are the middleware texts; one route per literal path (several paths of
 //              one annotation each sit at their literal; several class prefixes: the first, noted).
-//              `SecurityFilterChain` config is only noted.
+//              Servlets: a class annotated `@WebServlet("/p")` / `(value = ...)` / `(urlPatterns =
+//              {...})` yields one route per `doGet / doPost / doPut / doDelete / doHead / doOptions`
+//              (that verb) and `service` (ANY) method it declares, at the method, on the class's
+//              FIRST literal pattern (more are noted "route(multiple servlet patterns)"), framework
+//              "servlet"; the class's then the method's auth annotations (`@ServletSecurity` too)
+//              are its middleware texts. A `@WebFilter` / `implements Filter` class is noted
+//              "servlet(filter)" (build-graph then calls unmarked servlet routes `unknown`).
+//   security   `security_chains`: one entry per method returning a `SecurityFilterChain` or
+//              `configure(HttpSecurity)` override: `{ line, start_byte, scope, rules }` with the
+//              request rules in source order. A rule is a `requestMatchers / antMatchers /
+//              mvcMatchers (HttpMethod.X,)? "p"...` or `anyRequest()` (= `/**`) matcher inside an
+//              `authorizeHttpRequests(...)` / `authorizeRequests()` call, and its auth is the call
+//              chained directly on the matcher: `permitAll / anonymous` -> "unauthenticated";
+//              `authenticated / fullyAuthenticated / rememberMe / hasRole / hasAnyRole /
+//              hasAuthority / hasAnyAuthority / denyAll` -> "authenticated"; `access` or any other
+//              call (`hasIpAddress`, `not`) -> "unknown". `requestMatchers(antMatcher("/p"))` reads
+//              the factory's literal. A matcher with a non-literal pattern (or `regexMatchers`) has
+//              `patterns: null` (it may match anything: build-graph treats it as matching every
+//              later route with auth "unknown"), noted "security(non-literal matcher)"; so does a
+//              call the extractor cannot see into — the HttpSecurity handed to a helper, `http.with
+//              / apply(dsl)`, an authorize call given a method reference or a value. `scope` = the
+//              chain's `securityMatcher(s)` / `antMatcher` matchers `{ http_method, patterns }`
+//              (also `securityMatchers(m -> m.requestMatchers(...))`), null when unscoped;
+//              `scope_unknown` when one is not literal or the zero-argument opener was used (noted).
+//              A chain is emitted even without a rule (noted "security(unread chain)"): it votes
+//              `unknown` in build-graph. A method returning a `WebSecurityCustomizer` or
+//              `configure(WebSecurity)` whose `web.ignoring()` names literal matchers is a chain
+//              scoped to them whose rules permit exactly them, verb kept (Spring applies no
+//              security there). A file naming a security type (SECURITY_TYPES:
+//              SecurityFilterChain, WebFlux's SecurityWebFilterChain, WebSecurityConfigurerAdapter,
+//              @EnableWebSecurity...) without any chain is noted "SecurityFilterChain matchers":
+//              build-graph's file-level `unknown` hint (spec §2.4).
+//              `super.m()` carries the enclosing class's superclass as receiver class.
 //
 // Same TreeCursor walk as the JavaScript module (see its header for why not tree-sitter queries).
 // PURE: no I/O. `sourceText` is never copied into the output — only identifier / literal text.
@@ -49,7 +82,7 @@ import {
   newFrame, NO_FRAME, bind, innermostFunction, innermostClassScope, innermostClass, enclosingName, pathsByBasename
 } from "./common.mjs";
 
-export const lang = { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true };
+export const lang = { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring", "servlet"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true };
 
 // ---- node-type tables -----------------------------------------------------------------------------
 
@@ -72,10 +105,42 @@ const NON_REFERENCE_PARENTS = new Set([
 const SOURCE_ANNOTATION_OWNERS = new Set(["formal_parameter", "method_declaration"]);
 
 const MAPPING_VERBS = new Map([["RequestMapping", null], ["GetMapping", "GET"], ["PostMapping", "POST"], ["PutMapping", "PUT"], ["DeleteMapping", "DELETE"], ["PatchMapping", "PATCH"]]);
-const AUTH_ANNOTATIONS = new Set(["PreAuthorize", "Secured", "RolesAllowed"]);
+const AUTH_ANNOTATIONS = new Set(["PreAuthorize", "Secured", "RolesAllowed", "ServletSecurity"]);
+// `@WebServlet` handler methods and the verb each serves.
+const SERVLET_HANDLERS = new Map([["doGet", "GET"], ["doPost", "POST"], ["doPut", "PUT"], ["doDelete", "DELETE"], ["doHead", "HEAD"], ["doOptions", "OPTIONS"], ["service", "ANY"]]);
+const SERVLET_FILTER_NOTE = "servlet(filter)";
+// Servlet filter base classes: a subclass is a filter even without `implements Filter`.
+const FILTER_BASES = new Set(["HttpFilter", "GenericFilter", "OncePerRequestFilter", "GenericFilterBean"]);
+// Spring Security request-rule DSL (lambda and legacy forms alike). A matcher inside an authorize
+// call is a rule: its authorization is the call chained directly on it. `anyRequest()` is `/**`.
+const SECURITY_MATCHERS = new Set(["requestMatchers", "antMatchers", "mvcMatchers", "regexMatchers", "anyRequest"]);
+const SECURITY_AUTHORIZE = new Set(["authorizeHttpRequests", "authorizeRequests"]);
+const SECURITY_SCOPES = new Set(["securityMatcher", "securityMatchers", "antMatcher", "mvcMatcher", "regexMatcher"]);
+const SECURITY_SCOPE_LAMBDA = "securityMatchers"; // securityMatchers(m -> m.requestMatchers(...))
+const SECURITY_IGNORING = "ignoring"; // web.ignoring().requestMatchers(...)
+const SECURITY_APPLY = new Set(["apply", "with"]); // http.apply(dsl) / http.with(dsl, ...): rules the extractor cannot see
+// `requestMatchers(antMatcher("/p"))`: a RequestMatcher factory whose literal arguments are the pattern.
+const MATCHER_FACTORIES = new Set(["antMatcher", "mvcMatcher"]);
+const SECURITY_RULES = new Map([
+  ["permitAll", "unauthenticated"], ["anonymous", "unauthenticated"],
+  ["authenticated", "authenticated"], ["fullyAuthenticated", "authenticated"], ["rememberMe", "authenticated"],
+  ["hasRole", "authenticated"], ["hasAnyRole", "authenticated"], ["hasAuthority", "authenticated"], ["hasAnyAuthority", "authenticated"],
+  ["denyAll", "authenticated"], ["access", "unknown"]
+]);
+// A method returning one of the first, or a `configure` taking one of the second, is a chain
+// ("chain": request rules; "ignoring": paths Spring Security leaves alone).
+const SECURITY_RETURNS = { SecurityFilterChain: "chain", WebSecurityCustomizer: "ignoring" };
+const SECURITY_CONFIGURE_PARAMS = { HttpSecurity: "chain", WebSecurity: "ignoring" };
+// Seeing one of these names (a type, an import, an annotation) in a file that yields no chain is the
+// file-level hint of spec §2.4: some security config exists that the extractor could not read.
+const SECURITY_TYPES = new Set(["SecurityFilterChain", "SecurityWebFilterChain", "ServerHttpSecurity", "WebSecurityConfigurerAdapter", "EnableWebSecurity", "EnableWebFluxSecurity", "WebSecurityCustomizer"]);
+const NO_RULES_NOTE = "SecurityFilterChain matchers";
+const UNREAD_CHAIN_NOTE = "security(unread chain)";
+const NON_LITERAL_NOTE = "security(non-literal matcher)";
 const SOURCE_KINDS = {
   RequestParam: "query", RequestBody: "body", PathVariable: "params", RequestHeader: "header", CookieValue: "cookie", ModelAttribute: "body",
-  getParameter: "query", getQueryString: "query", getHeader: "header", getCookies: "cookie", getInputStream: "body", getReader: "body",
+  getParameter: "query", getParameterValues: "query", getParameterMap: "query", getQueryString: "query", getHeader: "header", getCookies: "cookie",
+  getInputStream: "body", getReader: "body", getPart: "body", getRequestURI: "params", getPathInfo: "params",
   "X-User-Role": "header", "X-Forwarded-User": "header"
 };
 
@@ -161,6 +226,8 @@ function newState(path, surface) {
     moduleName: path.split("/").at(-1).replace(/\.[^.]*$/, ""),
     surface: { sources: surface?.sources ?? [], sinks: surface?.sinks ?? [] },
     functions: [], calls: [], imports: [], exports: [], classes: [], routes: [], sources: [], sinks: [],
+    securityChains: [],
+    securityTypeSeen: false,
     notExtracted: new Set(),
     namespace: null,
     scopes: [],
@@ -181,7 +248,7 @@ function typeCandidate(type, st) {
 }
 
 const noteSecurityFilterChain = (text, st) => {
-  if (text === "SecurityFilterChain") st.notExtracted.add("SecurityFilterChain matchers");
+  if (SECURITY_TYPES.has(text)) st.securityTypeSeen = true;
 };
 
 // onIdentifier / onTypeIdentifier receive the TreeCursor rather than a Node (see javascript.mjs).
@@ -297,6 +364,17 @@ function mappingPaths(annotation) {
   return literals.every((l) => l.type === "string_literal") ? literals.map((l) => ({ path: stringContent(l), node: l })) : null;
 }
 
+// A class's `@WebServlet` literal url patterns: `@WebServlet("/p")`, `(value = "/p")`, `(urlPatterns =
+// {"/p", "/q"})`; [] when the annotation names no pattern (`name = ...` only); null (noted) when a
+// listed pattern is not a string literal.
+function servletPatterns(annotation) {
+  const items = namedOf(field(annotation, "arguments"));
+  const pair = items.find((i) => i.type === "element_value_pair" && ["value", "urlPatterns"].includes(field(i, "key")?.text));
+  const value = pair ? field(pair, "value") : items.find((i) => i.type !== "element_value_pair") ?? null;
+  const literals = !value ? [] : value.type === "element_value_array_initializer" ? namedOf(value) : [value];
+  return literals.every((l) => l.type === "string_literal") ? literals.map(stringContent) : null;
+}
+
 // The base names a type implements: a class / enum / record's `implements` list, an interface's
 // `extends` list (`p.J<S>` -> `J`).
 function implementedTypes(node) {
@@ -321,6 +399,14 @@ function onType(node, st) {
   if (prefixes === null) st.notExtracted.add("route(non-literal path)");
   else if (prefixes.length > 1) st.notExtracted.add("route(multiple class prefixes)"); // the first is used
   const prefix = prefixes?.[0].path ?? "";
+  const webServlet = annotations.find((a) => annotationName(a) === "WebServlet");
+  const servlet = webServlet ? servletPatterns(webServlet) : null;
+  if (webServlet && servlet === null) st.notExtracted.add("route(non-literal path)");
+  // a servlet filter (`@WebFilter`, `implements Filter`, a filter base class) may guard any servlet
+  // route: noted, so that build-graph calls an unmarked servlet route `unknown` rather than `unauthenticated`
+  const superclass = namedOf(field(node, "superclass"))[0];
+  const superName = superclass ? declaredClass(superclass) : null;
+  if (annotations.some((a) => annotationName(a) === "WebFilter") || implementedTypes(node).includes("Filter") || FILTER_BASES.has(superName)) st.notExtracted.add(SERVLET_FILTER_NOTE);
   st.scopes.push({
     frame: fieldFrame(node, body, name),
     cls: {
@@ -330,7 +416,9 @@ function onType(node, st) {
       exported: outer ? outer.exported && isPublic : isPublic,
       isInterface: node.type === "interface_declaration",
       prefix,
-      auth: annotations.map(annotationName).filter((n) => AUTH_ANNOTATIONS.has(n))
+      auth: annotations.map(annotationName).filter((n) => AUTH_ANNOTATIONS.has(n)),
+      servlet: servlet?.length ? servlet : null,
+      superclass: superName
     }
   });
   return () => st.scopes.pop();
@@ -340,7 +428,7 @@ function onType(node, st) {
 function onClassBody(node, st, ctx) {
   if (ctx.parentType !== "object_creation_expression" && ctx.parentType !== "enum_constant") return;
   st.notExtracted.add("anonymous class");
-  const cls = { name: null, start: node.startIndex, qualifiedName: `${enclosingName(st)}.${anonLabel(node.parent)}`, exported: false, isInterface: false, prefix: "", auth: [] };
+  const cls = { name: null, start: node.startIndex, qualifiedName: `${enclosingName(st)}.${anonLabel(node.parent)}`, exported: false, isInterface: false, prefix: "", auth: [], servlet: null, superclass: null };
   st.scopes.push({ frame: fieldFrame(node, node, null), cls });
   return () => st.scopes.pop();
 }
@@ -393,11 +481,195 @@ function onFunction(node, st, ctx) {
     // grades a call to it exact
     ...(node.type === "method_declaration" && !field(node, "body") ? { bodiless: true } : {})
   });
-  if (node.type === "method_declaration" && owner?.name) springRoutes(node, owner, fn.qualified_name, st);
+  if (node.type === "method_declaration" && owner?.name) {
+    springRoutes(node, owner, fn.qualified_name, st);
+    if (owner.servlet) servletRoutes(node, owner, fn.qualified_name, st);
+  }
   const frame = newFrame(node.startIndex, fn.qualified_name);
   addParameters(node, frame, st);
-  st.scopes.push({ frame, fn: true });
-  return () => st.scopes.pop();
+  const kind = node.type === "method_declaration" ? securityMethodKind(node) : null;
+  const httpParams = new Set(childrenOfType(field(node, "parameters"), "formal_parameter").filter((p) => declaredClass(field(p, "type")) === "HttpSecurity").map((p) => field(p, "name")?.text));
+  const security = kind ? { kind, start: node.startIndex, line: lineOf(node), httpParams, rules: [], scope: [], scopeUnknown: false, ignored: [], ignoredUnknown: false, authorizeRanges: [], scopeRanges: [] } : null;
+  st.scopes.push({ frame, fn: true, security });
+  return () => {
+    st.scopes.pop();
+    if (security) finishSecurity(security, st);
+  };
+}
+
+// One route per `@WebServlet` handler method, at the method, on the class's first literal pattern;
+// further patterns are noted (a route id is its start byte, so one method cannot carry two). The
+// class's then the method's auth annotations are the middleware texts.
+function servletRoutes(node, owner, qualifiedName, st) {
+  const verb = SERVLET_HANDLERS.get(field(node, "name")?.text);
+  if (!verb) return;
+  if (owner.servlet.length > 1) st.notExtracted.add("route(multiple servlet patterns)");
+  st.routes.push({
+    line: lineOf(node),
+    start_byte: node.startIndex,
+    http_method: verb,
+    path_pattern: joinPath("", owner.servlet[0]),
+    handler_text: qualifiedName,
+    middleware_texts: [...owner.auth, ...annotationsOf(node).map(annotationName).filter((n) => AUTH_ANNOTATIONS.has(n))],
+    framework: "servlet"
+  });
+}
+
+// ---- Spring Security request rules ----------------------------------------------------------------
+
+// "chain" for a method with a body returning a SecurityFilterChain or the `configure(HttpSecurity)`
+// override, "ignoring" for one returning a WebSecurityCustomizer or `configure(WebSecurity)`; null
+// otherwise (a helper taking an HttpSecurity is not a chain: its rules belong to the bean that
+// hands it the HttpSecurity, where that call is an unreadable rule, see securityCall).
+function securityMethodKind(node) {
+  if (!field(node, "body")) return null;
+  const byReturn = lookup(SECURITY_RETURNS, declaredClass(field(node, "type")));
+  if (byReturn) return byReturn;
+  if (field(node, "name")?.text !== "configure") return null;
+  const params = childrenOfType(field(node, "parameters"), "formal_parameter").map((p) => lookup(SECURITY_CONFIGURE_PARAMS, declaredClass(field(p, "type"))));
+  return params.find(Boolean) ?? null;
+}
+
+// `HttpMethod.X` -> "X", else null.
+function httpMethodOf(arg) {
+  if (arg?.type !== "field_access" || field(arg, "object")?.text !== "HttpMethod" || field(arg, "field")?.type !== "identifier") return null;
+  return field(arg, "field").text.toUpperCase();
+}
+
+// A matcher's arguments: `(HttpMethod.X,)? "p", "q"...`, or RequestMatcher factories
+// `antMatcher((HttpMethod.X,)? "p")` / `mvcMatcher(...)` -> { http_method, patterns }; patterns null
+// when any argument is something else (a RequestMatcher object, a constant, `regexMatcher`), or when
+// the factories disagree on the verb; no pattern at all (`requestMatchers(HttpMethod.POST)`) is `/**`.
+function matcherArguments(node) {
+  const args = namedOf(field(node, "arguments"));
+  const verbs = new Set();
+  const patterns = [];
+  const leading = httpMethodOf(args[0]);
+  if (leading) {
+    verbs.add(leading);
+    args.shift();
+  }
+  for (const arg of args) {
+    if (arg.type === "string_literal") patterns.push(stringContent(arg));
+    else if (arg.type === "method_invocation" && !field(arg, "object") && MATCHER_FACTORIES.has(field(arg, "name")?.text)) {
+      const inner = matcherArguments(arg);
+      if (inner.patterns === null) return { http_method: null, patterns: null };
+      if (inner.http_method) verbs.add(inner.http_method);
+      patterns.push(...inner.patterns);
+    } else return { http_method: null, patterns: null };
+  }
+  if (verbs.size > 1) return { http_method: null, patterns: null };
+  const http_method = verbs.size ? [...verbs][0] : null;
+  return { http_method, patterns: patterns.length ? patterns : ["/**"] };
+}
+
+// The calls a call is chained on (`http.a().b().c()` at c -> [b(), a()]), and their names.
+function receiverChain(node) {
+  const calls = [];
+  for (let object = field(node, "object"); object?.type === "method_invocation"; object = field(object, "object")) calls.push(object);
+  return calls;
+}
+const receiverChainNames = (node) => receiverChain(node).map((c) => field(c, "name")?.text ?? "");
+// The legacy form: chained on a zero-argument `authorizeRequests()` / `authorizeHttpRequests()`.
+const legacyAuthorize = (node) => receiverChain(node).some((c) => SECURITY_AUTHORIZE.has(field(c, "name")?.text) && namedOf(field(c, "arguments")).length === 0);
+const argumentRange = (node) => {
+  const args = field(node, "arguments");
+  return args ? [args.startIndex, args.endIndex] : [node.startIndex, node.endIndex];
+};
+
+const within = (ranges, at) => ranges.some(([start, end]) => at > start && at < end);
+const sameNode = (a, b) => a?.type === b?.type && a?.startIndex === b?.startIndex && a?.endIndex === b?.endIndex;
+const unknownRule = (name) => ({ line: lineOf(name), start_byte: name.startIndex, http_method: null, patterns: null, auth: "unknown" });
+
+// Scope / ignore matchers keep their verb and source position (the walk visits a chain outermost first).
+function addMatcher(security, key, at, { http_method, patterns }, st) {
+  if (patterns === null) {
+    security[`${key}Unknown`] = true;
+    st.notExtracted.add(NON_LITERAL_NOTE);
+  } else security[key].push({ start: at, http_method, patterns });
+}
+const sortedMatchers = (entries) => entries.sort((a, b) => a.start - b.start).map(({ http_method, patterns }) => ({ http_method, patterns }));
+
+// One call inside a security method. The walk is pre-order, so an authorize / securityMatchers call
+// is recorded (the range of its ARGUMENTS: its receiver chain, `http.securityMatcher(..)`, is not
+// inside it) before the calls inside its lambda; a legacy chain (`http.authorizeRequests()
+// .antMatchers(...)`) is recognised by the zero-argument authorize call it is chained on. A matcher inside an authorize call
+// is a rule whose authorization is the call chained DIRECTLY on it (`.requestMatchers("/a")
+// .permitAll()`): any other call there (`hasIpAddress`, `not`, ...) makes the rule "unknown".
+// Matchers elsewhere (`requiresChannel`, `csrf.ignoringRequestMatchers`) are not rules; a rule call
+// elsewhere (`formLogin(l -> l.permitAll())`) is nothing. Rules the extractor cannot see — the
+// chain's HttpSecurity handed to another method (`common(http)`), a DSL applied to it (`http.with(
+// dsl)`), an authorize call given a method reference or a Customizer value — are an unreadable rule
+// at that position: first-match then makes every route not settled before it `unknown`.
+function securityCall(node, name, security, st) {
+  const text = name.text;
+  const at = name.startIndex;
+  const args = namedOf(field(node, "arguments"));
+  const object = field(node, "object");
+  const chained = receiverChainNames(node);
+  const inAuthorize = legacyAuthorize(node) || within(security.authorizeRanges, at);
+  const onHttp = object?.type === "identifier" && security.httpParams.has(object.text);
+  if (args.some((a) => a.type === "identifier" && security.httpParams.has(a.text)) || (onHttp && SECURITY_APPLY.has(text))) {
+    security.rules.push(unknownRule(name));
+    return;
+  }
+  if (SECURITY_AUTHORIZE.has(text)) {
+    security.authorizeRanges.push(argumentRange(node));
+    if (args.length && !args.some((a) => a.type === "lambda_expression")) security.rules.push(unknownRule(name));
+    return;
+  }
+  if (text === SECURITY_SCOPE_LAMBDA && args.some((a) => a.type === "lambda_expression")) {
+    security.scopeRanges.push(argumentRange(node));
+    return;
+  }
+  // a scope call: not inside an authorize call, not an argument (`requestMatchers(antMatcher("/p"))`
+  // is read by matcherArguments); the zero-argument openers (`securityMatchers().requestMatchers(..)`,
+  // Spring 5 `http.requestMatchers().antMatchers(..)`) leave the scope unknown
+  // (a regex scope / ignore is not an Ant pattern: unreadable)
+  const opener = text === "requestMatchers" && args.length === 0;
+  if ((SECURITY_SCOPES.has(text) || opener) && !inAuthorize && node.parent?.type !== "argument_list" && !chained.includes(SECURITY_IGNORING) && !within(security.scopeRanges, at)) {
+    addMatcher(security, "scope", at, args.length === 0 || text === "regexMatcher" ? { http_method: null, patterns: null } : matcherArguments(node), st);
+    return;
+  }
+  if (!SECURITY_MATCHERS.has(text)) return;
+  if (chained.includes(SECURITY_IGNORING)) {
+    addMatcher(security, "ignored", at, text === "regexMatchers" ? { http_method: null, patterns: null } : matcherArguments(node), st);
+    return;
+  }
+  if (within(security.scopeRanges, at)) {
+    addMatcher(security, "scope", at, matcherArguments(node), st);
+    return;
+  }
+  if (!inAuthorize) return;
+  const { http_method, patterns } = text === "anyRequest" ? { http_method: null, patterns: ["/**"] } : text === "regexMatchers" ? { http_method: null, patterns: null } : matcherArguments(node);
+  if (patterns === null) st.notExtracted.add(NON_LITERAL_NOTE);
+  const parent = node.parent;
+  const rule = parent?.type === "method_invocation" && sameNode(field(parent, "object"), node) ? field(parent, "name")?.text : null;
+  security.rules.push({ line: lineOf(name), start_byte: at, http_method, patterns, auth: SECURITY_RULES.get(rule) ?? "unknown" });
+}
+
+// A "chain" method is always emitted (rules in source order; no rule -> noted "security(unread
+// chain)", it votes unknown in build-graph). `scope` lists its securityMatcher matchers
+// (`{ http_method, patterns }`, source order), null when unscoped; `scope_unknown` says a scope
+// could not be read (build-graph then lets the chain vote on every route). An "ignoring" method with
+// literal matchers is a chain scoped to them whose rules permit exactly them (verb kept: other verbs
+// of the same path stay unsettled, unknown); a non-literal ignore is only noted.
+function finishSecurity(security, st) {
+  const { line, start_byte } = { line: security.line, start_byte: security.start };
+  if (security.kind === "ignoring") {
+    if (!security.ignored.length || security.ignoredUnknown) return;
+    const scope = sortedMatchers(security.ignored);
+    st.securityChains.push({ line, start_byte, scope, scope_unknown: false, rules: scope.map((m) => ({ line, start_byte, http_method: m.http_method, patterns: m.patterns, auth: "unauthenticated" })) });
+    return;
+  }
+  if (security.rules.length === 0) st.notExtracted.add(UNREAD_CHAIN_NOTE);
+  st.securityChains.push({
+    line,
+    start_byte,
+    scope: security.scope.length && !security.scopeUnknown ? sortedMatchers(security.scope) : null,
+    scope_unknown: security.scopeUnknown,
+    rules: security.rules.sort(byStart)
+  });
 }
 
 // `@RequestMapping(method = RequestMethod.X)` -> X; ANY when absent or listing several.
@@ -455,6 +727,8 @@ function receiverHints(object, st) {
   switch (object?.type) {
     case "this":
       return { receiver: "this", receiverClass: null };
+    case "super": // `super.m()`: the enclosing class's superclass (null in an anonymous class)
+      return { receiver: null, receiverClass: innermostClass(st)?.superclass ?? null };
     case "identifier":
       return { receiver: null, receiverClass: identifierClass(object.text, st) };
     case "field_access": {
@@ -472,6 +746,8 @@ function receiverHints(object, st) {
 function onCall(node, st) {
   const name = field(node, "name");
   if (st.annotationDepth || !name) return;
+  const security = st.scopes.findLast((s) => s.security)?.security ?? null;
+  if (security) securityCall(node, name, security, st);
   const calleeText = textOf(node);
   const { receiver, receiverClass: cls } = receiverHints(field(node, "object"), st);
   st.calls.push({
@@ -547,6 +823,7 @@ const CURSOR_HANDLERS = new Map([
 export function extractFile({ tree, path, surface }) {
   const st = newState(path, surface);
   walk(tree, st, HANDLERS, CURSOR_HANDLERS);
+  if (st.securityTypeSeen && st.securityChains.length === 0) st.notExtracted.add(NO_RULES_NOTE);
   return {
     functions: st.functions.sort(byStart),
     calls: st.calls.sort(byStart),
@@ -557,6 +834,7 @@ export function extractFile({ tree, path, surface }) {
     routes: st.routes.sort(byStart),
     sources: st.sources.sort(byStart),
     sinks: st.sinks.sort(byStart),
+    security_chains: st.securityChains.sort(byStart),
     not_extracted: [...st.notExtracted].sort()
   };
 }
