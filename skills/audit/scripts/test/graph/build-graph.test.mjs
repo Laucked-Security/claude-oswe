@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { buildGraph, FRAMEWORK_STACK, versionDigest, versionFiles } from "../../graph/build-graph.mjs";
+import { buildGraph, FRAMEWORK_STACK, versionDigest, versionFiles, antPathRegex } from "../../graph/build-graph.mjs";
 import { nodeId, edgeKey } from "../../graph/ids.mjs";
 import { parserAvailable } from "../../graph/parser.mjs";
 import { validate } from "../../validate-output.mjs";
@@ -676,7 +676,251 @@ test("I4: with a SecurityFilterChain config, unauthenticated Spring routes are u
   const secured = await run({ "Api.java": api, "Sec.java": config });
   assert.deepEqual(nodesOf(secured, "route").map((r) => [r.path_pattern, r.auth]).sort(), [["/admin", "authenticated"], ["/open", "unknown"]]);
   assert.deepEqual(secured.stats.routes_by_auth, { unauthenticated: 0, authenticated: 1, unknown: 1 });
-  assert.ok(secured.stats.coverage_matrix.java.not_extracted.includes("SecurityFilterChain matchers"));
+  assert.ok(secured.stats.coverage_matrix.java.not_extracted.includes("security(unread chain)"));
+});
+
+// ---- I10: Spring Security request rules decide the unmarked java routes ---------------------------
+
+const SEC_API = [
+  "package com.ex;",
+  "@RestController",
+  "public class Api {",
+  "    @GetMapping(\"/open\") public String open() { return \"ok\"; }",
+  "    @GetMapping(\"/css/app.css\") public String css() { return \"ok\"; }",
+  "    @PostMapping(\"/mail\") public String mail() { return \"ok\"; }",
+  "    @RequestMapping(\"/any\") public String any() { return \"ok\"; }",
+  "    @GetMapping(\"/service/admin/users/{name}\") public String admin() { return \"ok\"; }",
+  "    @PostMapping(\"/secret\") @PreAuthorize(\"hasRole('A')\") public String secret() { return \"ok\"; }",
+  "}",
+  ""
+].join("\n");
+const chain = (body) => `package com.ex;\npublic class Sec {\n    public SecurityFilterChain chain(HttpSecurity http) {\n        http.authorizeHttpRequests(a -> a${body});\n        return http.build();\n    }\n}\n`;
+async function javaRoutes(t, files) {
+  const dir = tempDir(t);
+  for (const [path, src] of Object.entries(files)) put(dir, path, src);
+  const { graph } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["java"], frameworks: ["spring"], referencesDir: REFERENCES_DIR });
+  return { graph, auth: Object.fromEntries(nodesOf(graph, "route").map((r) => [`${r.http_method} ${r.path_pattern}`, r.auth])) };
+}
+
+test("I10: one chain — first match over path and verb: permitAll ⇒ unauthenticated, hasAuthority / anyRequest ⇒ authenticated, a route's {var} is one segment, markers stand", async (t) => {
+  const { graph, auth } = await javaRoutes(t, {
+    "Api.java": SEC_API,
+    "Sec.java": chain('.requestMatchers("/css/**", "/open").permitAll().requestMatchers(HttpMethod.POST, "/mail").permitAll().requestMatchers("/service/admin/**").hasAuthority("ADMIN").anyRequest().authenticated()')
+  });
+  assert.deepEqual(auth, {
+    "GET /open": "unauthenticated", "GET /css/app.css": "unauthenticated", "POST /mail": "unauthenticated",
+    "ANY /any": "authenticated", "GET /service/admin/users/{name}": "authenticated", "POST /secret": "authenticated"
+  });
+  assert.deepEqual(graph.stats.coverage_matrix.java.not_extracted, []);
+  assert.deepEqual(graph.stats.routes_by_auth, { unauthenticated: 3, authenticated: 3, unknown: 0 });
+});
+
+test("I10: verb-specific rules — a route serving ANY is unknown unless every verb agrees; a verb follows its own first match; a path no rule matches is unknown", async (t) => {
+  const api = SEC_API.replace('@RequestMapping("/any")', '@RequestMapping("/mail")');
+  const only = await javaRoutes(t, { "Api.java": api, "Sec.java": chain('.requestMatchers(HttpMethod.POST, "/mail").permitAll().requestMatchers(HttpMethod.GET, "/open").authenticated()') });
+  assert.equal(only.auth["ANY /mail"], "unknown"); // POST permitAll, the other verbs meet no rule
+  assert.equal(only.auth["POST /mail"], "unauthenticated");
+  assert.equal(only.auth["GET /open"], "authenticated");
+  assert.equal(only.auth["GET /css/app.css"], "unknown"); // no rule, no anyRequest
+  const agree = await javaRoutes(t, { "Api.java": api, "Sec.java": chain('.requestMatchers(HttpMethod.POST, "/mail").permitAll().anyRequest().permitAll()') });
+  assert.equal(agree.auth["ANY /mail"], "unauthenticated");
+  const disagree = await javaRoutes(t, { "Api.java": api, "Sec.java": chain('.requestMatchers(HttpMethod.POST, "/mail").permitAll().anyRequest().authenticated()') });
+  assert.equal(disagree.auth["ANY /mail"], "unknown");
+});
+
+test("I10: access(...) and a non-literal matcher are unknown for every route they may cover; earlier literal rules still decide", async (t) => {
+  const { graph, auth } = await javaRoutes(t, {
+    "Api.java": SEC_API,
+    "Sec.java": chain('.requestMatchers("/css/**").access("x").requestMatchers("/open").permitAll().requestMatchers(PUBLIC).permitAll().anyRequest().authenticated()')
+  });
+  assert.equal(auth["GET /css/app.css"], "unknown");
+  assert.equal(auth["GET /open"], "unauthenticated");
+  assert.equal(auth["ANY /any"], "unknown");
+  assert.equal(auth["POST /mail"], "unknown");
+  assert.equal(auth["POST /secret"], "authenticated");
+  assert.ok(graph.stats.coverage_matrix.java.not_extracted.includes("security(non-literal matcher)"));
+});
+
+test("I10: several chains vote — agreement decides, disagreement is unknown; a securityMatcher scope restricts a chain's vote to the routes it covers; markers stand", async (t) => {
+  const sec2 = (body) => chain(body).replace("class Sec", "class Sec2");
+  const agree = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": chain('.requestMatchers("/open").permitAll().anyRequest().authenticated()'), "Sec2.java": sec2('.requestMatchers("/open", "/css/**").permitAll().anyRequest().authenticated()') });
+  assert.deepEqual(agree.auth, { "GET /open": "unauthenticated", "GET /css/app.css": "unknown", "POST /mail": "authenticated", "ANY /any": "authenticated", "GET /service/admin/users/{name}": "authenticated", "POST /secret": "authenticated" });
+  assert.ok(agree.graph.stats.coverage_matrix.java.not_extracted.includes("security(multiple chains)"));
+  // a scoped chain alone decides the routes in its scope; the unscoped chain decides the rest
+  const scoped = await javaRoutes(t, {
+    "Api.java": SEC_API,
+    "Sec.java": chain(".anyRequest().permitAll()").replace("http.authorizeHttpRequests", 'http.securityMatcher("/service/**").authorizeHttpRequests'),
+    "Sec2.java": sec2(".anyRequest().authenticated()")
+  });
+  assert.equal(scoped.auth["GET /service/admin/users/{name}"], "unauthenticated");
+  assert.equal(scoped.auth["GET /open"], "authenticated");
+  assert.deepEqual(scoped.graph.stats.coverage_matrix.java.not_extracted, ["security(multiple chains)"]);
+  // only scoped chains, none covering the route: no vote ⇒ unknown
+  const uncovered = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": chain(".anyRequest().permitAll()").replace("http.authorizeHttpRequests", 'http.securityMatcher("/service/**").authorizeHttpRequests') });
+  assert.equal(uncovered.auth["GET /open"], "unknown");
+  assert.equal(uncovered.auth["GET /service/admin/users/{name}"], "unauthenticated");
+});
+
+test("I10: @WebServlet routes through build-graph — handler resolves, framework servlet, no security ⇒ unauthenticated, a chain hint ⇒ unknown, rules apply", async (t) => {
+  const servlet = [
+    "package com.ex;",
+    "@WebServlet(value = \"/cmdi-00/BenchmarkTest00001\")",
+    "public class BenchmarkTest00001 extends HttpServlet {",
+    "  public void doGet(HttpServletRequest request, HttpServletResponse response) { doPost(request, response); }",
+    "  public void doPost(HttpServletRequest request, HttpServletResponse response) { Runtime.getRuntime().exec(request.getParameter(\"cmd\")); }",
+    "}",
+    ""
+  ].join("\n");
+  const { graph } = await javaRoutes(t, { "BenchmarkTest00001.java": servlet });
+  assert.deepEqual(
+    nodesOf(graph, "route").map((r) => [r.http_method, r.path_pattern, r.framework, r.auth, r.handler !== null]).sort(),
+    [["GET", "/cmdi-00/BenchmarkTest00001", "servlet", "unauthenticated", true], ["POST", "/cmdi-00/BenchmarkTest00001", "servlet", "unauthenticated", true]]
+  );
+  const fn = (qn) => graph.nodes.find((n) => n.type === "function" && n.qualified_name === qn);
+  assert.ok(graph.edges.some((e) => e.type === "calls" && e.from === fn("BenchmarkTest00001.doGet").id && e.to === fn("BenchmarkTest00001.doPost").id && e.confidence === "exact"));
+  assert.ok(graph.nodes.some((n) => n.type === "sink" && n.class === "cmd-exec" && n.enclosing_fn === fn("BenchmarkTest00001.doPost").id));
+  assert.ok(graph.nodes.some((n) => n.type === "source" && n.kind === "query" && n.enclosing_fn === fn("BenchmarkTest00001.doPost").id));
+  const hinted = await javaRoutes(t, { "BenchmarkTest00001.java": servlet, "Sec.java": "package com.ex;\npublic class Sec {\n    public SecurityFilterChain chain(HttpSecurity http) { return http.build(); }\n}\n" });
+  assert.equal(hinted.auth["POST /cmdi-00/BenchmarkTest00001"], "unknown");
+  const ruled = await javaRoutes(t, { "BenchmarkTest00001.java": servlet, "Sec.java": chain('.requestMatchers("/cmdi-00/**").authenticated()') });
+  assert.equal(ruled.auth["GET /cmdi-00/BenchmarkTest00001"], "authenticated");
+});
+
+test("antPathRegex: Spring's AntPathMatcher subset (?, *, whole-segment **, {var} with nested braces, {*rest}); a pattern without a leading slash is unreadable (null)", () => {
+  const hit = (pattern, path) => antPathRegex(pattern).test(path);
+  assert.ok(hit("/css/**", "/css") && hit("/css/**", "/css/a/b.css") && !hit("/css/**", "/cssx"));
+  assert.ok(hit("/a/**/b", "/a/b") && hit("/a/**/b", "/a/x/y/b") && !hit("/a/**/b", "/a/x"));
+  assert.ok(hit("/**", "/anything/at/all") && hit("/**", "/"));
+  assert.ok(hit("/*.mvc", "/register.mvc") && !hit("/*.mvc", "/a/register.mvc") && !hit("/*.mvc", "/registermvc"));
+  assert.ok(hit("/u/?", "/u/a") && !hit("/u/?", "/u/ab"));
+  assert.ok(hit("/users/{id}", "/users/42") && !hit("/users/{id}", "/users/42/x") && hit("/a/{b}/{c}", "/a/1/2"));
+  // a `{var:regex}` constraint is not reproduced: unreadable (a permitAll on `/users/{id:\d+}` must not reach /users/me)
+  assert.equal(antPathRegex("/users/{id:[0-9]+}/x"), null);
+  assert.equal(antPathRegex("/users/{id:\\d{3}}"), null);
+  assert.ok(hit("/files/{*rest}", "/files/a/b") && hit("/files/{*rest}", "/files/") && hit("/files/{*rest}", "/files") && !hit("/files/{*rest}", "/filesx"));
+  // an empty trailing token is dropped, as AntPathMatcher does
+  assert.ok(hit("/x/**/", "/x/a") && hit("/x/**/", "/x") && !hit("/x/**/", "/y"));
+  assert.ok(hit("/a/**/**/b", "/a/b") && hit("/a/**/**/b", "/a/x/b") && hit("/**/x", "/x") && hit("/**/x", "/a/b/x"));
+  // a `**` that is not a whole segment is a plain `*`
+  assert.ok(hit("/publicx**", "/publicxfoo") && !hit("/publicx**", "/publicx/admin"));
+  assert.ok(hit("/a+b(c).d", "/a+b(c).d") && !hit("/a+b(c).d", "/a+b(c)xd"));
+  assert.equal(antPathRegex("admin/**"), null);
+  assert.equal(antPathRegex("**"), null);
+});
+
+test("I10: a chain the extractor cannot read votes unknown (its scope only, when scoped); the §2.4 hint and a servlet filter turn an unauthenticated verdict into unknown", async (t) => {
+  // B1: an admin chain whose rules live in a method reference, next to a permissive web chain
+  const admin = "package com.ex;\npublic class Sec {\n    @Order(1) public SecurityFilterChain admin(HttpSecurity http) { http.securityMatcher(\"/service/admin/**\").authorizeHttpRequests(this::adminRules); return http.build(); }\n    @Order(2) public SecurityFilterChain web(HttpSecurity http) { http.authorizeHttpRequests(a -> a.anyRequest().permitAll()); return http.build(); }\n}\n";
+  const b1 = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin });
+  assert.equal(b1.auth["GET /service/admin/users/{name}"], "unknown");
+  assert.equal(b1.auth["GET /open"], "unauthenticated");
+  assert.ok(b1.graph.stats.coverage_matrix.java.not_extracted.includes("security(multiple chains)"));
+  // the same admin chain with nothing at all inside: an unread chain, noted
+  const empty = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin.replace("http.securityMatcher(\"/service/admin/**\").authorizeHttpRequests(this::adminRules); ", "") });
+  assert.equal(empty.auth["GET /service/admin/users/{name}"], "unknown");
+  assert.ok(empty.graph.stats.coverage_matrix.java.not_extracted.includes("security(unread chain)"));
+  // the unread chain is unscoped: everything unknown
+  const b1u = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin.replace('http.securityMatcher("/service/admin/**").', "http.") });
+  assert.deepEqual(b1u.graph.stats.routes_by_auth, { unauthenticated: 0, authenticated: 1, unknown: 5 });
+  // B2: a readable chain plus a file that only names a security type ⇒ the hint downgrades unauthenticated
+  const b2 = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": chain(".anyRequest().permitAll()"), "Flux.java": "package com.ex;\n@EnableWebSecurity\npublic class Flux { }\n" });
+  assert.equal(b2.auth["GET /open"], "unknown");
+  // web.ignoring(): no security on those paths, the chain decides the rest
+  const ignoring = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": chain(".anyRequest().authenticated()"), "Ign.java": "package com.ex;\npublic class Ign {\n    @Bean public WebSecurityCustomizer ignore() { return web -> web.ignoring().requestMatchers(\"/css/**\"); }\n}\n" });
+  assert.equal(ignoring.auth["GET /css/app.css"], "unauthenticated");
+  assert.equal(ignoring.auth["GET /open"], "authenticated");
+  // servlets: a guard annotation authenticates; a filter class makes the unmarked servlet route unknown
+  const servlet = "package com.ex;\n@WebServlet(\"/s\")\n@ServletSecurity(@HttpConstraint(rolesAllowed = \"admin\"))\npublic class S extends HttpServlet {\n  public void doGet(HttpServletRequest q, HttpServletResponse r) { }\n}\n@WebServlet(\"/plain\")\nclass P extends HttpServlet {\n  public void doGet(HttpServletRequest q, HttpServletResponse r) { }\n}\n";
+  const guarded = await javaRoutes(t, { "S.java": servlet });
+  assert.deepEqual(guarded.auth, { "GET /s": "authenticated", "GET /plain": "unauthenticated" });
+  const filtered = await javaRoutes(t, { "S.java": servlet, "F.java": "package com.ex;\n@WebFilter(\"/*\")\npublic class F implements Filter {\n  public void doFilter(ServletRequest q, ServletResponse r, FilterChain c) { }\n}\n" });
+  assert.deepEqual(filtered.auth, { "GET /s": "authenticated", "GET /plain": "unknown" });
+});
+
+test("I10: rules the extractor cannot see, unread scopes and verb-specific ignores never yield unauthenticated where Spring would authenticate", async (t) => {
+  const admin = (body) => `package com.ex;\npublic class Sec {\n${body}\n}\n`;
+  // the H2-console idiom: an unread scope next to an app chain using antMatcher(...) arguments
+  const h2 = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin('    @Order(1) public SecurityFilterChain h2(HttpSecurity http) { http.securityMatcher(PathRequest.toH2Console()).authorizeHttpRequests(a -> a.anyRequest().permitAll()); return http.build(); }\n    @Order(2) public SecurityFilterChain app(HttpSecurity http) { http.authorizeHttpRequests(a -> a.requestMatchers(antMatcher("/open")).permitAll().anyRequest().authenticated()); return http.build(); }') });
+  assert.equal(h2.auth["GET /service/admin/users/{name}"], "unknown"); // the unread-scope chain votes everywhere and disagrees
+  assert.equal(h2.auth["GET /open"], "unauthenticated"); // both chains permit it
+  // the chain's HttpSecurity handed to a helper that holds the restrictive rules
+  const helper = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin('    public SecurityFilterChain a(HttpSecurity http) { common(http); http.authorizeHttpRequests(z -> z.anyRequest().permitAll()); return http.build(); }\n    private void common(HttpSecurity http) { http.authorizeHttpRequests(a -> a.requestMatchers("/service/admin/**").authenticated()); }') });
+  assert.equal(helper.auth["GET /service/admin/users/{name}"], "unknown");
+  assert.equal(helper.auth["GET /open"], "unknown");
+  // a method reference, then a permissive authorize
+  const ref = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin('    public SecurityFilterChain a(HttpSecurity http) { http.authorizeHttpRequests(this::rules).authorizeHttpRequests(a -> a.anyRequest().permitAll()); return http.build(); }') });
+  assert.equal(ref.auth["GET /service/admin/users/{name}"], "unknown");
+  // the zero-argument opener: scope unread, the chain votes everywhere
+  const opener = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin('    @Order(1) public SecurityFilterChain api(HttpSecurity http) { http.securityMatchers().requestMatchers("/api/**"); http.authorizeHttpRequests(a -> a.anyRequest().permitAll()); return http.build(); }\n    @Order(2) public SecurityFilterChain web(HttpSecurity http) { http.authorizeHttpRequests(a -> a.anyRequest().authenticated()); return http.build(); }') });
+  assert.equal(opener.auth["GET /service/admin/users/{name}"], "unknown");
+  // a fully-qualified return type is a chain
+  const qualified = await javaRoutes(t, { "Api.java": SEC_API, "Sec.java": admin('    public org.springframework.security.web.SecurityFilterChain b(HttpSecurity http) { http.authorizeHttpRequests(a -> a.requestMatchers("/service/admin/**").authenticated().anyRequest().permitAll()); return http.build(); }') });
+  assert.equal(qualified.auth["GET /service/admin/users/{name}"], "authenticated");
+  assert.equal(qualified.auth["GET /open"], "unauthenticated");
+  // web.ignoring() keeps its verb: only GET /open bypasses security; POST /open is the main chain's
+  const api = SEC_API.replace('@RequestMapping("/any")', '@PostMapping("/open")');
+  const verb = await javaRoutes(t, { "Api.java": api, "Sec.java": chain(".anyRequest().authenticated()"), "Ign.java": "package com.ex;\npublic class Ign {\n    @Bean public WebSecurityCustomizer ignore() { return web -> web.ignoring().requestMatchers(HttpMethod.GET, \"/open\"); }\n}\n" });
+  assert.equal(verb.auth["GET /open"], "unauthenticated");
+  assert.equal(verb.auth["POST /open"], "authenticated");
+  // ...and a route serving ANY verb under a verb-specific ignore is covered by it but not settled: unknown
+  const any = await javaRoutes(t, { "Api.java": SEC_API.replace('@RequestMapping("/any")', '@RequestMapping("/open")'), "Sec.java": chain(".anyRequest().authenticated()"), "Ign.java": "package com.ex;\npublic class Ign {\n    @Bean public WebSecurityCustomizer ignore() { return web -> web.ignoring().requestMatchers(HttpMethod.GET, \"/open\"); }\n}\n" });
+  assert.equal(any.auth["ANY /open"], "unknown");
+  // a filter subclass makes the unmarked servlet route unknown
+  const servlet = "package com.ex;\n@WebServlet(\"/plain\")\npublic class P extends HttpServlet {\n  public void doGet(HttpServletRequest q, HttpServletResponse r) { }\n}\n";
+  const sub = await javaRoutes(t, { "P.java": servlet, "F.java": "package com.ex;\npublic class F extends HttpFilter {\n  protected void doFilter(HttpServletRequest q, HttpServletResponse r, FilterChain c) { }\n}\n" });
+  assert.equal(sub.auth["GET /plain"], "unknown");
+});
+
+test("I10: regex scopes, {var:regex} rules, a filter guarding Spring routes, a web.xml constraint, Spring Security on the build path, an unread-scope chain alone, a verb-only scope: never unauthenticated where Spring would authenticate", async (t) => {
+  const sec = (body) => `package com.ex;\npublic class Sec {\n${body}\n}\n`;
+  const api = SEC_API.replace('@RequestMapping("/any")', '@GetMapping("/api/public/x") public String pub() { return "ok"; }\n    @GetMapping("/users/me") public String me() { return "ok"; }\n    @RequestMapping("/any")');
+  // P18 / R1: a Spring 5 regex scope is not an Ant pattern — unread, so the chain votes everywhere
+  const regex = await javaRoutes(t, { "Api.java": api, "Sec.java": sec('    @Order(1) public SecurityFilterChain api(HttpSecurity http) { http.regexMatcher("/api/.*").authorizeHttpRequests(a -> a.anyRequest().authenticated()); return http.build(); }\n    @Order(2) public SecurityFilterChain pub(HttpSecurity http) { http.antMatcher("/api/public/**").authorizeHttpRequests(a -> a.anyRequest().permitAll()); return http.build(); }') });
+  assert.equal(regex.auth["GET /api/public/x"], "unknown");
+  // R2: a {var:regex} rule is unreadable, so a permitAll on it never reaches /users/me; being unreadable it
+  // may match any later route too (first match), so those are unknown rather than authenticated
+  const constrained = await javaRoutes(t, { "Api.java": api, "Sec.java": chain('.requestMatchers("/users/{id:\\\\d+}").permitAll().anyRequest().authenticated()') });
+  assert.equal(constrained.auth["GET /users/me"], "unknown");
+  assert.equal(constrained.auth["GET /open"], "unknown");
+  const literalFirst = await javaRoutes(t, { "Api.java": api, "Sec.java": chain('.requestMatchers("/open").authenticated().requestMatchers("/users/{id:\\\\d+}").permitAll().anyRequest().authenticated()') });
+  assert.equal(literalFirst.auth["GET /open"], "authenticated");
+  // R5: web.ignoring().regexMatchers is only noted
+  const ignoreRegex = await javaRoutes(t, { "Api.java": api, "Sec.java": chain(".anyRequest().authenticated()"), "Ign.java": "package com.ex;\npublic class Ign {\n    @Bean public WebSecurityCustomizer ignore() { return web -> web.ignoring().regexMatchers(\"/api/.*\"); }\n}\n" });
+  assert.equal(ignoreRegex.auth["GET /api/public/x"], "authenticated");
+  assert.ok(ignoreRegex.graph.stats.coverage_matrix.java.not_extracted.includes("security(non-literal matcher)"));
+  // R6: a filter bean and no chain: Boot registers it on every request, so the Spring routes are unknown
+  const filterOnly = await javaRoutes(t, { "Api.java": api, "Jwt.java": "package com.ex;\n@Component\npublic class Jwt extends OncePerRequestFilter {\n  protected void doFilterInternal(HttpServletRequest q, HttpServletResponse r, FilterChain c) { }\n}\n" });
+  assert.equal(filterOnly.auth["GET /open"], "unknown");
+  assert.equal(filterOnly.auth["POST /secret"], "authenticated");
+  // ...but with a chain, the chain decides the Spring routes
+  const filterAndChain = await javaRoutes(t, { "Api.java": api, "Sec.java": chain('.requestMatchers("/open").permitAll().anyRequest().authenticated()'), "Jwt.java": "package com.ex;\n@Component\npublic class Jwt extends OncePerRequestFilter {\n  protected void doFilterInternal(HttpServletRequest q, HttpServletResponse r, FilterChain c) { }\n}\n" });
+  assert.equal(filterAndChain.auth["GET /open"], "unauthenticated");
+  // R7: a web.xml auth constraint at a conventional location makes every unmarked route unknown; without <auth-constraint> it is nothing
+  const webXml = (body) => `<?xml version="1.0"?>\n<web-app>\n  <security-constraint>\n    <web-resource-collection><url-pattern>/*</url-pattern></web-resource-collection>\n${body}  </security-constraint>\n</web-app>\n`;
+  const constraint = await javaRoutes(t, { "Api.java": api, "src/main/webapp/WEB-INF/web.xml": webXml("    <auth-constraint><role-name>admin</role-name></auth-constraint>\n") });
+  assert.equal(constraint.auth["GET /open"], "unknown");
+  assert.ok(constraint.graph.stats.coverage_matrix.java.not_extracted.includes("servlet(security-constraint)"));
+  const noAuth = await javaRoutes(t, { "Api.java": api, "src/main/webapp/WEB-INF/web.xml": webXml("    <user-data-constraint><transport-guarantee>CONFIDENTIAL</transport-guarantee></user-data-constraint>\n") });
+  assert.equal(noAuth.auth["GET /open"], "unauthenticated");
+  // R4: Spring Security on the build path with no chain read: Boot's default chain, unknown; a readable chain still decides
+  const pom = "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-security</artifactId></dependency></dependencies></project>\n";
+  const starter = await javaRoutes(t, { "Api.java": api, "pom.xml": pom });
+  assert.equal(starter.auth["GET /open"], "unknown");
+  assert.ok(starter.graph.stats.coverage_matrix.java.not_extracted.includes("security(dependency)"));
+  const starterChain = await javaRoutes(t, { "Api.java": api, "pom.xml": pom, "Sec.java": chain('.requestMatchers("/open").permitAll().anyRequest().authenticated()') });
+  assert.equal(starterChain.auth["GET /open"], "unauthenticated");
+  assert.ok(!starterChain.graph.stats.coverage_matrix.java.not_extracted.includes("security(dependency)"));
+  const gradle = await javaRoutes(t, { "Api.java": api, "build.gradle.kts": 'dependencies { implementation("org.springframework.boot:spring-boot-starter-security") }\n' });
+  assert.equal(gradle.auth["GET /open"], "unknown");
+  // P5 / R8: only an unread-scope chain: a route it may not cover meets no chain for sure — unknown, never authenticated
+  const unreadOnly = await javaRoutes(t, { "Api.java": api, "Sec.java": sec('    public SecurityFilterChain api(HttpSecurity http) { http.securityMatcher(new AntPathRequestMatcher("/api/**")).authorizeHttpRequests(a -> a.anyRequest().authenticated()); return http.build(); }') });
+  assert.equal(unreadOnly.auth["GET /open"], "unknown");
+  assert.equal(unreadOnly.auth["GET /api/public/x"], "unknown");
+  // R3: a GET-only scope permits GET /open; POST /open is the unscoped chain's; a route serving ANY verb is unknown
+  const anyApi = SEC_API.replace('@RequestMapping("/any")', '@RequestMapping("/open")').replace('@GetMapping("/open") public String open()', '@PostMapping("/open2") public String open2()');
+  const verbScope = await javaRoutes(t, { "Api.java": anyApi, "Sec.java": sec('    @Order(1) public SecurityFilterChain open(HttpSecurity http) { http.securityMatchers(m -> m.requestMatchers(HttpMethod.GET, "/open")).authorizeHttpRequests(a -> a.anyRequest().permitAll()); return http.build(); }\n    @Order(2) public SecurityFilterChain web(HttpSecurity http) { http.authorizeHttpRequests(a -> a.anyRequest().authenticated()); return http.build(); }') });
+  assert.equal(verbScope.auth["ANY /open"], "unknown");
+  assert.equal(verbScope.auth["POST /open2"], "authenticated");
 });
 
 // ---- I9: NodeGoat-shaped JavaScript ---------------------------------------------------------------

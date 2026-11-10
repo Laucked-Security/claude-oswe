@@ -11,24 +11,24 @@ export const SINK_CLASS_RULES = Object.freeze([
   {
     class: "cmd-exec",
     test: (lower, stack) =>
-      /(child_process|execsync|spawn|execfile|system|popen|proc_open|passthru|shell_exec|processbuilder|runtime\.getruntime|process\.start|processstartinfo|useshellexecute|subprocess)/.test(lower) ||
+      /(child_process|execsync|spawn|execfile|system|popen|proc_open|passthru|shell_exec|processbuilder|runtime\.getruntime|runtime\.exec|process\.start|processstartinfo|useshellexecute|subprocess)/.test(lower) ||
       (stack !== "python" && /^exec$/.test(lower))
   },
   {
     class: "eval",
     test: (lower, stack) =>
-      /(^eval$|newfunction|runin(new|this)?context|mvel|parseexpression|getvalue|preg_replace)/.test(lower) ||
+      /(^eval$|newfunction|runin(new|this)?context|mvel|ognl|parseexpression|createvalueexpression|preg_replace)/.test(lower) ||
       (stack === "python" && /^exec$/.test(lower))
   },
-  { class: "deser", test: matches(/(unserialize|objectinputstream|readobject|xmldecoder|xstream|jsontypeinfo|yaml\.load|pickle|marshal|binaryformatter|netdatacontract|losformatter|objectstateformatter|typenamehandling|javascriptserializer)/) },
+  { class: "deser", test: matches(/(unserialize|objectinputstream|readobject|xmldecoder|xstream|jsontypeinfo|yaml\.load|pickle|(^|\.)marshal|binaryformatter|netdatacontract|losformatter|objectstateformatter|typenamehandling|javascriptserializer)/) },
   { class: "nosql", test: matches(/^\$/) },
   { class: "template", test: matches(/(render_template_string|^template$|lodash\.template|_\.template|handlebars|pug\.|ejs\.)/) },
-  { class: "sql", test: matches(/(query|mysqli|db\.raw|db\.select|whereraw|statement\.execute|cursor\.execute|^raw$|\.raw$|^extra$|rawsql|sqlcommand|executereader|executenonquery|fromsqlraw|executesqlraw|sequelize)/) },
+  { class: "sql", test: matches(/(query|mysqli|db\.raw|db\.select|whereraw|statement\.execute|cursor\.execute|^raw$|\.raw$|^extra$|rawsql|sqlcommand|executereader|executenonquery|fromsqlraw|executesqlraw|sequelize|executeupdate|executelargeupdate|preparestatement|batchupdate)/) },
   { class: "include", test: matches(/(include|^require(_once)?$)/) },
-  { class: "file-write", test: matches(/(move_uploaded_file|file_put_contents|writefile|createwritestream)/) },
-  { class: "file-read", test: matches(/(send_file|send_from_directory|sendfile|readfile|createreadstream|path\.combine)/) },
-  { class: "ssrf", test: matches(/(axios|fetch|https?\.(get|request)|^got$|got\.|needle|superagent|^request$|requests\.)/) },
-  { class: "xxe", test: matches(/(documentbuilder|saxparser|xmldocument|xmlreader|lxml)/) },
+  { class: "file-write", test: matches(/(move_uploaded_file|file_put_contents|writefile|createwritestream|fileoutputstream|filewriter|files\.write|files\.copy|files\.newoutputstream|filecopyutils|createnewfile)/) },
+  { class: "file-read", test: matches(/(send_file|send_from_directory|sendfile|readfile|createreadstream|path\.combine|fileinputstream|filereader|files\.newinputstream|files\.read|files\.lines)/) },
+  { class: "ssrf", test: matches(/(axios|fetch|https?\.(get|request)|^got$|got\.|needle|superagent|^request$|requests\.|openconnection|openstream|resttemplate|webclient|httpclient|getforobject|getforentity|postforobject|postforentity)/) },
+  { class: "xxe", test: matches(/(documentbuilder|saxparser|xmldocument|xmlreader|lxml|xmlinputfactory|createxmlstreamreader|transformerfactory|schemafactory|unmarshal)/) },
   { class: "trust-boundary", test: matches(/(setattribute|putvalue|addcookie)/) },
   { class: "redirect", test: matches(/redirect/) }
 ].map(Object.freeze));

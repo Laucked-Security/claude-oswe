@@ -127,6 +127,24 @@ test("SP10: 4 accepted findings, 3 proven, 2 with candidate ids -> 0.75 / 0.5, c
   assert.equal(r.multi_file_chains, 1); // unchanged: still counted from accepted chains' evidence files
 });
 
+test("WebGoat classes: path-traversal / xxe / insecure-deserialization synonyms match; unrelated classes do not", () => {
+  const t = { vulns: [
+    { id:"pt", vuln_class:"path-traversal", file:"a/ProfileUploadBase.java", auth:"authenticated" },
+    { id:"xxe", vuln_class:"xxe", file:"a/CommentsCache.java", auth:"authenticated" },
+    { id:"deser", vuln_class:"insecure-deserialization", file:"a/InsecureDeserializationTask.java", auth:"authenticated" }
+  ]};
+  const f = (id, cls, file) => ({ finding_id:id, vuln_class:cls, verification_status:"accepted", source:{file:"a/Entry.java",line:1}, sink:{file,line:2} });
+  const rep = { coverage:{analyzed:["a/ProfileUploadBase.java","a/CommentsCache.java","a/InsecureDeserializationTask.java"],skipped:[]}, chains:[], verdicts:[], findings:[
+    f("A","zip-slip","external/WebGoat/a/ProfileUploadBase.java"),
+    f("B","xml-external-entity","external/WebGoat/a/CommentsCache.java"),
+    f("C","sql-injection","external/WebGoat/a/InsecureDeserializationTask.java") // wrong class: no match
+  ]};
+  const r = scoreNodegoat(rep, t);
+  assert.deepEqual(r.found.map((x) => x.id).sort(), ["pt","xxe"]);
+  assert.deepEqual(r.reasoning_missed.map((m) => m.id), ["deser"]);
+  assert.equal(scoreNodegoat({ ...rep, findings:[f("C","deserialization","external/WebGoat/a/InsecureDeserializationTask.java")] }, t).found.map((x) => x.id).join(), "deser");
+});
+
 test("SP10: graph-unavailable report -> rates over its findings, call_resolution_ratio null; no active findings -> null rates", () => {
   const r = scoreNodegoat({ ...report, app_graph: { available: false, reason: "parser unavailable", multi_file_chain_count: 0 } }, truth);
   assert.equal(r.structural_proof_rate, 0);

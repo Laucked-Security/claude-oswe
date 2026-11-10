@@ -35,7 +35,7 @@ const callRows = (x) => x.calls.map((c) => [c.callee_text, c.receiver, c.receive
 const fnRows = (x) => x.functions.map((f) => [f.kind, f.name, f.qualified_name, f.class, f.exported]);
 
 test("lang descriptor", () => {
-  assert.deepEqual(lang, { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true });
+  assert.deepEqual(lang, { id: "java", stack: "java", langIds: ["java"], frameworks: ["spring", "servlet"], implicitThisCalls: true, submoduleImports: false, callableLocals: false, overloads: true });
 });
 
 test("functions: a lambda named by the local it initialises carries binds_name (resolve.mjs's nested definitions); an argument lambda and a method do not", async () => {
@@ -83,11 +83,170 @@ test("Spring: @RequestMapping method / value / path forms, prefix joining, class
   assert.ok(x.not_extracted.includes("route(non-literal path)"));
 });
 
-test("SecurityFilterChain in a file ⇒ not_extracted \"SecurityFilterChain matchers\"; routes elsewhere are unaffected", async () => {
+const ruleRows = (chain) => chain.rules.map((r) => [r.line, r.http_method, r.patterns, r.auth]);
+
+test("security chains: the fixture's SecurityFilterChain yields one unscoped chain at the method with its matchers in source order, at their matcher; formLogin's permitAll is not a rule; no note", async () => {
   const config = await extractFixture("SecurityConfig.java");
-  assert.ok(config.not_extracted.includes("SecurityFilterChain matchers"));
+  const text = fixtureText("SecurityConfig.java");
+  assert.equal(config.security_chains.length, 1);
+  const [chain] = config.security_chains;
+  assert.deepEqual([chain.line, chain.start_byte, chain.scope, chain.scope_unknown], [11, text.indexOf("@Bean"), null, false]);
+  assert.deepEqual(ruleRows(chain), [
+    [14, null, ["/api/health", "/public/**"], "unauthenticated"],
+    [15, "POST", ["/di/**"], "authenticated"],
+    [16, null, ["/**"], "authenticated"]
+  ]);
+  assert.deepEqual(chain.rules.map((r) => r.start_byte), [text.indexOf("requestMatchers(\"/api/health\""), text.indexOf("requestMatchers(HttpMethod.POST"), text.indexOf("anyRequest()")]);
+  assert.deepEqual(config.not_extracted, []);
   const api = await extractFixture("Api.java");
+  assert.deepEqual(api.security_chains, []);
   assert.ok(!api.not_extracted.includes("SecurityFilterChain matchers"));
+});
+
+test("security chains: a SecurityFilterChain that yields no rule is still a chain (rules []) and noted \"SecurityFilterChain matchers\"; a configure(HttpSecurity) override (legacy antMatchers / mvcMatchers) is a chain; a helper taking an HttpSecurity is not", async () => {
+  const bare = await extract("class Sec {\n  public SecurityFilterChain chain(HttpSecurity http) { return http.build(); }\n}\n");
+  assert.deepEqual(bare.security_chains, [{ line: 2, start_byte: bare.functions[0].start_byte, scope: null, scope_unknown: false, rules: [] }]);
+  assert.deepEqual(bare.not_extracted, ["security(unread chain)"]);
+  const legacy = await extract(
+    "class Sec extends WebSecurityConfigurerAdapter {\n  protected void configure(HttpSecurity http) throws Exception {\n" +
+      "    http.authorizeRequests().antMatchers(\"/open/**\").permitAll().mvcMatchers(HttpMethod.GET, \"/r\").hasAnyRole(\"A\", \"B\").anyRequest().denyAll();\n  }\n" +
+      "  private void common(HttpSecurity http) { http.authorizeRequests().anyRequest().permitAll(); }\n" +
+      "  protected abstract void configure(HttpSecurity http, int x);\n}\n" +
+      "interface I { SecurityFilterChain chain(HttpSecurity http); }\n"
+  );
+  assert.equal(legacy.security_chains.length, 1);
+  assert.deepEqual(ruleRows(legacy.security_chains[0]), [[3, null, ["/open/**"], "unauthenticated"], [3, "GET", ["/r"], "authenticated"], [3, null, ["/**"], "authenticated"]]);
+  assert.deepEqual(legacy.not_extracted, []);
+  // a fully-qualified return type is a chain too
+  const qualified = await extract("class Sec {\n  public org.springframework.security.web.SecurityFilterChain b(HttpSecurity http) { http.authorizeHttpRequests(a -> a.anyRequest().authenticated()); return http.build(); }\n}\n");
+  assert.deepEqual(ruleRows(qualified.security_chains[0]), [[2, null, ["/**"], "authenticated"]]);
+  // only an import / annotation names a security type: the hint, no chain
+  const imported = await extract("import org.springframework.security.web.SecurityFilterChain;\n@EnableWebSecurity\nclass Sec {\n  void m() {}\n}\n");
+  assert.deepEqual([imported.security_chains, imported.not_extracted], [[], ["SecurityFilterChain matchers"]]);
+  const flux = await extract("class Sec {\n  public SecurityWebFilterChain chain(ServerHttpSecurity http) { return http.build(); }\n}\n");
+  assert.deepEqual([flux.security_chains, flux.not_extracted], [[], ["SecurityFilterChain matchers"]]);
+});
+
+test("security chains: a rule's auth is the call chained directly on its matcher; hasIpAddress / not() ⇒ unknown; matchers outside an authorize call and rule-named calls elsewhere are nothing", async () => {
+  const x = await extract(
+    "class Sec extends WebSecurityConfigurerAdapter {\n  protected void configure(HttpSecurity http) throws Exception {\n" +
+      "    http.authorizeRequests().antMatchers(\"/admin/**\").hasIpAddress(\"127.0.0.1\").antMatchers(\"/deny/**\").not().permitAll()\n" +
+      "        .and().formLogin().loginPage(\"/login\").permitAll().and().anonymous().disable();\n" +
+      "    http.requiresChannel(c -> c.anyRequest().requiresSecure()).csrf(c -> c.ignoringRequestMatchers(\"/csrf/**\"));\n" +
+      "    http.authorizeHttpRequests(a -> a.requestMatchers(\"/open\").permitAll()).formLogin(f -> f.permitAll());\n  }\n}\n"
+  );
+  assert.equal(x.security_chains.length, 1);
+  assert.deepEqual(ruleRows(x.security_chains[0]), [[3, null, ["/admin/**"], "unknown"], [3, null, ["/deny/**"], "unknown"], [6, null, ["/open"], "unauthenticated"]]);
+  assert.deepEqual(x.not_extracted, []);
+});
+
+test("security chains: rules the extractor cannot see are an unreadable rule at their position — the HttpSecurity handed to a helper, http.with / apply, an authorize call given a method reference or a value", async () => {
+  const x = await extract(
+    "class Sec {\n  public SecurityFilterChain a(HttpSecurity http) {\n    common(http);\n    http.authorizeHttpRequests(z -> z.anyRequest().permitAll());\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain b(HttpSecurity http) {\n    http.authorizeHttpRequests(this::rules).authorizeHttpRequests(a -> a.requestMatchers(\"/x\").permitAll());\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain c(HttpSecurity http) {\n    http.with(new AdminDsl(), Customizer.withDefaults()).authorizeHttpRequests(customizer);\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain d(HttpSecurity http) {\n    http.authorizeHttpRequests(a -> a.requestMatchers(antMatcher(\"/open\"), antMatcher(HttpMethod.GET, \"/g\")).permitAll().requestMatchers(antMatcher(HttpMethod.GET, \"/m\"), antMatcher(HttpMethod.POST, \"/m\")).denyAll().requestMatchers(new AntPathRequestMatcher(\"/o\")).permitAll().anyRequest().authenticated());\n    return http.build();\n  }\n}\n"
+  );
+  assert.deepEqual(x.security_chains.map(ruleRows), [
+    [[3, null, null, "unknown"], [4, null, ["/**"], "unauthenticated"]],
+    [[8, null, null, "unknown"], [8, null, ["/x"], "unauthenticated"]],
+    [[12, null, null, "unknown"], [12, null, null, "unknown"]],
+    // antMatcher(...) factories are the pattern (verb kept when they agree); a RequestMatcher object is unreadable
+    [[16, "GET", ["/open", "/g"], "unauthenticated"], [16, null, null, "authenticated"], [16, null, null, "unauthenticated"], [16, null, ["/**"], "authenticated"]]
+  ]);
+  assert.deepEqual(x.not_extracted, ["security(non-literal matcher)"]);
+});
+
+test("security chains: securityMatcher / antMatcher / securityMatchers(m -> ...) patterns are the scope; a non-literal pattern or regexMatchers ⇒ patterns null + note; access(...) ⇒ unknown", async () => {
+  const x = await extract(
+    "class Sec {\n  static final String P = \"/p\";\n  public SecurityFilterChain chain(HttpSecurity http) {\n" +
+      "    http.securityMatcher(\"/api/**\", \"/v2/**\").authorizeHttpRequests(a -> a.requestMatchers(P).permitAll().regexMatchers(\"/x.*\").authenticated()" +
+      ".requestMatchers(HttpMethod.POST).access(\"x\").requestMatchers(\"/q\").anyRequest().authenticated());\n" +
+      "    http.formLogin(l -> l.permitAll());\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain other(HttpSecurity http) {\n    http.securityMatcher(SCOPE).authorizeHttpRequests(a -> a.anyRequest().permitAll());\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain third(HttpSecurity http) {\n    http.securityMatchers(m -> m.requestMatchers(\"/m/**\").antMatchers(\"/n\")).authorizeHttpRequests(a -> a.anyRequest().denyAll());\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain fourth(HttpSecurity http) {\n    http.antMatcher(\"/legacy/**\").authorizeRequests().anyRequest().authenticated();\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain fifth(HttpSecurity http) {\n    http.securityMatchers().requestMatchers(\"/api/**\");\n    http.authorizeHttpRequests(a -> a.anyRequest().permitAll());\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain sixth(HttpSecurity http) {\n    http.requestMatchers().antMatchers(\"/old/**\").and().authorizeRequests().anyRequest().permitAll();\n    return http.build();\n  }\n" +
+      "  public SecurityFilterChain seventh(HttpSecurity http) {\n    http.securityMatcher(antMatcher(HttpMethod.GET, \"/g/**\")).authorizeHttpRequests(a -> a.anyRequest().permitAll());\n    return http.build();\n  }\n}\n"
+  );
+  assert.equal(x.security_chains.length, 7);
+  const scopes = (c) => [c.scope, c.scope_unknown];
+  assert.deepEqual(scopes(x.security_chains[0]), [[{ http_method: null, patterns: ["/api/**", "/v2/**"] }], false]);
+  // the `/q` matcher is chained into anyRequest(), not a rule call: unknown
+  assert.deepEqual(ruleRows(x.security_chains[0]), [[4, null, null, "unauthenticated"], [4, null, null, "authenticated"], [4, "POST", ["/**"], "unknown"], [4, null, ["/q"], "unknown"], [4, null, ["/**"], "authenticated"]]);
+  // a non-literal scope: unread, not unscoped
+  assert.deepEqual([scopes(x.security_chains[1]), ruleRows(x.security_chains[1])], [[null, true], [[9, null, ["/**"], "unauthenticated"]]]);
+  assert.deepEqual([scopes(x.security_chains[2]), ruleRows(x.security_chains[2])], [[[{ http_method: null, patterns: ["/m/**"] }, { http_method: null, patterns: ["/n"] }], false], [[13, null, ["/**"], "authenticated"]]]);
+  assert.deepEqual([scopes(x.security_chains[3]), ruleRows(x.security_chains[3])], [[[{ http_method: null, patterns: ["/legacy/**"] }], false], [[17, null, ["/**"], "authenticated"]]]);
+  // the zero-argument openers (Spring 6 securityMatchers(), Spring 5 requestMatchers()) leave the scope unread
+  assert.deepEqual([scopes(x.security_chains[4]), ruleRows(x.security_chains[4])], [[null, true], [[22, null, ["/**"], "unauthenticated"]]]);
+  assert.deepEqual([scopes(x.security_chains[5]), ruleRows(x.security_chains[5])], [[null, true], [[26, null, ["/**"], "unauthenticated"]]]);
+  // a factory with a verb scopes by verb too
+  assert.deepEqual(scopes(x.security_chains[6]), [[{ http_method: "GET", patterns: ["/g/**"] }], false]);
+  assert.deepEqual(x.not_extracted, ["security(non-literal matcher)"]);
+  // a regex scope is not an Ant pattern: unread
+  const regex = await extract("class Sec {\n  public SecurityFilterChain a(HttpSecurity http) {\n    http.regexMatcher(\"/api/.*\").authorizeHttpRequests(a -> a.anyRequest().authenticated());\n    return http.build();\n  }\n}\n");
+  assert.deepEqual(scopes(regex.security_chains[0]), [null, true]);
+});
+
+test("security chains: web.ignoring() literal matchers (WebSecurityCustomizer or configure(WebSecurity)) are a scoped chain permitting exactly them, verb kept; a non-literal ignore is only noted", async () => {
+  const x = await extract(
+    "class Sec {\n  @Bean public WebSecurityCustomizer ignore() { return web -> web.ignoring().requestMatchers(\"/css/**\", \"/js/**\").requestMatchers(HttpMethod.GET, \"/open\"); }\n" +
+      "  public void configure(WebSecurity web) { web.ignoring().antMatchers(\"/static/**\"); }\n" +
+      "  public WebSecurityCustomizer dyn() { return web -> web.ignoring().requestMatchers(STATIC); }\n" +
+      "  public WebSecurityCustomizer rx() { return web -> web.ignoring().regexMatchers(\"/api/.*\"); }\n}\n"
+  );
+  assert.deepEqual(x.security_chains.map((c) => [c.line, c.scope, c.scope_unknown, ruleRows(c)]), [
+    [2, [{ http_method: null, patterns: ["/css/**", "/js/**"] }, { http_method: "GET", patterns: ["/open"] }], false, [[2, null, ["/css/**", "/js/**"], "unauthenticated"], [2, "GET", ["/open"], "unauthenticated"]]],
+    [3, [{ http_method: null, patterns: ["/static/**"] }], false, [[3, null, ["/static/**"], "unauthenticated"]]]
+  ]);
+  assert.deepEqual(x.not_extracted, ["security(non-literal matcher)"]);
+});
+
+test("servlet routes: @WebServlet value / urlPatterns / plain literal ⇒ one route per handler method at the method, framework servlet", async () => {
+  const x = await extract(
+    "@WebServlet(value = \"/cmdi-00/BenchmarkTest00001\")\npublic class BenchmarkTest00001 extends HttpServlet {\n" +
+      "  @Override public void doGet(HttpServletRequest request, HttpServletResponse response) { doPost(request, response); }\n" +
+      "  @Override public void doPost(HttpServletRequest request, HttpServletResponse response) { }\n" +
+      "  private void helper() { }\n}\n" +
+      "@WebServlet(urlPatterns = {\"/a\", \"/b\"}, name = \"two\")\nclass Two extends HttpServlet {\n  protected void service(HttpServletRequest q, HttpServletResponse r) { }\n}\n" +
+      "@WebServlet(\"/plain\")\nclass Plain extends HttpServlet {\n  protected void doDelete(HttpServletRequest q, HttpServletResponse r) { }\n}\n" +
+      "@WebServlet(name = \"n\")\nclass NoPath extends HttpServlet {\n  protected void doGet(HttpServletRequest q, HttpServletResponse r) { }\n}\n" +
+      "@WebServlet(PATTERN)\nclass Dyn extends HttpServlet {\n  protected void doGet(HttpServletRequest q, HttpServletResponse r) { }\n}\n"
+  );
+  assert.deepEqual(routeRows(x), [
+    ["GET", "/cmdi-00/BenchmarkTest00001", "BenchmarkTest00001.doGet", [], "servlet"],
+    ["POST", "/cmdi-00/BenchmarkTest00001", "BenchmarkTest00001.doPost", [], "servlet"],
+    ["ANY", "/a", "Two.service", [], "servlet"],
+    ["DELETE", "/plain", "Plain.doDelete", [], "servlet"]
+  ]);
+  assert.deepEqual(x.routes.map((r) => r.line), [3, 4, 9, 13]);
+  assert.deepEqual(x.not_extracted, ["route(multiple servlet patterns)", "route(non-literal path)"]);
+});
+
+test("servlet routes: @ServletSecurity / @RolesAllowed on the class then the method are middleware texts; a @WebFilter or Filter class is noted servlet(filter)", async () => {
+  const x = await extract(
+    "@WebServlet(\"/admin\")\n@ServletSecurity(@HttpConstraint(rolesAllowed = \"admin\"))\nclass S extends HttpServlet {\n" +
+      "  @RolesAllowed(\"admin\") protected void doGet(HttpServletRequest q, HttpServletResponse r) { }\n  protected void doPost(HttpServletRequest q, HttpServletResponse r) { }\n}\n"
+  );
+  assert.deepEqual(routeRows(x), [["GET", "/admin", "S.doGet", ["ServletSecurity", "RolesAllowed"], "servlet"], ["POST", "/admin", "S.doPost", ["ServletSecurity"], "servlet"]]);
+  assert.deepEqual(x.not_extracted, []);
+  const filtered = await extract("@WebFilter(\"/*\")\nclass AuthFilter implements Filter {\n  public void doFilter(ServletRequest q, ServletResponse r, FilterChain c) { }\n}\nclass Plain implements javax.servlet.Filter { }\n");
+  assert.deepEqual(filtered.not_extracted, ["servlet(filter)"]);
+  const subclassed = await extract("class Auth extends jakarta.servlet.http.HttpFilter {\n  protected void doFilter(HttpServletRequest q, HttpServletResponse r, FilterChain c) { }\n}\n");
+  assert.deepEqual(subclassed.not_extracted, ["servlet(filter)"]);
+  const none = await extract("class K { void m() { } }\n");
+  assert.deepEqual(none.not_extracted, []);
+});
+
+test("calls: super.m() carries the enclosing class's superclass and resolves exact to its method", async () => {
+  const { files, results } = await resolveSources({
+    "A.java": "class A {\n  void m() { }\n}\n",
+    "B.java": "class B extends A {\n  void n() { super.m(); }\n  Runnable r = new Runnable() { public void run() { super.toString(); } };\n}\n"
+  });
+  assert.deepEqual(files[1].extract.calls.map((c) => [c.callee_text, c.receiver, c.receiver_class]), [["super.m", null, "A"], ["super.toString", null, null]]);
+  assert.deepEqual(results.filter((r) => r.callee_text === "super.m").map((r) => [r.to?.qualified_name ?? null, r.confidence]), [["A.m", "exact"]]);
 });
 
 // ---- functions and classes ----------------------------------------------------------------------
@@ -392,8 +551,8 @@ test("the java fixture through build-graph: route auth, implicit-this override g
   const { graph, reason } = await buildGraph({ projectDir: dir, scopeRealpath: dir, stacks: ["java"], frameworks: ["spring"], referencesDir: REFERENCES_DIR });
   assert.ok(graph, reason);
   const routes = graph.nodes.filter((n) => n.type === "route").map((r) => [r.http_method, r.path_pattern, r.auth]);
-  // I4: SecurityConfig declares a SecurityFilterChain, so the unmarked Spring routes are unknown
-  assert.deepEqual(routes.sort(), [["GET", "/api/health", "unknown"], ["POST", "/api/run", "authenticated"], ["POST", "/di/run", "unknown"]]);
+  // SecurityConfig's rules: /api/health permitAll, POST /di/** hasRole, anyRequest authenticated; /api/run by its marker
+  assert.deepEqual(routes.sort(), [["GET", "/api/health", "unauthenticated"], ["POST", "/api/run", "authenticated"], ["POST", "/di/run", "authenticated"]]);
   const fn = (file, qn) => graph.nodes.filter((n) => n.type === "function" && n.file === `${SRC}/${file}` && n.qualified_name === qn);
   const [run1, run2] = fn("service/UserService.java", "UserService.run").sort((a, b) => a.line_start - b.line_start);
   assert.ok(run1 && run2 && run1.id !== run2.id, "two UserService.run overloads with distinct ids");
@@ -413,7 +572,8 @@ test("the java fixture through build-graph: route auth, implicit-this override g
   assert.equal(cmd.enclosing_fn, exec.id);
   const sql = graph.nodes.find((n) => n.type === "sink" && n.class === "sql");
   assert.deepEqual([sql.callee, sql.enclosing_fn], ["st.execute", fn("Dao.java", "Dao.find")[0].id]);
-  assert.ok(graph.stats.coverage_matrix.java.not_extracted.includes("SecurityFilterChain matchers"));
+  // the chain's rules were read: no file-level hint is left
+  assert.deepEqual(graph.stats.coverage_matrix.java.not_extracted, []);
   const imports = graph.edges.filter((e) => e.type === "imports" && e.specifier === "com.ex.service.UserService");
   assert.deepEqual(imports.map((e) => e.confidence), ["exact"]);
 });

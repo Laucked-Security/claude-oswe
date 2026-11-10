@@ -129,7 +129,7 @@ functions, calls, routes, sinks — identifiers and line numbers only, never sou
 helper. **Do not build or reason about the graph by hand.** Write
 `{ "projectDir": "${CLAUDE_PROJECT_DIR}", "scope_realpath": "<confined scope from §1>", "stacks": [<detected stacks: php|node|python|java|dotnet>], "frameworks": [<detected framework ids>], "referencesDir": "${CLAUDE_PLUGIN_ROOT}/skills/audit/references" }`
 to a literal temp file, where `frameworks` uses **only** the ids `express`, `nest`, `flask`, `django`,
-`fastapi`, `spring`, `laravel`, `symfony`, `aspnet` (a detected framework outside this list is simply
+`fastapi`, `spring`, `servlet`, `laravel`, `symfony`, `aspnet` (a detected framework outside this list is simply
 omitted — its files are still parsed, just without a route extractor). Omit `excludes`: the helper's
 defaults mirror the recon exclusion list above. Choose the run-long literal **`<graph-token>`** now
 (e.g. `g4b81d2c`) and **reuse this literal token wherever the graph file is named** (§2, §3, §5.5, §7);
